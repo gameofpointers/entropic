@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { Send, Sparkles, X, Loader2, ExternalLink, Paperclip, MessageSquare, Calendar, Globe, Mail, Activity, TrendingUp, FolderPlus } from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
@@ -10,6 +10,7 @@ import { ChannelSetupModal } from "../components/ChannelSetupModal";
 import { MarkdownContent } from "../components/MarkdownContent";
 import { useAuth } from "../contexts/AuthContext";
 import { syncAllIntegrationsToGateway, getCachedIntegrationProviders, getIntegrations } from "../lib/integrations";
+import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import type { Page } from "../components/Layout";
 
 // NOTE: Most type definitions are omitted for brevity in this example
@@ -20,6 +21,58 @@ type PendingAttachment = { id: string; fileName: string; tempPath: string; saved
 type AuthState = { active_provider: string | null; providers: Array<{ id: string; has_key: boolean }> };
 type CalendarEvent = { id?: string; summary?: string; start?: string; end?: string; attendees?: Array<{ email?: string; displayName?: string }> };
 type ToolError = { tool?: string; error?: string; status?: string };
+
+// ── Local chat persistence ─────────────────────────────────────
+const CHAT_STORE_FILE = "nova-chat-history.json";
+const MAX_PERSISTED_SESSIONS = 50;
+const MAX_PERSISTED_MESSAGES = 200;
+
+type PersistedChatData = {
+  sessions: ChatSession[];
+  messages: Record<string, Message[]>; // sessionKey -> messages
+  currentSession: string | null;
+};
+
+let _chatStore: TauriStore | null = null;
+async function getChatStore(): Promise<TauriStore> {
+  if (!_chatStore) {
+    _chatStore = await TauriStore.load(CHAT_STORE_FILE);
+  }
+  return _chatStore;
+}
+
+async function persistChatData(data: PersistedChatData): Promise<void> {
+  try {
+    const store = await getChatStore();
+    // Keep only recent sessions
+    const trimmed: PersistedChatData = {
+      sessions: data.sessions.slice(0, MAX_PERSISTED_SESSIONS),
+      messages: {},
+      currentSession: data.currentSession,
+    };
+    for (const s of trimmed.sessions) {
+      const msgs = data.messages[s.key];
+      if (msgs && msgs.length > 0) {
+        trimmed.messages[s.key] = msgs.slice(-MAX_PERSISTED_MESSAGES);
+      }
+    }
+    await store.set("chatData", trimmed);
+    await store.save();
+  } catch (err) {
+    console.warn("[Nova] Failed to persist chat data:", err);
+  }
+}
+
+async function loadPersistedChatData(): Promise<PersistedChatData | null> {
+  try {
+    const store = await getChatStore();
+    const data = await store.get("chatData") as PersistedChatData | null;
+    return data;
+  } catch (err) {
+    console.warn("[Nova] Failed to load persisted chat data:", err);
+    return null;
+  }
+}
 
 function extractJsonBlocks(text: string): Array<{ jsonText: string; start: number; end: number }> {
   const blocks: Array<{ jsonText: string; start: number; end: number }> = [];
@@ -368,6 +421,10 @@ export function Chat({
   }>({});
   const lastEventByRunIdRef = useRef<Record<string, number>>({});
   const lastIntegrationsSyncRef = useRef<number>(0);
+  // Local persistence: cache messages per session key
+  const sessionMessagesRef = useRef<Record<string, Message[]>>({});
+  const persistTimerRef = useRef<number | null>(null);
+  const restoredFromCacheRef = useRef(false);
 
   useEffect(() => {
     invoke<{
@@ -381,6 +438,71 @@ export function Chat({
         });
       })
       .catch(() => {});
+  }, []);
+
+  // Restore sessions from local cache on mount
+  useEffect(() => {
+    if (restoredFromCacheRef.current) return;
+    restoredFromCacheRef.current = true;
+    loadPersistedChatData().then((cached) => {
+      if (!cached) return;
+      if (cached.sessions.length > 0) {
+        setSessions(cached.sessions);
+        sessionMessagesRef.current = cached.messages || {};
+        const restoreKey = cached.currentSession || cached.sessions[0].key;
+        setCurrentSession(restoreKey);
+        const restoredMsgs = cached.messages[restoreKey] || [];
+        setMessages(restoredMsgs);
+        if (restoredMsgs.length > 0) setShowWelcome(false);
+      }
+    });
+  }, []);
+
+  // Debounced persistence: save to Tauri Store when sessions/messages change
+  const schedulePersist = useCallback(() => {
+    if (persistTimerRef.current) window.clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = window.setTimeout(() => {
+      persistTimerRef.current = null;
+      // Snapshot current state
+      const sessionsSnap = sessionsRef.current;
+      const currentSnap = currentSessionRef.current;
+      const messagesSnap = { ...sessionMessagesRef.current };
+      persistChatData({
+        sessions: sessionsSnap,
+        messages: messagesSnap,
+        currentSession: currentSnap,
+      });
+    }, 500);
+  }, []);
+
+  // Keep a ref to sessions for persistence
+  const sessionsRef = useRef<ChatSession[]>([]);
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  // Keep session messages ref in sync with current messages state
+  useEffect(() => {
+    if (currentSession && messages.length > 0) {
+      sessionMessagesRef.current[currentSession] = messages;
+    }
+  }, [messages, currentSession]);
+
+  // Persist on unmount (navigation away)
+  useEffect(() => {
+    return () => {
+      if (persistTimerRef.current) window.clearTimeout(persistTimerRef.current);
+      const sessionsSnap = sessionsRef.current;
+      const currentSnap = currentSessionRef.current;
+      const messagesSnap = { ...sessionMessagesRef.current };
+      if (sessionsSnap.length > 0) {
+        persistChatData({
+          sessions: sessionsSnap,
+          messages: messagesSnap,
+          currentSession: currentSnap,
+        });
+      }
+    };
   }, []);
 
   function addDiag(message: string) {
@@ -600,6 +722,22 @@ export function Chat({
             .catch((err) => addDiag(`routing revert failed: ${String(err)}`));
         }
         delete runRevertModelRef.current[event.runId];
+
+        // Persist the full conversation after assistant response completes
+        if (currentSessionRef.current) {
+          // Refresh session list from gateway to get derived titles
+          clientRef.current?.listSessions().then((updatedSessions) => {
+            if (updatedSessions && updatedSessions.length > 0) {
+              setSessions(prev => {
+                // Merge: gateway sessions take priority, keep local-only sessions
+                const gatewayKeys = new Set(updatedSessions.map(s => s.key));
+                const localOnly = prev.filter(s => !gatewayKeys.has(s.key) && (sessionMessagesRef.current[s.key]?.length ?? 0) > 0);
+                return [...updatedSessions, ...localOnly];
+              });
+            }
+          }).catch(() => {});
+          schedulePersist();
+        }
       }
     } else if (event.state === "error") {
       setError(event.errorMessage || "Chat error");
@@ -612,10 +750,42 @@ export function Chat({
   }
 
   async function loadSessions() {
-    const sessions = await clientRef.current?.listSessions() || [];
-    setSessions(sessions);
-    if (sessions.length > 0) {
-      selectSession(sessions[0].key);
+    const gatewaySessions = await clientRef.current?.listSessions() || [];
+
+    // Merge with locally cached sessions
+    const cached = await loadPersistedChatData();
+    const gatewayKeys = new Set(gatewaySessions.map(s => s.key));
+
+    // Keep local sessions that have messages but aren't on the gateway
+    // (e.g., from a previous container restart)
+    const localOnly: ChatSession[] = [];
+    if (cached?.sessions) {
+      for (const s of cached.sessions) {
+        if (!gatewayKeys.has(s.key) && cached.messages[s.key]?.length > 0) {
+          localOnly.push(s);
+        }
+      }
+    }
+
+    const merged = [...gatewaySessions, ...localOnly];
+    setSessions(merged);
+
+    // Restore messages cache from persisted data
+    if (cached?.messages) {
+      for (const [key, msgs] of Object.entries(cached.messages)) {
+        if (!sessionMessagesRef.current[key] || sessionMessagesRef.current[key].length === 0) {
+          sessionMessagesRef.current[key] = msgs;
+        }
+      }
+    }
+
+    if (merged.length > 0) {
+      // Prefer restoring the previously active session
+      const preferredKey = cached?.currentSession;
+      const target = preferredKey && merged.find(s => s.key === preferredKey)
+        ? preferredKey
+        : merged[0].key;
+      selectSession(target);
     } else {
       createNewSession();
     }
@@ -623,24 +793,35 @@ export function Chat({
 
   async function selectSession(sessionId: string) {
     setCurrentSession(sessionId);
+    // Try to load from gateway first
     const history = await clientRef.current?.getChatHistory(sessionId, HISTORY_LIMIT) || [];
     if (currentSessionRef.current && currentSessionRef.current !== sessionId) {
       return;
     }
-    const msgs: Message[] = history
-      .map((m: any, i: number) => normalizeGatewayMessage(m as GatewayMessage, `h-${i}`))
-      .filter((m: Message | null): m is Message => !!m && m.content.trim().length > 0);
+    let msgs: Message[];
+    if (history.length > 0) {
+      msgs = history
+        .map((m: any, i: number) => normalizeGatewayMessage(m as GatewayMessage, `h-${i}`))
+        .filter((m: Message | null): m is Message => !!m && m.content.trim().length > 0);
+    } else {
+      // Fall back to locally cached messages
+      msgs = sessionMessagesRef.current[sessionId] || [];
+    }
     setMessages(msgs);
+    sessionMessagesRef.current[sessionId] = msgs;
     if (msgs.length > 0) {
       setShowWelcome(false);
     }
+    schedulePersist();
   }
 
   function createNewSession() {
     const sessionKey = clientRef.current!.createSessionKey();
     setCurrentSession(sessionKey);
     setMessages([]);
+    sessionMessagesRef.current[sessionKey] = [];
     setShowWelcome(true);
+    schedulePersist();
   }
 
   async function handleSend(content?: string) {
@@ -649,6 +830,19 @@ export function Chat({
 
     const userMessage: Message = { id: crypto.randomUUID(), role: "user", content: messageContent };
     setMessages(prev => [...prev, userMessage]);
+
+    // Persist the user message immediately so it survives navigation
+    if (currentSession) {
+      const cachedMsgs = sessionMessagesRef.current[currentSession] || [];
+      sessionMessagesRef.current[currentSession] = [...cachedMsgs, userMessage];
+      // Ensure this session is in the sessions list
+      setSessions(prev => {
+        if (prev.find(s => s.key === currentSession)) return prev;
+        return [{ key: currentSession, updatedAt: Date.now() }, ...prev];
+      });
+      schedulePersist();
+    }
+
     setMessage("");
     setShowWelcome(false);
     setIsLoading(true);
