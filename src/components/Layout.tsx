@@ -79,7 +79,7 @@ function relativeTime(ts?: number | null): string {
 }
 
 function sessionTitle(s: ChatSession): string {
-  return s.label || s.displayName || s.derivedTitle || `Chat ${s.key.slice(0, 8)}`;
+  return s.label || s.derivedTitle || s.displayName || `Chat ${s.key.slice(0, 8)}`;
 }
 
 export function Layout({
@@ -277,7 +277,21 @@ export function Layout({
             return (
               <div key={item.id}>
                 <button
-                  onClick={() => isChat ? onNewChat?.() : onNavigate(item.id)}
+                  onClick={() => {
+                    if (!isChat) {
+                      onNavigate(item.id);
+                      return;
+                    }
+                    if (currentPage === "chat") {
+                      onNewChat?.();
+                      return;
+                    }
+                    if (currentChatSession) {
+                      onSelectChatSession?.(currentChatSession);
+                      return;
+                    }
+                    onNavigate("chat");
+                  }}
                     className={clsx(
                       "w-full flex items-center rounded-md text-[13px] font-medium transition-all duration-200",
                       sidebarCollapsed ? "justify-center px-1.5 py-2" : "gap-3 px-3 py-2",

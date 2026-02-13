@@ -2126,7 +2126,7 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
     if !check.stdout.is_empty() {
         let current_gateway_token = read_container_env("OPENCLAW_GATEWAY_TOKEN");
         let current_schema = read_container_env("NOVA_GATEWAY_SCHEMA_VERSION");
-        if current_gateway_token.as_deref() == Some("nova-local-gateway")
+        if current_gateway_token.as_deref() == Some(gateway_token.as_str())
             && current_schema.as_deref() == Some(NOVA_GATEWAY_SCHEMA_VERSION)
         {
             apply_agent_settings(&app, &state)?;
@@ -2199,7 +2199,7 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
         "--tmpfs".to_string(),
         "/home/node/.openclaw:rw,noexec,nosuid,nodev,size=50m,uid=1000,gid=1000".to_string(),
         "-e".to_string(),
-        "OPENCLAW_GATEWAY_TOKEN=nova-local-gateway".to_string(),
+        format!("OPENCLAW_GATEWAY_TOKEN={}", gateway_token),
         "-e".to_string(),
         format!("NOVA_GATEWAY_SCHEMA_VERSION={}", NOVA_GATEWAY_SCHEMA_VERSION),
         "-e".to_string(),
@@ -2332,7 +2332,6 @@ pub async fn start_gateway_with_proxy(
     model: String,
     image_model: Option<String>,
 ) -> Result<(), String> {
-    let proxy_token = gateway_token.clone();
     // Convert localhost URLs to host.docker.internal for Docker container access
     let docker_proxy_url = if proxy_url.contains("localhost") || proxy_url.contains("127.0.0.1") {
         proxy_url
@@ -2373,13 +2372,12 @@ pub async fn start_gateway_with_proxy(
         let current_schema = read_container_env("NOVA_GATEWAY_SCHEMA_VERSION");
         let current_model = read_container_env("OPENCLAW_MODEL");
         let current_image = read_container_env("OPENCLAW_IMAGE_MODEL");
-        let current_gateway_token = container_gateway_token();
         let expected_image = image_model.clone().unwrap_or_default();
 
         let proxy_matches = current_proxy.as_deref() == Some(expected_proxy_env.as_str());
         let token_matches = current_token.as_deref() == Some(gateway_token.as_str());
         let gateway_token_matches =
-            current_gateway_token.as_deref() == Some("nova-local-gateway");
+            current_gateway_token.as_deref() == Some(local_gateway_token.as_str());
         let schema_matches = current_schema.as_deref() == Some(NOVA_GATEWAY_SCHEMA_VERSION);
         let model_matches = current_model.as_deref() == Some(model.as_str());
         let image_matches =
@@ -2469,7 +2467,7 @@ pub async fn start_gateway_with_proxy(
         "--tmpfs".to_string(),
         "/home/node/.openclaw:rw,noexec,nosuid,nodev,size=50m,uid=1000,gid=1000".to_string(),
         "-e".to_string(),
-        "OPENCLAW_GATEWAY_TOKEN=nova-local-gateway".to_string(),
+        format!("OPENCLAW_GATEWAY_TOKEN={}", local_gateway_token),
         "-e".to_string(),
         format!("NOVA_GATEWAY_SCHEMA_VERSION={}", NOVA_GATEWAY_SCHEMA_VERSION),
         "-e".to_string(),

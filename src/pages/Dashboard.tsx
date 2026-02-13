@@ -591,8 +591,14 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             onNavigate={setCurrentPage}
             onSessionsChange={(sessions, currentKey) => {
               setChatSessions(sessions);
-              setCurrentChatSession(currentKey);
-              setPendingChatSession(null);
+              setCurrentChatSession((prev) => currentKey ?? prev);
+              setPendingChatSession((pending) => {
+                if (!pending) return pending;
+                if (pending === "__new__") {
+                  return currentKey ? null : pending;
+                }
+                return pending === currentKey ? null : pending;
+              });
               setPendingChatAction(null);
             }}
             requestedSession={pendingChatSession}
@@ -722,6 +728,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       currentChatSession={currentChatSession}
       onSelectChatSession={(key) => {
         setPendingChatSession(key);
+        setCurrentChatSession(key);
         setCurrentPage("chat");
       }}
       onNewChat={() => {

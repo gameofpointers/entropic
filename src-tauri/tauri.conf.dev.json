@@ -41,8 +41,6 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/bin/*",
-      "resources/share/**/*",
       "resources/openclaw-runtime.tar.gz"
     ],
     "category": "DeveloperTool",

@@ -10,6 +10,7 @@ import { ChannelSetupModal } from "../components/ChannelSetupModal";
 import { MarkdownContent } from "../components/MarkdownContent";
 import { useAuth } from "../contexts/AuthContext";
 import { syncAllIntegrationsToGateway, getCachedIntegrationProviders, getIntegrations } from "../lib/integrations";
+import { resolveGatewayAuth } from "../lib/gateway-auth";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import type { Page } from "../components/Layout";
 
@@ -546,6 +547,42 @@ function normalizeUserContent(content: string, fallbackTimestamp?: number | null
   };
 }
 
+function summarizeSessionTitleFromMessages(messages: Message[]): string | null {
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    const normalized = normalizeUserContent(message.content || "", message.sentAt);
+    const text = normalized.content.replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    const maxLen = 72;
+    return text.length > maxLen ? `${text.slice(0, maxLen - 1).trimEnd()}…` : text;
+  }
+  return null;
+}
+
+function isGenericConversationTitle(value: string | null | undefined): boolean {
+  const title = (value || "").trim();
+  if (!title) return true;
+  const lowered = title.toLocaleLowerCase();
+  if (lowered === "nova desktop") return true;
+  if (lowered === "new chat" || lowered === "conversation" || lowered === "chat") return true;
+  if (/^chat\s+[a-f0-9]{8,}$/i.test(title)) return true;
+  return false;
+}
+
+function titleDedupKey(value: string): string {
+  return value.trim().replace(/\s+\(\d+\)\s*$/u, "").toLocaleLowerCase();
+}
+
+function sessionTitleHint(session: ChatSession): string | null {
+  const candidate =
+    session.label?.trim() ||
+    session.derivedTitle?.trim() ||
+    session.displayName?.trim() ||
+    "";
+  if (!candidate || isGenericConversationTitle(candidate)) return null;
+  return candidate;
+}
+
 function formatMessageTime(sentAt?: number | null): string {
   if (!sentAt) return "";
   const date = new Date(sentAt);
@@ -652,7 +689,6 @@ const PROVIDERS: Provider[] = [
 ];
 
 const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:19789";
-const GATEWAY_TOKEN = "nova-local-gateway";
 const HISTORY_LIMIT = 500;
 
 function buildSuggestions(userName: string, hasName: boolean) {
@@ -808,6 +844,34 @@ export function Chat({
   const activeRunIdRef = useRef<string | null>(null);
   const activeRunSessionRef = useRef<string | null>(null);
   const activeRunTimeoutRef = useRef<number | null>(null);
+  const gatewaySessionKeysRef = useRef<Set<string>>(new Set());
+  const visibleMessagesSessionRef = useRef<string | null>(null);
+
+  const applySessionTitles = useCallback((list: ChatSession[]): ChatSession[] => {
+    const normalized = normalizeSessionsList(list);
+    const seen = new Map<string, number>();
+
+    return normalized.map((session) => {
+      if (session.label?.trim()) {
+        return session;
+      }
+
+      const messageSummary = summarizeSessionTitleFromMessages(sessionMessagesRef.current[session.key] || []);
+      const displayName = session.displayName?.trim() || "";
+      const safeDisplayName = !isGenericConversationTitle(displayName) ? displayName : "";
+      const baseTitle = messageSummary || safeDisplayName || `Chat ${session.key.slice(0, 8)}`;
+
+      const key = titleDedupKey(baseTitle);
+      const count = (seen.get(key) || 0) + 1;
+      seen.set(key, count);
+      const dedupedTitle = count === 1 ? baseTitle : `${baseTitle} (${count})`;
+
+      return {
+        ...session,
+        derivedTitle: dedupedTitle,
+      };
+    });
+  }, []);
 
   function isProxyAuthFailure(message?: string | null): boolean {
     if (!message) return false;
@@ -882,21 +946,22 @@ export function Chat({
     loadPersistedChatData().then((cached) => {
       if (!cached) return;
       if (cached.sessions.length > 0) {
-        setSessions(normalizeSessionsList(cached.sessions));
         sessionMessagesRef.current = cached.messages || {};
         for (const [sessionKey, msgs] of Object.entries(sessionMessagesRef.current)) {
           sessionMessagesRef.current[sessionKey] = msgs.map(normalizeCachedMessage);
         }
+        setSessions(applySessionTitles(cached.sessions));
         setDraftsBySession(cached.drafts || {});
         const restoreKey = cached.currentSession || cached.sessions[0].key;
         currentSessionRef.current = restoreKey;
         setCurrentSession(restoreKey);
         const restoredMsgs = (cached.messages[restoreKey] || []).map(normalizeCachedMessage);
+        visibleMessagesSessionRef.current = restoreKey;
         setMessages(restoredMsgs);
         if (restoredMsgs.length > 0) setShowWelcome(false);
       }
     });
-  }, []);
+  }, [applySessionTitles]);
 
   // Debounced persistence: save to Tauri Store when sessions/messages change
   const schedulePersist = useCallback(() => {
@@ -917,6 +982,74 @@ export function Chat({
     }, 500);
   }, []);
 
+  const migrateSessionKey = useCallback((fromKey: string, toKey: string) => {
+    const from = fromKey.trim();
+    const to = toKey.trim();
+    if (!from || !to || from === to) return;
+
+    const fromMessages = sessionMessagesRef.current[from] || [];
+    const toMessages = sessionMessagesRef.current[to] || [];
+    const mergedMessages = toMessages.length >= fromMessages.length ? toMessages : fromMessages;
+    if (mergedMessages.length > 0) {
+      sessionMessagesRef.current[to] = mergedMessages;
+    }
+    delete sessionMessagesRef.current[from];
+
+    setDraftsBySession((prev) => {
+      const fromDraft = prev[from];
+      const toDraft = prev[to];
+      if (typeof fromDraft !== "string" || fromDraft.length === 0) {
+        return prev;
+      }
+      if (typeof toDraft === "string" && toDraft.length > 0) {
+        const next = { ...prev };
+        delete next[from];
+        return next;
+      }
+      const next = { ...prev, [to]: fromDraft };
+      delete next[from];
+      return next;
+    });
+
+    if (currentSessionRef.current === from) {
+      currentSessionRef.current = to;
+      setCurrentSession(to);
+      visibleMessagesSessionRef.current = to;
+      setMessages(mergedMessages);
+      setShowWelcome(mergedMessages.length === 0);
+    }
+    if (activeRunSessionRef.current === from) {
+      activeRunSessionRef.current = to;
+    }
+
+    setSessions((prev) => {
+      const byKey = new Map<string, ChatSession>();
+      for (const session of prev) {
+        byKey.set(session.key, session);
+      }
+      const fromSession = byKey.get(from);
+      const toSession = byKey.get(to);
+      if (fromSession) {
+        const mergedSession = toSession
+          ? {
+              ...fromSession,
+              ...toSession,
+              key: to,
+              label: toSession.label ?? fromSession.label,
+              pinned: toSession.pinned ?? fromSession.pinned,
+              updatedAt: Math.max(fromSession.updatedAt ?? 0, toSession.updatedAt ?? 0) || null,
+            }
+          : { ...fromSession, key: to };
+        byKey.set(to, mergedSession);
+        byKey.delete(from);
+      }
+      return applySessionTitles(normalizeSessionsList([...byKey.values()]));
+    });
+
+    addDiag(`session remap ${from} -> ${to}`);
+    schedulePersist();
+  }, [applySessionTitles, schedulePersist]);
+
   // Keep a ref to sessions for persistence
   const sessionsRef = useRef<ChatSession[]>([]);
   useEffect(() => {
@@ -925,7 +1058,10 @@ export function Chat({
 
   // Keep session messages ref in sync with current messages state
   useEffect(() => {
-    if (currentSession && messages.length > 0) {
+    if (currentSession) {
+      if (visibleMessagesSessionRef.current !== currentSession) {
+        return;
+      }
       sessionMessagesRef.current[currentSession] = messages;
     }
   }, [messages, currentSession]);
@@ -986,6 +1122,9 @@ export function Chat({
 
   // Emit session list to parent (for sidebar rendering)
   useEffect(() => {
+    if (!sessions.length && !currentSession) {
+      return;
+    }
     onSessionsChange?.(sessions, currentSession);
   }, [sessions, currentSession]);
 
@@ -1033,7 +1172,13 @@ export function Chat({
       setProviderStatus(state.providers);
       setConnectedProvider(state.active_provider || state.providers.find(p => p.has_key)?.id || null);
     }).catch(console.error);
-    invoke<string>("get_gateway_ws_url").then(url => url && setGatewayUrl(url)).catch(console.error);
+    resolveGatewayAuth()
+      .then(({ wsUrl }) => {
+        if (wsUrl) setGatewayUrl(wsUrl);
+      })
+      .catch(() => {
+        invoke<string>("get_gateway_ws_url").then(url => url && setGatewayUrl(url)).catch(console.error);
+      });
   }, []);
 
   // If authenticated via proxy, treat as connected even without local API keys
@@ -1086,8 +1231,13 @@ export function Chat({
     setIsConnecting(true);
     setError(null);
     try {
-      addDiag(`connect -> ${gatewayUrl}`);
-      const client = createGatewayClient(gatewayUrl, GATEWAY_TOKEN);
+      const auth = await resolveGatewayAuth();
+      const wsUrl = auth.wsUrl || gatewayUrl || DEFAULT_GATEWAY_URL;
+      if (wsUrl !== gatewayUrl) {
+        setGatewayUrl(wsUrl);
+      }
+      addDiag(`connect -> ${wsUrl}`);
+      const client = createGatewayClient(wsUrl, auth.token);
       clientRef.current = client;
       detachGatewayListeners(client);
       const onConnected = () => {
@@ -1228,6 +1378,15 @@ export function Chat({
     if (event?.runId) {
       lastEventByRunIdRef.current[event.runId] = Date.now();
     }
+    if (
+      event?.runId &&
+      activeRunIdRef.current === event.runId &&
+      event?.sessionKey &&
+      activeRunSessionRef.current &&
+      event.sessionKey !== activeRunSessionRef.current
+    ) {
+      migrateSessionKey(activeRunSessionRef.current, event.sessionKey);
+    }
     const isActiveRunTerminalEvent = Boolean(
       event?.runId &&
       activeRunIdRef.current === event.runId &&
@@ -1344,11 +1503,12 @@ export function Chat({
           // Refresh session list from gateway to get derived titles
           clientRef.current?.listSessions().then((updatedSessions) => {
             if (updatedSessions && updatedSessions.length > 0) {
+              gatewaySessionKeysRef.current = new Set(updatedSessions.map((s) => s.key));
               setSessions(prev => {
                 // Merge: gateway sessions take priority, keep local-only sessions
                 const gatewayKeys = new Set(updatedSessions.map(s => s.key));
                 const localOnly = prev.filter(s => !gatewayKeys.has(s.key) && (sessionMessagesRef.current[s.key]?.length ?? 0) > 0);
-                return overlaySessionMetadata([...updatedSessions, ...localOnly], prev);
+                return applySessionTitles(overlaySessionMetadata([...updatedSessions, ...localOnly], prev));
               });
             }
           }).catch(() => {});
@@ -1381,38 +1541,87 @@ export function Chat({
 
   async function loadSessions() {
     const gatewaySessions = await clientRef.current?.listSessions() || [];
+    gatewaySessionKeysRef.current = new Set(gatewaySessions.map((s) => s.key));
 
     // Merge with locally cached sessions
     const cached = await loadPersistedChatData();
     const gatewayKeys = new Set(gatewaySessions.map(s => s.key));
+    const gatewayTitleIndex = new Map<string, string>();
+    for (const session of gatewaySessions) {
+      const hint = sessionTitleHint(session);
+      if (!hint) continue;
+      const key = titleDedupKey(hint);
+      if (key && !gatewayTitleIndex.has(key)) {
+        gatewayTitleIndex.set(key, session.key);
+      }
+    }
 
     // Keep local sessions that have messages but aren't on the gateway
     // (e.g., from a previous container restart)
     const localOnly: ChatSession[] = [];
+    const localToGateway = new Map<string, string>();
+    const claimedGatewayTargets = new Set<string>();
     if (cached?.sessions) {
       for (const s of cached.sessions) {
-        if (!gatewayKeys.has(s.key) && cached.messages[s.key]?.length > 0) {
-          localOnly.push(s);
+        if (gatewayKeys.has(s.key)) continue;
+        const rawLocalMessages = cached.messages[s.key] || [];
+        if (rawLocalMessages.length === 0) continue;
+        const normalizedLocalMessages = rawLocalMessages.map(normalizeCachedMessage);
+        const localSummary = summarizeSessionTitleFromMessages(normalizedLocalMessages);
+        const localSummaryKey = localSummary ? titleDedupKey(localSummary) : "";
+        const matchedGatewayKey = localSummaryKey ? gatewayTitleIndex.get(localSummaryKey) : undefined;
+
+        if (matchedGatewayKey && !claimedGatewayTargets.has(matchedGatewayKey)) {
+          claimedGatewayTargets.add(matchedGatewayKey);
+          localToGateway.set(s.key, matchedGatewayKey);
+          const existing = sessionMessagesRef.current[matchedGatewayKey] || [];
+          if (existing.length === 0 || normalizedLocalMessages.length > existing.length) {
+            sessionMessagesRef.current[matchedGatewayKey] = normalizedLocalMessages;
+          }
+          continue;
         }
+
+        localOnly.push(s);
       }
     }
 
     const merged = [...gatewaySessions, ...localOnly];
-    setSessions(prev => overlaySessionMetadata(merged, [...(cached?.sessions || []), ...prev]));
+    setSessions(prev => applySessionTitles(overlaySessionMetadata(merged, [...(cached?.sessions || []), ...prev])));
 
     // Restore messages cache from persisted data
     if (cached?.messages) {
       for (const [key, msgs] of Object.entries(cached.messages)) {
-        if (!sessionMessagesRef.current[key] || sessionMessagesRef.current[key].length === 0) {
-          sessionMessagesRef.current[key] = msgs;
+        const targetKey = localToGateway.get(key) || key;
+        const normalized = msgs.map(normalizeCachedMessage);
+        if (!sessionMessagesRef.current[targetKey] || sessionMessagesRef.current[targetKey].length < normalized.length) {
+          sessionMessagesRef.current[targetKey] = normalized;
+        }
+        if (targetKey !== key) {
+          delete sessionMessagesRef.current[key];
         }
       }
     }
 
+    if (cached?.drafts && localToGateway.size > 0) {
+      setDraftsBySession((prev) => {
+        const next = { ...prev };
+        for (const [from, to] of localToGateway.entries()) {
+          const fromDraft = next[from] ?? cached.drafts[from];
+          if (typeof fromDraft === "string" && fromDraft.length > 0 && !next[to]) {
+            next[to] = fromDraft;
+          }
+          delete next[from];
+        }
+        return next;
+      });
+    }
+
     if (merged.length > 0) {
       // Prefer the active session, then persisted session, then first in list.
-      const activeKey = currentSessionRef.current;
-      const preferredKey = cached?.currentSession;
+      const activeKeyRaw = currentSessionRef.current;
+      const preferredKeyRaw = cached?.currentSession;
+      const activeKey = activeKeyRaw ? localToGateway.get(activeKeyRaw) || activeKeyRaw : null;
+      const preferredKey = preferredKeyRaw ? localToGateway.get(preferredKeyRaw) || preferredKeyRaw : null;
       const target =
         activeKey && merged.find((s) => s.key === activeKey)
           ? activeKey
@@ -1428,27 +1637,45 @@ export function Chat({
   async function selectSession(sessionId: string) {
     currentSessionRef.current = sessionId;
     setCurrentSession(sessionId);
+    setError(null);
+    setIsLoading(false);
+    setThinkingStatus(null);
+    clearActiveRunTracking();
+
+    // Optimistically swap to local cache immediately so the selected chat appears right away.
+    const cachedMsgs = (sessionMessagesRef.current[sessionId] || []).map(normalizeCachedMessage);
+    visibleMessagesSessionRef.current = sessionId;
+    setMessages(cachedMsgs);
+    setShowWelcome(cachedMsgs.length === 0);
+
     // Try to load from gateway first
     let history: GatewayMessage[] = [];
-    try {
-      history = await clientRef.current?.getChatHistory(sessionId, HISTORY_LIMIT) || [];
-    } catch (err) {
-      addDiag(`history load failed for session=${sessionId}: ${String(err)}`);
+    if (gatewaySessionKeysRef.current.has(sessionId)) {
+      try {
+        history = await clientRef.current?.getChatHistory(sessionId, HISTORY_LIMIT) || [];
+      } catch (err) {
+        addDiag(`history load failed for session=${sessionId}: ${String(err)}`);
+      }
+    } else {
+      addDiag(`session=${sessionId} is local-only; using cached history`);
     }
     if (currentSessionRef.current !== sessionId) {
       return;
     }
     let msgs: Message[];
     if (history.length > 0) {
-      msgs = history
+      const parsedHistory = history
         .map((m: any, i: number) => normalizeGatewayMessage(m as GatewayMessage, `h-${i}`))
         .filter((m: Message | null): m is Message => !!m && m.content.trim().length > 0);
+      msgs = parsedHistory.length > 0 ? parsedHistory : cachedMsgs;
     } else {
       // Fall back to locally cached messages
-      msgs = (sessionMessagesRef.current[sessionId] || []).map(normalizeCachedMessage);
+      msgs = cachedMsgs;
     }
+    visibleMessagesSessionRef.current = sessionId;
     setMessages(msgs);
     sessionMessagesRef.current[sessionId] = msgs;
+    setSessions((prev) => applySessionTitles(prev));
     setShowWelcome(msgs.length === 0);
     schedulePersist();
   }
@@ -1457,9 +1684,11 @@ export function Chat({
     if (!action?.key) return;
     if (action.type === "pin") {
       setSessions((prev) =>
-        normalizeSessionsList(
+        applySessionTitles(
+          normalizeSessionsList(
           prev.map((session) =>
             session.key === action.key ? { ...session, pinned: action.pinned } : session,
+          ),
           ),
         ),
       );
@@ -1472,9 +1701,11 @@ export function Chat({
       if (!nextLabel) return;
       const existing = sessionsRef.current.find((session) => session.key === action.key);
       setSessions((prev) =>
-        normalizeSessionsList(
+        applySessionTitles(
+          normalizeSessionsList(
           prev.map((session) =>
             session.key === action.key ? { ...session, label: nextLabel } : session,
+          ),
           ),
         ),
       );
@@ -1486,9 +1717,11 @@ export function Chat({
         setError("Failed to rename chat");
         if (existing) {
           setSessions((prev) =>
-            normalizeSessionsList(
+            applySessionTitles(
+              normalizeSessionsList(
               prev.map((session) =>
                 session.key === action.key ? { ...session, label: existing.label } : session,
+              ),
               ),
             ),
           );
@@ -1507,7 +1740,7 @@ export function Chat({
         sessionsRef.current.filter((session) => session.key !== action.key),
       );
 
-      setSessions(remaining);
+      setSessions(applySessionTitles(remaining));
       const nextMessages = { ...sessionMessagesRef.current };
       delete nextMessages[action.key];
       sessionMessagesRef.current = nextMessages;
@@ -1532,7 +1765,7 @@ export function Chat({
         addDiag(`delete failed key=${action.key}: ${String(err)}`);
         setError("Failed to delete chat");
         if (snapshotSession) {
-          setSessions((prev) => normalizeSessionsList([...prev, snapshotSession]));
+          setSessions((prev) => applySessionTitles(normalizeSessionsList([...prev, snapshotSession])));
           if (snapshotMessages.length > 0) {
             sessionMessagesRef.current[action.key] = snapshotMessages;
           }
@@ -1556,6 +1789,7 @@ export function Chat({
       const existingDraft = draftsRef.current[existing] || "";
       if (existingMessages.length === 0 && existingDraft.trim().length === 0) {
         setCurrentSession(existing);
+        visibleMessagesSessionRef.current = existing;
         setMessages([]);
         setShowWelcome(true);
         return;
@@ -1565,13 +1799,14 @@ export function Chat({
     const sessionKey = clientRef.current?.createSessionKey() || crypto.randomUUID();
     currentSessionRef.current = sessionKey;
     setCurrentSession(sessionKey);
+    visibleMessagesSessionRef.current = sessionKey;
     setMessages([]);
     sessionMessagesRef.current[sessionKey] = [];
     setSessions((prev) => {
       if (prev.some((session) => session.key === sessionKey)) {
         return prev;
       }
-      return normalizeSessionsList([{ key: sessionKey, updatedAt: Date.now() }, ...prev]);
+      return applySessionTitles(normalizeSessionsList([{ key: sessionKey, updatedAt: Date.now() }, ...prev]));
     });
     setDraftsBySession((prev) => ({ ...prev, [sessionKey]: "" }));
     setShowWelcome(true);
@@ -1586,6 +1821,7 @@ export function Chat({
     if (!currentSession || !connected || isLoading || (!messageContent && pendingAttachments.length === 0)) return;
 
     const userMessage: Message = { id: crypto.randomUUID(), role: "user", content: messageContent, sentAt: Date.now() };
+    visibleMessagesSessionRef.current = currentSession;
     setMessages(prev => [...prev, userMessage]);
 
     // Persist the user message immediately so it survives navigation
@@ -1597,7 +1833,7 @@ export function Chat({
         const updated = prev.some((s) => s.key === currentSession)
           ? prev.map((s) => (s.key === currentSession ? { ...s, updatedAt: Date.now() } : s))
           : [{ key: currentSession, updatedAt: Date.now() }, ...prev];
-        return normalizeSessionsList(updated);
+        return applySessionTitles(normalizeSessionsList(updated));
       });
       schedulePersist();
     }
@@ -1680,7 +1916,7 @@ export function Chat({
   }
 
   function sessionTitle(s: ChatSession): string {
-    return s.label || s.displayName || s.derivedTitle || `Chat ${s.key.slice(0, 8)}`;
+    return s.label || s.derivedTitle || s.displayName || `Chat ${s.key.slice(0, 8)}`;
   }
 
   async function handleSuggestionClick(action: SuggestionAction) {
