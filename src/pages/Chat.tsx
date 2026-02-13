@@ -715,6 +715,51 @@ export function Chat({
     }
   }, [showDiagnostics]);
 
+  function isProxyAuthFailure(message?: string | null): boolean {
+    if (!message) return false;
+    const text = message.toLowerCase();
+    if (text.includes("invalid gateway token")) return true;
+    if (text.includes("gateway token validation failed")) return true;
+    if (text.includes("ai provider error: 401")) return true;
+    const has401 = text.includes("401") || text.includes("unauthorized");
+    const looksProxy = text.includes("chat/completions") || text.includes("ai provider");
+    return has401 && looksProxy;
+  }
+
+  function triggerProxyAuthRecovery(source: string) {
+    if (!proxyEnabled || !onRecoverProxyAuth) return;
+    const now = Date.now();
+    const recoveryCooldownMs = 30_000;
+    const inCooldown = now - lastProxyAuthRecoveryAtRef.current < recoveryCooldownMs;
+    if (proxyAuthRecoveryInFlightRef.current || inCooldown) {
+      addDiag(`proxy auth recovery skipped (${source}; already in progress or cooldown)`);
+      return;
+    }
+
+    proxyAuthRecoveryInFlightRef.current = true;
+    lastProxyAuthRecoveryAtRef.current = now;
+    setError("Proxy session expired. Reconnecting securely...");
+    addDiag(`proxy auth failure detected from ${source}; refreshing gateway token`);
+
+    Promise.resolve(onRecoverProxyAuth())
+      .then((ok) => {
+        if (ok) {
+          setError("Proxy session refreshed. Please resend your last message.");
+          addDiag("proxy auth recovery succeeded");
+        } else {
+          setError("Failed to refresh proxy session. Retry from Settings > Gateway.");
+          addDiag("proxy auth recovery failed");
+        }
+      })
+      .catch((err) => {
+        setError("Failed to refresh proxy session. Retry from Settings > Gateway.");
+        addDiag(`proxy auth recovery error: ${String(err)}`);
+      })
+      .finally(() => {
+        proxyAuthRecoveryInFlightRef.current = false;
+      });
+  }
+
   useEffect(() => {
     invoke<{
       imessage_enabled: boolean;
@@ -1105,12 +1150,7 @@ export function Chat({
     if (event.state === "delta" || event.state === "final") {
       const normalized = event.message ? normalizeGatewayMessage(event.message as GatewayMessage, event.runId) : null;
       const text = normalized?.content ?? "";
-      const hasRenderableAssistantPayload = Boolean(
-        normalized?.assistantPayload &&
-        (normalized.assistantPayload.events.length > 0 || normalized.assistantPayload.errors.length > 0)
-      );
-      if (text || hasRenderableAssistantPayload) {
-        setThinkingStatus(null);
+      if (text) {
         if (isProxyAuthFailure(text)) {
           triggerProxyAuthRecovery("chat message");
         }
@@ -1130,7 +1170,6 @@ export function Chat({
               content: text,
               kind: normalized?.kind ?? updated[existingIdx].kind,
               toolName: normalized?.toolName ?? updated[existingIdx].toolName,
-              assistantPayload: normalized?.assistantPayload ?? updated[existingIdx].assistantPayload,
               sentAt: updated[existingIdx].sentAt ?? normalized?.sentAt ?? Date.now(),
             };
             return updated;
@@ -1143,7 +1182,6 @@ export function Chat({
               content: text,
               kind: normalized?.kind,
               toolName: normalized?.toolName,
-              assistantPayload: normalized?.assistantPayload,
               sentAt: normalized?.sentAt ?? Date.now(),
             },
           ];
@@ -1167,38 +1205,6 @@ export function Chat({
             timings.toolSeenAt = Date.now();
             addDiag(`timing tool_result runId=${event.runId} t=${timings.toolSeenAt - timings.startedAt}ms`);
           }
-        }
-      }
-      setMessages(prev => {
-        const existingIdx = prev.findIndex(m => m.id === event.runId && m.role === "assistant");
-        if (existingIdx >= 0) {
-          const updated = [...prev];
-          updated[existingIdx] = {
-            ...updated[existingIdx],
-            content: text,
-            kind: normalized?.kind ?? updated[existingIdx].kind,
-            toolName: normalized?.toolName ?? updated[existingIdx].toolName,
-            sentAt: updated[existingIdx].sentAt ?? normalized?.sentAt ?? Date.now(),
-          };
-          return updated;
-        }
-        return [
-          ...prev,
-          {
-            id: event.runId,
-            role: "assistant",
-            content: text,
-            kind: normalized?.kind,
-            toolName: normalized?.toolName,
-            sentAt: normalized?.sentAt ?? Date.now(),
-          },
-        ];
-      });
-      if (normalized && normalized.kind === "toolResult" && event.runId) {
-        const timings = runTimingsRef.current[event.runId];
-        if (timings && !timings.toolSeenAt) {
-          timings.toolSeenAt = Date.now();
-          addDiag(`timing tool_result runId=${event.runId} t=${timings.toolSeenAt - timings.startedAt}ms`);
         }
       }
       if (event.state === "final" && event.runId) {

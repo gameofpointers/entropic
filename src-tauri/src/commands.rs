@@ -1695,9 +1695,13 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
     cfg["channels"]["slack"]["enabled"] = serde_json::json!(settings.slack_enabled);
     cfg["channels"]["slack"]["botToken"] = serde_json::json!(settings.slack_bot_token.clone());
     cfg["channels"]["slack"]["appToken"] = serde_json::json!(settings.slack_app_token.clone());
-    cfg["channels"]["slack"]["dmPolicy"] = serde_json::json!("pairing");
+    cfg["channels"]["slack"]["dm"]["policy"] = serde_json::json!("pairing");
     cfg["channels"]["slack"]["groupPolicy"] = serde_json::json!("allowlist");
     cfg["channels"]["slack"]["configWrites"] = serde_json::json!(false);
+    if let Some(obj) = cfg["channels"]["slack"].as_object_mut() {
+        // Remove legacy key removed by strict OpenClaw schema.
+        obj.remove("dmPolicy");
+    }
     cfg["plugins"]["entries"]["slack"]["enabled"] = serde_json::json!(settings.slack_enabled);
 
     cfg["channels"]["googlechat"]["enabled"] = serde_json::json!(settings.googlechat_enabled);
@@ -1732,9 +1736,12 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
     cfg["plugins"]["entries"]["googlechat"]["enabled"] =
         serde_json::json!(settings.googlechat_enabled);
 
-    cfg["channels"]["whatsapp"]["enabled"] = serde_json::json!(settings.whatsapp_enabled);
     cfg["channels"]["whatsapp"]["configWrites"] = serde_json::json!(false);
     cfg["channels"]["whatsapp"]["groupPolicy"] = serde_json::json!("allowlist");
+    if let Some(obj) = cfg["channels"]["whatsapp"].as_object_mut() {
+        // Remove legacy key removed by strict OpenClaw schema.
+        obj.remove("enabled");
+    }
     if settings.whatsapp_allow_from.trim().is_empty() {
         cfg["channels"]["whatsapp"]["dmPolicy"] = serde_json::json!("pairing");
         // Remove allowFrom if present (cannot be null, must be array or absent)
@@ -3083,9 +3090,13 @@ pub async fn set_channels_config(
     cfg["channels"]["slack"]["enabled"] = serde_json::json!(slack_enabled);
     cfg["channels"]["slack"]["botToken"] = serde_json::json!(slack_bot_token.clone());
     cfg["channels"]["slack"]["appToken"] = serde_json::json!(slack_app_token.clone());
-    cfg["channels"]["slack"]["dmPolicy"] = serde_json::json!("pairing");
+    cfg["channels"]["slack"]["dm"]["policy"] = serde_json::json!("pairing");
     cfg["channels"]["slack"]["groupPolicy"] = serde_json::json!("allowlist");
     cfg["channels"]["slack"]["configWrites"] = serde_json::json!(false);
+    if let Some(obj) = cfg["channels"]["slack"].as_object_mut() {
+        // Remove legacy key removed by strict OpenClaw schema.
+        obj.remove("dmPolicy");
+    }
     cfg["plugins"]["entries"]["slack"]["enabled"] = serde_json::json!(slack_enabled);
 
     cfg["channels"]["googlechat"]["enabled"] = serde_json::json!(googlechat_enabled);
@@ -3110,9 +3121,12 @@ pub async fn set_channels_config(
     }
     cfg["plugins"]["entries"]["googlechat"]["enabled"] = serde_json::json!(googlechat_enabled);
 
-    cfg["channels"]["whatsapp"]["enabled"] = serde_json::json!(whatsapp_enabled);
     cfg["channels"]["whatsapp"]["configWrites"] = serde_json::json!(false);
     cfg["channels"]["whatsapp"]["groupPolicy"] = serde_json::json!("allowlist");
+    if let Some(obj) = cfg["channels"]["whatsapp"].as_object_mut() {
+        // Remove legacy key removed by strict OpenClaw schema.
+        obj.remove("enabled");
+    }
     if whatsapp_allow_from.is_empty() {
         cfg["channels"]["whatsapp"]["dmPolicy"] = serde_json::json!("pairing");
         // Remove allowFrom if present (cannot be null, must be array or absent)

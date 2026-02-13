@@ -274,6 +274,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             message: "You’re out of credits. Add credits to continue using Nova in proxy mode.",
             actions: [{ label: "Add Credits", onClick: () => setCurrentPage("billing") }],
           });
+          setShowGatewayStartup(false);
           return false;
         }
       } catch (error) {
@@ -303,9 +304,31 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       });
       console.log("[Nova] start_gateway_with_proxy completed");
 
-      await new Promise((r) => setTimeout(r, 2000));
-      await checkGateway();
+      const startedAt = Date.now();
+      let healthy = false;
+      while (Date.now() - startedAt < 20000) {
+        const running = await checkGateway();
+        if (running) {
+          healthy = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      if (!healthy) {
+        setStartupError({
+          message: "Secure sandbox did not become ready in time. Nova will retry.",
+        });
+        if (allowRetry) {
+          scheduleGatewayRetry(() => {
+            startGatewayProxyFlow({ model, image, stopFirst, allowRetry });
+          });
+        } else {
+          setShowGatewayStartup(false);
+        }
+        return false;
+      }
       clearGatewayRetry();
+      setShowGatewayStartup(false);
       return true;
     } catch (error: any) {
       console.error("[Nova] Proxy start failed:", error);
@@ -322,6 +345,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           message: "You’re out of credits. Add credits to continue using Nova in proxy mode.",
           actions: [{ label: "Add Credits", onClick: () => setCurrentPage("billing") }],
         });
+        setShowGatewayStartup(false);
         return false;
       }
 
@@ -330,6 +354,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           message: "Your session expired. Please sign in again.",
           actions: [{ label: "Open Settings", onClick: () => setCurrentPage("settings") }],
         });
+        setShowGatewayStartup(false);
         return false;
       }
 
@@ -341,6 +366,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             { label: "Use Local Keys", onClick: () => persistUseLocalKeys(true) },
           ],
         });
+        setShowGatewayStartup(false);
         return false;
       }
 
@@ -385,6 +411,20 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         if (alreadyRunning) {
           setGatewayRunning(true);
           autoStartAttemptedRef.current = true;
+          // Proactively refresh proxy token/config so stale gateway tokens don't persist across app launches.
+          setIsTogglingGateway(true);
+          try {
+            await startGatewayProxyFlow({
+              model: selectedModel,
+              image: imageModel,
+              stopFirst: false,
+              allowRetry: true,
+            });
+          } catch (error) {
+            console.error("[Nova] Proxy refresh for running gateway failed:", error);
+          } finally {
+            setIsTogglingGateway(false);
+          }
           return;
         }
         autoStartAttemptedRef.current = true;
@@ -410,7 +450,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     autoStartGateway();
   }, [isAuthenticated, isAuthConfigured, gatewayRunning, isTogglingGateway, selectedModel, gatewayRetryIn, imageModel]);
 
-  async function checkGateway() {
+  async function checkGateway(): Promise<boolean> {
     try {
       const running = await getGatewayStatusCached({ force: true });
       setGatewayRunning(running);
@@ -419,9 +459,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         setShowGatewayStartup(false);
         clearGatewayRetry();
       }
+      return running;
     } catch (error) {
       console.error("[Nova] Gateway check failed:", error);
       setGatewayRunning(false);
+      return false;
     }
   }
 
@@ -470,6 +512,33 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     await toggleGateway();
   }
 
+  async function recoverProxyAuthFromChat(): Promise<boolean> {
+    if (!isAuthConfigured || !isAuthenticated || useLocalKeys) {
+      return false;
+    }
+    if (isTogglingGateway) {
+      return false;
+    }
+
+    setIsTogglingGateway(true);
+    try {
+      const started = await startGatewayProxyFlow({
+        model: selectedModel,
+        image: imageModel,
+        stopFirst: false,
+        allowRetry: false,
+      });
+      await new Promise((r) => setTimeout(r, 1200));
+      await checkGateway();
+      return started;
+    } catch (error) {
+      console.error("[Nova] Proxy auth recovery failed:", error);
+      return false;
+    } finally {
+      setIsTogglingGateway(false);
+    }
+  }
+
   // Handle model change - restart gateway with new model
   async function handleModelChange(newModel: string) {
     setSelectedModel(newModel);
@@ -513,6 +582,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             gatewayStarting={gatewayStarting}
             gatewayRetryIn={gatewayRetryIn}
             onStartGateway={startGatewayFromChat}
+            onRecoverProxyAuth={recoverProxyAuthFromChat}
             useLocalKeys={useLocalKeys}
             selectedModel={selectedModel}
             imageModel={imageModel}
