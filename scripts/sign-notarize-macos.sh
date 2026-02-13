@@ -125,7 +125,8 @@ codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
   --deep "$APP_PATH"
 
 echo "Creating DMG..."
-hdiutil create -volname Nova -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
+DMG_BACKGROUND_IMAGE="${DMG_BACKGROUND_IMAGE:-$PROJECT_ROOT/src-tauri/icons/dmg-background.png}"
+"$PROJECT_ROOT/scripts/create-macos-dmg.sh" "$APP_PATH" "$DMG_PATH" "Nova" "$DMG_BACKGROUND_IMAGE"
 
 echo "Signing DMG..."
 codesign --force --timestamp --sign "$SIGN_IDENTITY" \

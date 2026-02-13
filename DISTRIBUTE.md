@@ -78,9 +78,19 @@ codesign --verify --verbose Nova.app
 ## 4. Create DMG
 
 ```bash
-hdiutil create -volname Nova -srcfolder Nova.app -ov -format UDZO ~/Nova.dmg
+./scripts/create-macos-dmg.sh \
+  src-tauri/target/release/bundle/macos/Nova.app \
+  ~/Nova.dmg \
+  "Nova" \
+  src-tauri/icons/dmg-background.png
 codesign --force --timestamp --sign "$CERT" ~/Nova.dmg
 ```
+
+`create-macos-dmg.sh` creates a Finder-friendly installer layout:
+- `Nova.app`
+- `Applications` shortcut
+- `Install Nova.txt`
+- fixed icon placement and optional background image
 
 ## 5. Notarize
 
@@ -220,6 +230,6 @@ security find-identity -v -p codesigning
 | Find certificate | `security find-identity -v -p codesigning \| grep "Developer ID"` |
 | Sign binary | `codesign --force --options runtime --timestamp --sign "$CERT" <file>` |
 | Verify signature | `codesign --verify --verbose Nova.app` |
-| Create DMG | `hdiutil create -volname Nova -srcfolder Nova.app -ov -format UDZO Nova.dmg` |
+| Create DMG | `./scripts/create-macos-dmg.sh src-tauri/target/release/bundle/macos/Nova.app Nova.dmg` |
 | Notarize | `xcrun notarytool submit Nova.dmg --apple-id ... --team-id ... --password ... --wait` |
 | Staple | `xcrun stapler staple Nova.dmg` |

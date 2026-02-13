@@ -231,8 +231,7 @@ jobs:
 
           # Remove stale DMG from previous run
           rm -f "$DMG_NAME"
-
-          hdiutil create -volname "Nova" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_NAME"
+          ./scripts/create-macos-dmg.sh "$APP_PATH" "$DMG_NAME" "Nova" "src-tauri/icons/dmg-background.png"
           codesign --force --timestamp --sign "${{ env.APPLE_SIGNING_IDENTITY_SHA1 }}" "$DMG_NAME"
           echo "dmg_name=$DMG_NAME" >> "$GITHUB_ENV"
 
