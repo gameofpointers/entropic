@@ -528,7 +528,23 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         );
         }
       case "store":
-        return <Store integrationsSyncing={integrationsSyncing} integrationsMissing={integrationsMissing} />;
+        return (
+          <Store
+            view="plugins"
+            integrationsSyncing={integrationsSyncing}
+            integrationsMissing={integrationsMissing}
+            onNavigate={(page) => setCurrentPage(page)}
+          />
+        );
+      case "skills":
+        return (
+          <Store
+            view="skills"
+            integrationsSyncing={integrationsSyncing}
+            integrationsMissing={integrationsMissing}
+            onNavigate={(page) => setCurrentPage(page)}
+          />
+        );
       case "channels":
         return <Channels />;
       case "files":

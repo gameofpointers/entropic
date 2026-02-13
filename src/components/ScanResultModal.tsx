@@ -25,13 +25,15 @@ export type PluginScanResult = {
 
 type Props = {
   isOpen: boolean;
-  pluginName: string;
+  targetName: string;
+  targetType?: "plugin" | "skill";
   scanResult: PluginScanResult | null;
   isScanning: boolean;
   error: string | null;
   onClose: () => void;
-  onEnablePlugin: () => void;
-  onEnableAnyway: () => void;
+  onConfirm?: () => void;
+  confirmLabel?: string;
+  confirmAnywayLabel?: string;
 };
 
 const SEVERITY_COLORS: Record<string, string> = {
@@ -43,8 +45,8 @@ const SEVERITY_COLORS: Record<string, string> = {
 };
 
 export function ScanResultModal({
-  isOpen, pluginName, scanResult, isScanning, error,
-  onClose, onEnablePlugin, onEnableAnyway,
+  isOpen, targetName, targetType = "plugin", scanResult, isScanning, error,
+  onClose, onConfirm, confirmLabel = "Enable Plugin", confirmAnywayLabel = "Enable Anyway",
 }: Props) {
   const [expandedFindings, setExpandedFindings] = useState<Set<number>>(new Set());
 
@@ -67,7 +69,7 @@ export function ScanResultModal({
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-semibold text-[var(--text-primary)]">
-            Security Scan: {pluginName}
+            Security Scan: {targetName}
           </h3>
           <button onClick={onClose}
             className="p-1.5 text-[var(--text-tertiary)] hover:text-[var(--text-primary)] rounded-md hover:bg-black/5">
@@ -79,7 +81,7 @@ export function ScanResultModal({
         {isScanning && (
           <div className="py-12 text-center">
             <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3 text-[var(--text-accent)]" />
-            <p className="text-[var(--text-secondary)]">Scanning plugin for security issues...</p>
+            <p className="text-[var(--text-secondary)]">Scanning {targetType} for security issues...</p>
             <p className="text-xs text-[var(--text-tertiary)] mt-1">Static + behavioral analysis</p>
           </div>
         )}
@@ -167,16 +169,18 @@ export function ScanResultModal({
             {/* Action buttons */}
             <div className="flex gap-3 justify-end">
               <button onClick={onClose} className="btn btn-secondary">Cancel</button>
-              {scanResult.is_safe || !scanResult.scanner_available ? (
-                <button onClick={onEnablePlugin} className="btn btn-primary">Enable Plugin</button>
-              ) : isBlocked ? (
-                <button onClick={onEnableAnyway}
+              {onConfirm && (scanResult.is_safe || !scanResult.scanner_available) && (
+                <button onClick={onConfirm} className="btn btn-primary">{confirmLabel}</button>
+              )}
+              {onConfirm && !scanResult.is_safe && scanResult.scanner_available && isBlocked && (
+                <button onClick={onConfirm}
                   className="btn btn-secondary !text-red-600 !border-red-200">
-                  Enable Anyway
+                  {confirmAnywayLabel}
                 </button>
-              ) : (
-                <button onClick={onEnablePlugin} className="btn btn-primary">
-                  Enable Plugin
+              )}
+              {onConfirm && !scanResult.is_safe && scanResult.scanner_available && !isBlocked && (
+                <button onClick={onConfirm} className="btn btn-primary">
+                  {confirmLabel}
                 </button>
               )}
             </div>

@@ -11,6 +11,7 @@ import {
   Plus,
   Clock,
   Puzzle,
+  Sparkles,
 } from "lucide-react";
 import novaLogo from "../assets/nova-logo.png";
 import type { ChatSession } from "../pages/Chat";
@@ -25,7 +26,7 @@ function startDrag(e: React.MouseEvent) {
   }
 }
 
-export type Page = "chat" | "store" | "channels" | "files" | "tasks" | "logs" | "settings" | "billing";
+export type Page = "chat" | "store" | "skills" | "channels" | "files" | "tasks" | "logs" | "settings" | "billing";
 
 type Props = {
   currentPage: Page;
@@ -42,8 +43,9 @@ type Props = {
 const navItems: { id: Page; label: string; icon: typeof MessageSquare }[] = [
   { id: "files", label: "Home", icon: FolderOpen },
   { id: "chat", label: "New Chat", icon: Plus },
+  { id: "channels", label: "Messaging", icon: Radio },
   { id: "store", label: "Plugins", icon: Puzzle },
-  { id: "channels", label: "Channels", icon: Radio },
+  { id: "skills", label: "Skills", icon: Sparkles },
   { id: "tasks", label: "Tasks", icon: CalendarClock },
   { id: "logs", label: "Logs", icon: ScrollText },
   { id: "billing", label: "Billing", icon: CreditCard },

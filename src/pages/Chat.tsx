@@ -942,7 +942,7 @@ export function Chat({
       const enabled =
         action.channel === "imessage" ? config.imessageEnabled : config.whatsappEnabled;
       if (!enabled) {
-        addDiag(`channel ${action.channel} not configured; redirecting to Channels`);
+        addDiag(`channel ${action.channel} not configured; redirecting to Messaging`);
         onNavigate?.("channels");
         return;
       }

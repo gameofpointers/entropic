@@ -1,7 +1,8 @@
-use crate::runtime::{
-    macos_docker_socket_candidates, Platform, Runtime, RuntimeStatus,
+use crate::runtime::{macos_docker_socket_candidates, Platform, Runtime, RuntimeStatus};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine as _,
 };
-use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine as _};
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -9,8 +10,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::sync::Mutex;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_shell::ShellExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -84,9 +85,12 @@ fn find_docker_binary() -> String {
     if matches!(Platform::detect(), Platform::MacOS) {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(exe_dir) = exe.parent() {
-                let bundled_release = exe_dir
-                    .parent()
-                    .map(|c| c.join("Resources").join("resources").join("bin").join("docker"));
+                let bundled_release = exe_dir.parent().map(|c| {
+                    c.join("Resources")
+                        .join("resources")
+                        .join("bin")
+                        .join("docker")
+                });
                 if let Some(ref p) = bundled_release {
                     let candidate = p.display().to_string();
                     if p.exists() && docker_binary_usable(&candidate) {
@@ -397,6 +401,13 @@ pub struct AgentProfileState {
     pub discord_token: String,
     pub telegram_enabled: bool,
     pub telegram_token: String,
+    pub slack_enabled: bool,
+    pub slack_bot_token: String,
+    pub slack_app_token: String,
+    pub googlechat_enabled: bool,
+    pub googlechat_service_account: String,
+    pub googlechat_audience_type: String,
+    pub googlechat_audience: String,
     pub whatsapp_enabled: bool,
     pub whatsapp_allow_from: String,
 }
@@ -488,6 +499,24 @@ pub struct PluginScanResult {
     pub scanner_available: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SkillInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub path: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ClawhubInstallResult {
+    pub scan: PluginScanResult,
+    pub installed: bool,
+    pub blocked: bool,
+    pub message: Option<String>,
+    pub installed_skill_id: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StoredAuth {
     version: u8,
@@ -517,6 +546,13 @@ struct StoredAgentSettings {
     discord_token: String,
     telegram_enabled: bool,
     telegram_token: String,
+    slack_enabled: bool,
+    slack_bot_token: String,
+    slack_app_token: String,
+    googlechat_enabled: bool,
+    googlechat_service_account: String,
+    googlechat_audience_type: String,
+    googlechat_audience: String,
     whatsapp_enabled: bool,
     whatsapp_allow_from: String,
 }
@@ -557,6 +593,13 @@ impl Default for StoredAgentSettings {
             discord_token: String::new(),
             telegram_enabled: false,
             telegram_token: String::new(),
+            slack_enabled: false,
+            slack_bot_token: String::new(),
+            slack_app_token: String::new(),
+            googlechat_enabled: false,
+            googlechat_service_account: String::new(),
+            googlechat_audience_type: "app-url".to_string(),
+            googlechat_audience: String::new(),
             whatsapp_enabled: false,
             whatsapp_allow_from: String::new(),
         }
@@ -576,10 +619,7 @@ impl Default for StoredAuth {
 }
 
 fn get_runtime(app: &AppHandle) -> Runtime {
-    let resource_dir = app
-        .path()
-        .resource_dir()
-        .unwrap_or_default();
+    let resource_dir = app.path().resource_dir().unwrap_or_default();
     Runtime::new(resource_dir)
 }
 
@@ -604,16 +644,16 @@ fn start_scanner_sidecar() {
         .output();
     if let Ok(out) = &check_all {
         if !out.stdout.is_empty() {
-            let start = docker_command()
-                .args(["start", SCANNER_CONTAINER])
-                .output();
+            let start = docker_command().args(["start", SCANNER_CONTAINER]).output();
             if let Ok(s) = &start {
                 if s.status.success() {
                     return;
                 }
             }
             // Start failed, remove and recreate
-            let _ = docker_command().args(["rm", "-f", SCANNER_CONTAINER]).output();
+            let _ = docker_command()
+                .args(["rm", "-f", SCANNER_CONTAINER])
+                .output();
         }
     }
 
@@ -624,7 +664,9 @@ fn start_scanner_sidecar() {
     match &image_check {
         Ok(out) if out.status.success() => {}
         _ => {
-            eprintln!("[scanner] Image nova-skill-scanner:latest not found, skipping scanner sidecar");
+            eprintln!(
+                "[scanner] Image nova-skill-scanner:latest not found, skipping scanner sidecar"
+            );
             return;
         }
     }
@@ -632,16 +674,24 @@ fn start_scanner_sidecar() {
     // Create and start scanner container
     let run = docker_command()
         .args([
-            "run", "-d",
-            "--name", SCANNER_CONTAINER,
-            "--user", "1000:1000",
+            "run",
+            "-d",
+            "--name",
+            SCANNER_CONTAINER,
+            "--user",
+            "1000:1000",
             "--cap-drop=ALL",
-            "--security-opt", "no-new-privileges",
+            "--security-opt",
+            "no-new-privileges",
             "--read-only",
-            "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=200m",
-            "--volumes-from", &format!("{}:ro", OPENCLAW_CONTAINER),
-            "--network", "nova-net",
-            "-p", "127.0.0.1:19790:8000",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=200m",
+            "--volumes-from",
+            &format!("{}:ro", OPENCLAW_CONTAINER),
+            "--network",
+            "nova-net",
+            "-p",
+            "127.0.0.1:19790:8000",
             "nova-skill-scanner:latest",
         ])
         .output();
@@ -657,9 +707,7 @@ fn start_scanner_sidecar() {
 }
 
 fn stop_scanner_sidecar() {
-    let _ = docker_command()
-        .args(["stop", SCANNER_CONTAINER])
-        .output();
+    let _ = docker_command().args(["stop", SCANNER_CONTAINER]).output();
 }
 
 /// Stop all Nova containers on app exit.
@@ -685,6 +733,238 @@ fn docker_exec_output(args: &[&str]) -> Result<String, String> {
         return Err(stderr.to_string());
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn scanner_running() -> Result<bool, String> {
+    let check = docker_command()
+        .args([
+            "ps",
+            "-q",
+            "-f",
+            &format!("name={}", SCANNER_CONTAINER),
+            "-f",
+            "status=running",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to check scanner: {}", e))?;
+    Ok(!check.stdout.is_empty())
+}
+
+fn is_safe_component(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
+}
+
+fn is_safe_slug(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    for part in trimmed.split('/') {
+        if !is_safe_component(part) {
+            return false;
+        }
+    }
+    true
+}
+
+fn clone_dir_from_openclaw_to_scanner(source_dir: &str, scanner_dir: &str) -> Result<(), String> {
+    docker_exec_output(&["exec", SCANNER_CONTAINER, "rm", "-rf", "--", scanner_dir])?;
+    docker_exec_output(&["exec", SCANNER_CONTAINER, "mkdir", "-p", "--", scanner_dir])?;
+
+    let archive = docker_command()
+        .args([
+            "exec",
+            OPENCLAW_CONTAINER,
+            "tar",
+            "-C",
+            source_dir,
+            "-cf",
+            "-",
+            ".",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to stream source directory: {}", e))?;
+    if !archive.status.success() {
+        let stderr = String::from_utf8_lossy(&archive.stderr);
+        return Err(format!("Failed to archive source directory: {}", stderr));
+    }
+
+    let mut child = docker_command()
+        .args([
+            "exec",
+            "-i",
+            SCANNER_CONTAINER,
+            "tar",
+            "-C",
+            scanner_dir,
+            "-xf",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to copy directory to scanner: {}", e))?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write;
+        stdin
+            .write_all(&archive.stdout)
+            .map_err(|e| format!("Failed to copy directory to scanner: {}", e))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to finalize scanner copy: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Failed to unpack scanner copy: {}", stderr));
+    }
+
+    Ok(())
+}
+
+fn parse_scan_findings(scan_response: &serde_json::Value) -> Vec<ScanFinding> {
+    scan_response
+        .get("findings")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|f| ScanFinding {
+                    analyzer: f
+                        .get("analyzer")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    category: f
+                        .get("category")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    severity: f
+                        .get("severity")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("UNKNOWN")
+                        .to_string(),
+                    title: f
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    description: f
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    file_path: f
+                        .get("file_path")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    line_number: f
+                        .get("line_number")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as u32),
+                    snippet: f
+                        .get("snippet")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    remediation: f
+                        .get("remediation")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_skill_frontmatter(raw: &str) -> (Option<String>, Option<String>) {
+    let mut lines = raw.lines();
+    if lines.next().map(|v| v.trim()) != Some("---") {
+        return (None, None);
+    }
+    let mut name: Option<String> = None;
+    let mut description: Option<String> = None;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            break;
+        }
+        if let Some(rest) = trimmed.strip_prefix("name:") {
+            let value = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+            if !value.is_empty() {
+                name = Some(value);
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("description:") {
+            let value = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+            if !value.is_empty() {
+                description = Some(value);
+            }
+        }
+    }
+    (name, description)
+}
+
+async fn scan_directory_with_scanner(scanner_dir: &str) -> Result<PluginScanResult, String> {
+    let body = serde_json::json!({
+        "skill_directory": scanner_dir,
+        "use_behavioral": true,
+        "use_llm": false,
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let scan_url = if std::path::Path::new("/.dockerenv").exists() {
+        format!("http://{}:8000/scan", SCANNER_CONTAINER)
+    } else {
+        "http://127.0.0.1:19790/scan".to_string()
+    };
+
+    let res = client
+        .post(&scan_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Scan request failed: {}", e))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("Scanner returned {}: {}", status, text));
+    }
+
+    let scan_response: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse scan response: {}", e))?;
+
+    let findings = parse_scan_findings(&scan_response);
+
+    Ok(PluginScanResult {
+        scan_id: scan_response
+            .get("scan_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        is_safe: scan_response
+            .get("is_safe")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        max_severity: scan_response
+            .get("max_severity")
+            .and_then(|v| v.as_str())
+            .unwrap_or("UNKNOWN")
+            .to_string(),
+        findings_count: findings.len() as u32,
+        findings,
+        scanner_available: true,
+    })
 }
 
 fn decode_base64_payload(payload: &str) -> Result<Vec<u8>, String> {
@@ -749,7 +1029,13 @@ fn read_container_env(key: &str) -> Option<String> {
 
 fn container_path_exists(path: &str) -> bool {
     docker_command()
-        .args(["exec", OPENCLAW_CONTAINER, "sh", "-c", &format!("test -d \"{}\"", path)])
+        .args([
+            "exec",
+            OPENCLAW_CONTAINER,
+            "sh",
+            "-c",
+            &format!("test -d \"{}\"", path),
+        ])
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
@@ -770,12 +1056,14 @@ fn apply_default_qmd_memory_config(cfg: &mut serde_json::Value, _slot: &str) {
 }
 
 fn append_nova_skills_mount(docker_args: &mut Vec<String>) {
-    let path = std::env::var("NOVA_SKILLS_PATH")
-        .ok()
-        .and_then(|p| {
-            let trimmed = p.trim().to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
-        });
+    let path = std::env::var("NOVA_SKILLS_PATH").ok().and_then(|p| {
+        let trimmed = p.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
 
     if let Some(host_path) = path {
         docker_args.push("-v".to_string());
@@ -848,16 +1136,28 @@ async fn run_whatsapp_login_script(script: &str) -> Result<serde_json::Value, St
     eprintln!("[WA-DEBUG] [{:.1}s] Starting docker exec", 0.0);
 
     // Check if docker is accessible first
-    eprintln!("[WA-DEBUG] [{:.1}s] Checking docker accessibility...", start.elapsed().as_secs_f64());
-    let docker_check = docker_command()
-        .args(["--version"])
-        .output();
+    eprintln!(
+        "[WA-DEBUG] [{:.1}s] Checking docker accessibility...",
+        start.elapsed().as_secs_f64()
+    );
+    let docker_check = docker_command().args(["--version"]).output();
     match &docker_check {
-        Ok(out) => eprintln!("[WA-DEBUG] [{:.1}s] Docker found: {}", start.elapsed().as_secs_f64(), String::from_utf8_lossy(&out.stdout).trim()),
-        Err(e) => eprintln!("[WA-DEBUG] [{:.1}s] Docker NOT found: {}", start.elapsed().as_secs_f64(), e),
+        Ok(out) => eprintln!(
+            "[WA-DEBUG] [{:.1}s] Docker found: {}",
+            start.elapsed().as_secs_f64(),
+            String::from_utf8_lossy(&out.stdout).trim()
+        ),
+        Err(e) => eprintln!(
+            "[WA-DEBUG] [{:.1}s] Docker NOT found: {}",
+            start.elapsed().as_secs_f64(),
+            e
+        ),
     }
 
-    eprintln!("[WA-DEBUG] [{:.1}s] About to spawn_blocking for docker exec...", start.elapsed().as_secs_f64());
+    eprintln!(
+        "[WA-DEBUG] [{:.1}s] About to spawn_blocking for docker exec...",
+        start.elapsed().as_secs_f64()
+    );
     let script = script.to_string();
     let docker_host = get_docker_host();
     let output = tokio::task::spawn_blocking(move || {
@@ -883,7 +1183,10 @@ async fn run_whatsapp_login_script(script: &str) -> Result<serde_json::Value, St
     .map_err(|e| format!("Task join error: {}", e))?
     .map_err(|e| format!("Failed to run whatsapp login: {}", e))?;
 
-    eprintln!("[WA-DEBUG] [{:.1}s] Docker exec completed", start.elapsed().as_secs_f64());
+    eprintln!(
+        "[WA-DEBUG] [{:.1}s] Docker exec completed",
+        start.elapsed().as_secs_f64()
+    );
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -897,7 +1200,10 @@ async fn run_whatsapp_login_script(script: &str) -> Result<serde_json::Value, St
         let trimmed = line.trim();
         if trimmed.starts_with('{') && trimmed.ends_with('}') {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                eprintln!("[WA-DEBUG] Successfully parsed JSON, total time: {:?}", start.elapsed());
+                eprintln!(
+                    "[WA-DEBUG] Successfully parsed JSON, total time: {:?}",
+                    start.elapsed()
+                );
                 return Ok(val);
             }
         }
@@ -1018,7 +1324,9 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
 
     let mut hb_body = String::from("# HEARTBEAT.md\n\n");
     if settings.heartbeat_tasks.is_empty() {
-        hb_body.push_str("# Keep this file empty (or with only comments) to skip heartbeat API calls.\n");
+        hb_body.push_str(
+            "# Keep this file empty (or with only comments) to skip heartbeat API calls.\n",
+        );
     } else {
         for task in &settings.heartbeat_tasks {
             if !task.trim().is_empty() {
@@ -1063,13 +1371,21 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
             let model = read_container_env("OPENCLAW_MODEL")
                 .map(|m| {
                     let stripped = m.trim_start_matches("openrouter/").to_string();
-                    if stripped == "free" || stripped == "auto" { m } else { stripped }
+                    if stripped == "free" || stripped == "auto" {
+                        m
+                    } else {
+                        stripped
+                    }
                 })
                 .unwrap_or_default();
             let image_model = read_container_env("OPENCLAW_IMAGE_MODEL")
                 .map(|m| {
                     let stripped = m.trim_start_matches("openrouter/").to_string();
-                    if stripped == "free" || stripped == "auto" { m } else { stripped }
+                    if stripped == "free" || stripped == "auto" {
+                        m
+                    } else {
+                        stripped
+                    }
                 })
                 .unwrap_or_default();
             let mut models = Vec::new();
@@ -1115,12 +1431,7 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
         "gmail_get",
         "gmail_send",
     ];
-    const NOVA_X_TOOLS: [&str; 4] = [
-        "x_search",
-        "x_profile",
-        "x_thread",
-        "x_user_tweets",
-    ];
+    const NOVA_X_TOOLS: [&str; 4] = ["x_search", "x_profile", "x_thread", "x_user_tweets"];
     const NOVA_CORE_TOOLS: [&str; 1] = ["image"];
 
     // Enable nova-x plugin if it exists (bundled or mounted).
@@ -1218,6 +1529,47 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
     cfg["channels"]["telegram"]["groups"]["*"]["requireMention"] = serde_json::json!(true);
     cfg["plugins"]["entries"]["telegram"]["enabled"] = serde_json::json!(settings.telegram_enabled);
 
+    cfg["channels"]["slack"]["enabled"] = serde_json::json!(settings.slack_enabled);
+    cfg["channels"]["slack"]["botToken"] = serde_json::json!(settings.slack_bot_token.clone());
+    cfg["channels"]["slack"]["appToken"] = serde_json::json!(settings.slack_app_token.clone());
+    cfg["channels"]["slack"]["dmPolicy"] = serde_json::json!("pairing");
+    cfg["channels"]["slack"]["groupPolicy"] = serde_json::json!("allowlist");
+    cfg["channels"]["slack"]["configWrites"] = serde_json::json!(false);
+    cfg["plugins"]["entries"]["slack"]["enabled"] = serde_json::json!(settings.slack_enabled);
+
+    cfg["channels"]["googlechat"]["enabled"] = serde_json::json!(settings.googlechat_enabled);
+    cfg["channels"]["googlechat"]["audienceType"] = serde_json::json!(if settings
+        .googlechat_audience_type
+        .trim()
+        .is_empty()
+    {
+        "app-url"
+    } else {
+        settings.googlechat_audience_type.trim()
+    });
+    cfg["channels"]["googlechat"]["webhookPath"] = serde_json::json!("/googlechat");
+    cfg["channels"]["googlechat"]["dm"]["policy"] = serde_json::json!("pairing");
+    cfg["channels"]["googlechat"]["groupPolicy"] = serde_json::json!("allowlist");
+    if settings.googlechat_service_account.trim().is_empty() {
+        if let Some(obj) = cfg["channels"]["googlechat"].as_object_mut() {
+            obj.remove("serviceAccount");
+        }
+    } else {
+        cfg["channels"]["googlechat"]["serviceAccount"] =
+            serde_json::json!(settings.googlechat_service_account.clone());
+    }
+    if settings.googlechat_audience.trim().is_empty() {
+        if let Some(obj) = cfg["channels"]["googlechat"].as_object_mut() {
+            obj.remove("audience");
+        }
+    } else {
+        cfg["channels"]["googlechat"]["audience"] =
+            serde_json::json!(settings.googlechat_audience.trim());
+    }
+    cfg["plugins"]["entries"]["googlechat"]["enabled"] =
+        serde_json::json!(settings.googlechat_enabled);
+
+    cfg["channels"]["whatsapp"]["enabled"] = serde_json::json!(settings.whatsapp_enabled);
     cfg["channels"]["whatsapp"]["configWrites"] = serde_json::json!(false);
     cfg["channels"]["whatsapp"]["groupPolicy"] = serde_json::json!("allowlist");
     if settings.whatsapp_allow_from.trim().is_empty() {
@@ -1572,9 +1924,14 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
     let runtime = get_runtime(&app);
     let status = runtime.check_status();
     if !status.docker_ready {
-        if matches!(Platform::detect(), Platform::MacOS) && status.colima_installed && !status.vm_running {
+        if matches!(Platform::detect(), Platform::MacOS)
+            && status.colima_installed
+            && !status.vm_running
+        {
             // Auto-start Colima on macOS if installed
-            runtime.start_colima().map_err(|e| format!("Failed to start Colima: {}", e))?;
+            runtime
+                .start_colima()
+                .map_err(|e| format!("Failed to start Colima: {}", e))?;
         } else if !status.docker_installed {
             let install_msg = match Platform::detect() {
                 Platform::Linux => "Docker is not installed. Please install Docker Engine: sudo apt install docker.io",
@@ -1651,7 +2008,9 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
 
     // Determine which provider/model to use based on active provider, then fall back
     let model = match active_provider.as_deref() {
-        Some("anthropic") if api_keys.contains_key("anthropic") => "anthropic/claude-sonnet-4-20250514",
+        Some("anthropic") if api_keys.contains_key("anthropic") => {
+            "anthropic/claude-sonnet-4-20250514"
+        }
         Some("openai") if api_keys.contains_key("openai") => "openai/gpt-4o",
         Some("google") if api_keys.contains_key("google") => "google/gemini-2.0-flash",
         _ if api_keys.contains_key("anthropic") => "anthropic/claude-sonnet-4-20250514",
@@ -1663,19 +2022,30 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
     // Build docker run command - pass API keys as env vars
     // The entrypoint.sh script creates auth-profiles.json from these
     let mut docker_args = vec![
-        "run".to_string(), "-d".to_string(),
-        "--name".to_string(), "nova-openclaw".to_string(),
-        "--user".to_string(), "1000:1000".to_string(),
-        "--add-host".to_string(), "host.docker.internal:host-gateway".to_string(),
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        "nova-openclaw".to_string(),
+        "--user".to_string(),
+        "1000:1000".to_string(),
+        "--add-host".to_string(),
+        "host.docker.internal:host-gateway".to_string(),
         "--cap-drop=ALL".to_string(),
-        "--security-opt".to_string(), "no-new-privileges".to_string(),
+        "--security-opt".to_string(),
+        "no-new-privileges".to_string(),
         "--read-only".to_string(),
-        "--tmpfs".to_string(), "/tmp:rw,noexec,nosuid,nodev,size=100m".to_string(),
-        "--tmpfs".to_string(), "/run:rw,noexec,nosuid,nodev,size=10m".to_string(),
-        "--tmpfs".to_string(), "/home/node/.openclaw:rw,noexec,nosuid,nodev,size=50m,uid=1000,gid=1000".to_string(),
-        "-e".to_string(), format!("OPENCLAW_GATEWAY_TOKEN={}", gateway_token),
-        "-e".to_string(), format!("OPENCLAW_MODEL={}", model),
-        "-e".to_string(), format!("OPENCLAW_MEMORY_SLOT={}", memory_slot),
+        "--tmpfs".to_string(),
+        "/tmp:rw,noexec,nosuid,nodev,size=100m".to_string(),
+        "--tmpfs".to_string(),
+        "/run:rw,noexec,nosuid,nodev,size=10m".to_string(),
+        "--tmpfs".to_string(),
+        "/home/node/.openclaw:rw,noexec,nosuid,nodev,size=50m,uid=1000,gid=1000".to_string(),
+        "-e".to_string(),
+        format!("OPENCLAW_GATEWAY_TOKEN={}", gateway_token),
+        "-e".to_string(),
+        format!("OPENCLAW_MODEL={}", model),
+        "-e".to_string(),
+        format!("OPENCLAW_MEMORY_SLOT={}", memory_slot),
     ];
 
     // Add API keys as environment variables (entrypoint creates auth-profiles.json from these)
@@ -1703,9 +2073,12 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>) -> Result
 
     // Add remaining args (always use bridge networking)
     docker_args.extend([
-        "-v".to_string(), "nova-openclaw-data:/data".to_string(),
-        "--network".to_string(), "nova-net".to_string(),
-        "-p".to_string(), "127.0.0.1:19789:18789".to_string(),
+        "-v".to_string(),
+        "nova-openclaw-data:/data".to_string(),
+        "--network".to_string(),
+        "nova-net".to_string(),
+        "-p".to_string(),
+        "127.0.0.1:19789:18789".to_string(),
         "openclaw-runtime:latest".to_string(),
     ]);
 
@@ -1812,8 +2185,13 @@ pub async fn start_gateway_with_proxy(
     let runtime = get_runtime(&app);
     let status = runtime.check_status();
     if !status.docker_ready {
-        if matches!(Platform::detect(), Platform::MacOS) && status.colima_installed && !status.vm_running {
-            runtime.start_colima().map_err(|e| format!("Failed to start Colima: {}", e))?;
+        if matches!(Platform::detect(), Platform::MacOS)
+            && status.colima_installed
+            && !status.vm_running
+        {
+            runtime
+                .start_colima()
+                .map_err(|e| format!("Failed to start Colima: {}", e))?;
         } else if !status.docker_installed {
             return Err("Docker is not installed. Please install Docker to continue.".to_string());
         } else {
@@ -1905,23 +2283,37 @@ pub async fn start_gateway_with_proxy(
 
     // Build docker run command with proxy configuration
     let mut docker_args = vec![
-        "run".to_string(), "-d".to_string(),
-        "--name".to_string(), "nova-openclaw".to_string(),
-        "--user".to_string(), "1000:1000".to_string(),
-        "--add-host".to_string(), "host.docker.internal:host-gateway".to_string(),
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        "nova-openclaw".to_string(),
+        "--user".to_string(),
+        "1000:1000".to_string(),
+        "--add-host".to_string(),
+        "host.docker.internal:host-gateway".to_string(),
         "--cap-drop=ALL".to_string(),
-        "--security-opt".to_string(), "no-new-privileges".to_string(),
+        "--security-opt".to_string(),
+        "no-new-privileges".to_string(),
         "--read-only".to_string(),
-        "--tmpfs".to_string(), "/tmp:rw,noexec,nosuid,nodev,size=100m".to_string(),
-        "--tmpfs".to_string(), "/run:rw,noexec,nosuid,nodev,size=10m".to_string(),
-        "--tmpfs".to_string(), "/home/node/.openclaw:rw,noexec,nosuid,nodev,size=50m,uid=1000,gid=1000".to_string(),
-        "-e".to_string(), format!("OPENCLAW_GATEWAY_TOKEN={}", local_gateway_token),
-        "-e".to_string(), format!("OPENCLAW_MODEL={}", model),
-        "-e".to_string(), "OPENCLAW_MEMORY_SLOT=memory-core".to_string(),
-        "-e".to_string(), "NOVA_PROXY_MODE=1".to_string(),
+        "--tmpfs".to_string(),
+        "/tmp:rw,noexec,nosuid,nodev,size=100m".to_string(),
+        "--tmpfs".to_string(),
+        "/run:rw,noexec,nosuid,nodev,size=10m".to_string(),
+        "--tmpfs".to_string(),
+        "/home/node/.openclaw:rw,noexec,nosuid,nodev,size=50m,uid=1000,gid=1000".to_string(),
+        "-e".to_string(),
+        format!("OPENCLAW_GATEWAY_TOKEN={}", local_gateway_token),
+        "-e".to_string(),
+        format!("OPENCLAW_MODEL={}", model),
+        "-e".to_string(),
+        "OPENCLAW_MEMORY_SLOT=memory-core".to_string(),
+        "-e".to_string(),
+        "NOVA_PROXY_MODE=1".to_string(),
         // Nova proxy configuration - OpenClaw will use this as its AI backend (OpenRouter provider)
-        "-e".to_string(), format!("OPENROUTER_API_KEY={}", proxy_token),
-        "-e".to_string(), format!("NOVA_PROXY_BASE_URL={}/v1", docker_proxy_url),
+        "-e".to_string(),
+        format!("OPENROUTER_API_KEY={}", proxy_token),
+        "-e".to_string(),
+        format!("NOVA_PROXY_BASE_URL={}/v1", docker_proxy_url),
     ];
 
     if let Some(image_model) = image_model {
@@ -1939,9 +2331,12 @@ pub async fn start_gateway_with_proxy(
 
     // Add remaining args (always use bridge networking)
     docker_args.extend([
-        "-v".to_string(), "nova-openclaw-data:/data".to_string(),
-        "--network".to_string(), "nova-net".to_string(),
-        "-p".to_string(), "127.0.0.1:19789:18789".to_string(),
+        "-v".to_string(),
+        "nova-openclaw-data:/data".to_string(),
+        "--network".to_string(),
+        "nova-net".to_string(),
+        "-p".to_string(),
+        "127.0.0.1:19789:18789".to_string(),
         "openclaw-runtime:latest".to_string(),
     ]);
 
@@ -1949,9 +2344,15 @@ pub async fn start_gateway_with_proxy(
     if let Ok(source) = std::env::var("NOVA_DEV_OPENCLAW_SOURCE") {
         if !source.trim().is_empty() {
             docker_args.insert(docker_args.len() - 1, "-v".to_string());
-            docker_args.insert(docker_args.len() - 1, format!("{}/dist:/app/dist:ro", source));
+            docker_args.insert(
+                docker_args.len() - 1,
+                format!("{}/dist:/app/dist:ro", source),
+            );
             docker_args.insert(docker_args.len() - 1, "-v".to_string());
-            docker_args.insert(docker_args.len() - 1, format!("{}/extensions:/app/extensions:ro", source));
+            docker_args.insert(
+                docker_args.len() - 1,
+                format!("{}/extensions:/app/extensions:ro", source),
+            );
         }
     }
 
@@ -2009,9 +2410,7 @@ pub async fn start_gateway_with_proxy(
 #[tauri::command]
 pub async fn restart_gateway(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     // Stop and remove existing container (to pick up new env vars)
-    let _ = docker_command()
-        .args(["stop", "nova-openclaw"])
-        .output();
+    let _ = docker_command().args(["stop", "nova-openclaw"]).output();
     let _ = docker_command()
         .args(["rm", "-f", "nova-openclaw"])
         .output();
@@ -2024,7 +2423,14 @@ pub async fn restart_gateway(app: AppHandle, state: State<'_, AppState>) -> Resu
 pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
     // Check if container is running
     let check = docker_command()
-        .args(["ps", "-q", "-f", "name=nova-openclaw", "-f", "status=running"])
+        .args([
+            "ps",
+            "-q",
+            "-f",
+            "name=nova-openclaw",
+            "-f",
+            "status=running",
+        ])
         .output()
         .map_err(|e| format!("Failed to check container: {}", e))?;
 
@@ -2050,7 +2456,12 @@ pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
             println!("[Nova] Gateway health check failed: {}", e);
             // Check if container is actually healthy
             let inspect = docker_command()
-                .args(["inspect", "--format", "{{.State.Health.Status}}", "nova-openclaw"])
+                .args([
+                    "inspect",
+                    "--format",
+                    "{{.State.Health.Status}}",
+                    "nova-openclaw",
+                ])
                 .output();
 
             if let Ok(output) = inspect {
@@ -2112,7 +2523,11 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         .and_then(|v| v.get("memory"))
         .and_then(|v| v.as_str())
         .unwrap_or(if stored.memory_enabled {
-            if stored.memory_long_term { "memory-lancedb" } else { "memory-core" }
+            if stored.memory_long_term {
+                "memory-lancedb"
+            } else {
+                "memory-core"
+            }
         } else {
             "none"
         });
@@ -2123,9 +2538,7 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         _ => (true, false),
     };
 
-    let imessage_cfg = cfg
-        .get("channels")
-        .and_then(|v| v.get("imessage"));
+    let imessage_cfg = cfg.get("channels").and_then(|v| v.get("imessage"));
     let imessage_enabled = imessage_cfg
         .and_then(|v| v.get("enabled"))
         .and_then(|v| v.as_bool())
@@ -2172,6 +2585,43 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         .unwrap_or(&stored.telegram_token)
         .to_string();
 
+    let slack_cfg = cfg.get("channels").and_then(|v| v.get("slack"));
+    let slack_enabled = slack_cfg
+        .and_then(|v| v.get("enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(stored.slack_enabled);
+    let slack_bot_token = slack_cfg
+        .and_then(|v| v.get("botToken"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(&stored.slack_bot_token)
+        .to_string();
+    let slack_app_token = slack_cfg
+        .and_then(|v| v.get("appToken"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(&stored.slack_app_token)
+        .to_string();
+
+    let googlechat_cfg = cfg.get("channels").and_then(|v| v.get("googlechat"));
+    let googlechat_enabled = googlechat_cfg
+        .and_then(|v| v.get("enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(stored.googlechat_enabled);
+    let googlechat_service_account = googlechat_cfg
+        .and_then(|v| v.get("serviceAccount"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(&stored.googlechat_service_account)
+        .to_string();
+    let googlechat_audience_type = googlechat_cfg
+        .and_then(|v| v.get("audienceType"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(&stored.googlechat_audience_type)
+        .to_string();
+    let googlechat_audience = googlechat_cfg
+        .and_then(|v| v.get("audience"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(&stored.googlechat_audience)
+        .to_string();
+
     let whatsapp_cfg = cfg.get("channels").and_then(|v| v.get("whatsapp"));
     let whatsapp_enabled = whatsapp_cfg
         .and_then(|v| v.get("enabled"))
@@ -2215,11 +2665,19 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
     };
 
     Ok(AgentProfileState {
-        soul: if soul.trim().is_empty() { stored.soul } else { soul },
+        soul: if soul.trim().is_empty() {
+            stored.soul
+        } else {
+            soul
+        },
         heartbeat_every,
         heartbeat_tasks: final_tasks,
         memory_enabled,
-        memory_long_term: if memory_slot == "none" { false } else { memory_long_term },
+        memory_long_term: if memory_slot == "none" {
+            false
+        } else {
+            memory_long_term
+        },
         capabilities,
         imessage_enabled,
         imessage_cli_path,
@@ -2230,6 +2688,13 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         discord_token,
         telegram_enabled,
         telegram_token,
+        slack_enabled,
+        slack_bot_token,
+        slack_app_token,
+        googlechat_enabled,
+        googlechat_service_account,
+        googlechat_audience_type,
+        googlechat_audience,
         whatsapp_enabled,
         whatsapp_allow_from,
     })
@@ -2260,7 +2725,11 @@ pub async fn sync_onboarding_to_settings(
 }
 
 #[tauri::command]
-pub async fn set_heartbeat(app: AppHandle, every: String, tasks: Vec<String>) -> Result<(), String> {
+pub async fn set_heartbeat(
+    app: AppHandle,
+    every: String,
+    tasks: Vec<String>,
+) -> Result<(), String> {
     let mut cfg = read_openclaw_config();
     let heartbeat = serde_json::json!({ "every": every });
     cfg["agents"]["defaults"]["heartbeat"] = heartbeat;
@@ -2268,7 +2737,9 @@ pub async fn set_heartbeat(app: AppHandle, every: String, tasks: Vec<String>) ->
 
     let mut body = String::from("# HEARTBEAT.md\n\n");
     if tasks.is_empty() {
-        body.push_str("# Keep this file empty (or with only comments) to skip heartbeat API calls.\n");
+        body.push_str(
+            "# Keep this file empty (or with only comments) to skip heartbeat API calls.\n",
+        );
     } else {
         for task in &tasks {
             if !task.trim().is_empty() {
@@ -2411,12 +2882,27 @@ pub async fn set_channels_config(
     discord_token: String,
     telegram_enabled: bool,
     telegram_token: String,
+    slack_enabled: bool,
+    slack_bot_token: String,
+    slack_app_token: String,
+    googlechat_enabled: bool,
+    googlechat_service_account: String,
+    googlechat_audience_type: String,
+    googlechat_audience: String,
     whatsapp_enabled: bool,
     whatsapp_allow_from: String,
 ) -> Result<(), String> {
     let mut cfg = read_openclaw_config();
     let discord_token = discord_token.trim().to_string();
     let telegram_token = telegram_token.trim().to_string();
+    let slack_bot_token = slack_bot_token.trim().to_string();
+    let slack_app_token = slack_app_token.trim().to_string();
+    let googlechat_service_account = googlechat_service_account.trim().to_string();
+    let googlechat_audience = googlechat_audience.trim().to_string();
+    let googlechat_audience_type = match googlechat_audience_type.trim() {
+        "project-number" => "project-number".to_string(),
+        _ => "app-url".to_string(),
+    };
     let whatsapp_allow_from = whatsapp_allow_from.trim().to_string();
 
     cfg["channels"]["discord"]["enabled"] = serde_json::json!(discord_enabled);
@@ -2433,6 +2919,37 @@ pub async fn set_channels_config(
     cfg["channels"]["telegram"]["groups"]["*"]["requireMention"] = serde_json::json!(true);
     cfg["plugins"]["entries"]["telegram"]["enabled"] = serde_json::json!(telegram_enabled);
 
+    cfg["channels"]["slack"]["enabled"] = serde_json::json!(slack_enabled);
+    cfg["channels"]["slack"]["botToken"] = serde_json::json!(slack_bot_token.clone());
+    cfg["channels"]["slack"]["appToken"] = serde_json::json!(slack_app_token.clone());
+    cfg["channels"]["slack"]["dmPolicy"] = serde_json::json!("pairing");
+    cfg["channels"]["slack"]["groupPolicy"] = serde_json::json!("allowlist");
+    cfg["channels"]["slack"]["configWrites"] = serde_json::json!(false);
+    cfg["plugins"]["entries"]["slack"]["enabled"] = serde_json::json!(slack_enabled);
+
+    cfg["channels"]["googlechat"]["enabled"] = serde_json::json!(googlechat_enabled);
+    cfg["channels"]["googlechat"]["audienceType"] = serde_json::json!(googlechat_audience_type);
+    cfg["channels"]["googlechat"]["webhookPath"] = serde_json::json!("/googlechat");
+    cfg["channels"]["googlechat"]["dm"]["policy"] = serde_json::json!("pairing");
+    cfg["channels"]["googlechat"]["groupPolicy"] = serde_json::json!("allowlist");
+    if googlechat_service_account.is_empty() {
+        if let Some(obj) = cfg["channels"]["googlechat"].as_object_mut() {
+            obj.remove("serviceAccount");
+        }
+    } else {
+        cfg["channels"]["googlechat"]["serviceAccount"] =
+            serde_json::json!(googlechat_service_account.clone());
+    }
+    if googlechat_audience.is_empty() {
+        if let Some(obj) = cfg["channels"]["googlechat"].as_object_mut() {
+            obj.remove("audience");
+        }
+    } else {
+        cfg["channels"]["googlechat"]["audience"] = serde_json::json!(googlechat_audience.trim());
+    }
+    cfg["plugins"]["entries"]["googlechat"]["enabled"] = serde_json::json!(googlechat_enabled);
+
+    cfg["channels"]["whatsapp"]["enabled"] = serde_json::json!(whatsapp_enabled);
     cfg["channels"]["whatsapp"]["configWrites"] = serde_json::json!(false);
     cfg["channels"]["whatsapp"]["groupPolicy"] = serde_json::json!("allowlist");
     if whatsapp_allow_from.is_empty() {
@@ -2454,6 +2971,13 @@ pub async fn set_channels_config(
     settings.discord_token = discord_token;
     settings.telegram_enabled = telegram_enabled;
     settings.telegram_token = telegram_token;
+    settings.slack_enabled = slack_enabled;
+    settings.slack_bot_token = slack_bot_token;
+    settings.slack_app_token = slack_app_token;
+    settings.googlechat_enabled = googlechat_enabled;
+    settings.googlechat_service_account = googlechat_service_account;
+    settings.googlechat_audience_type = googlechat_audience_type;
+    settings.googlechat_audience = googlechat_audience;
     settings.whatsapp_enabled = whatsapp_enabled;
     settings.whatsapp_allow_from = whatsapp_allow_from;
     save_agent_settings(&app, settings)?;
@@ -2591,11 +3115,7 @@ pub async fn upload_attachment(
 
 #[tauri::command]
 pub async fn save_attachment(temp_path: String) -> Result<String, String> {
-    let file_name = temp_path
-        .split('/')
-        .last()
-        .unwrap_or("file")
-        .to_string();
+    let file_name = temp_path.split('/').last().unwrap_or("file").to_string();
     let dest_dir = "/data/uploads";
     let mut dest_path = format!("{}/{}", dest_dir, file_name);
     docker_exec_output(&["exec", OPENCLAW_CONTAINER, "mkdir", "-p", "--", dest_dir])?;
@@ -2635,14 +3155,21 @@ pub async fn get_plugin_store() -> Result<Vec<PluginInfo>, String> {
 
     let mut out = Vec::new();
     for m in manifests {
-        let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let id = m
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if id.is_empty() {
             continue;
         }
         if !config_allows_plugin(&cfg, &id) {
             continue;
         }
-        let kind = m.get("kind").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let kind = m
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let channels = m
             .get("channels")
             .and_then(|v| v.as_array())
@@ -2666,7 +3193,8 @@ pub async fn get_plugin_store() -> Result<Vec<PluginInfo>, String> {
             entry_enabled.unwrap_or(false)
         };
 
-        let managed = kind.as_deref() == Some("memory") || MANAGED_PLUGIN_IDS.contains(&id.as_str());
+        let managed =
+            kind.as_deref() == Some("memory") || MANAGED_PLUGIN_IDS.contains(&id.as_str());
 
         out.push(PluginInfo {
             id,
@@ -2692,91 +3220,324 @@ pub async fn set_plugin_enabled(id: String, enabled: bool) -> Result<(), String>
 }
 
 #[tauri::command]
-pub async fn scan_plugin(id: String) -> Result<PluginScanResult, String> {
-    // Check if scanner is running
-    let check = docker_command()
-        .args(["ps", "-q", "-f", &format!("name={}", SCANNER_CONTAINER), "-f", "status=running"])
+pub async fn get_skill_store() -> Result<Vec<SkillInfo>, String> {
+    let skills_root = format!("{}/skills", WORKSPACE_ROOT);
+    let skills_dir_exists = docker_command()
+        .args(["exec", OPENCLAW_CONTAINER, "test", "-d", &skills_root])
         .output()
-        .map_err(|e| format!("Failed to check scanner: {}", e))?;
+        .map_err(|e| format!("Failed to check skills directory: {}", e))?
+        .status
+        .success();
 
-    if check.stdout.is_empty() {
-        return Ok(PluginScanResult {
-            scan_id: None,
-            is_safe: true,
-            max_severity: "UNKNOWN".to_string(),
-            findings_count: 0,
-            findings: vec![],
-            scanner_available: false,
+    if !skills_dir_exists {
+        return Ok(vec![]);
+    }
+
+    let listing =
+        docker_exec_output(&["exec", OPENCLAW_CONTAINER, "ls", "-1", "--", &skills_root])?;
+    let mut out = Vec::new();
+
+    for line in listing.lines() {
+        let id = line.trim();
+        if !is_safe_component(id) {
+            continue;
+        }
+        let full_path = format!("{}/{}", skills_root, id);
+        let is_dir = docker_command()
+            .args(["exec", OPENCLAW_CONTAINER, "test", "-d", &full_path])
+            .output()
+            .map_err(|e| format!("Failed to inspect skill path: {}", e))?
+            .status
+            .success();
+        if !is_dir {
+            continue;
+        }
+
+        let skill_md_path = format!("{}/SKILL.md", full_path);
+        let raw = read_container_file(&skill_md_path).unwrap_or_default();
+        let (name, description) = parse_skill_frontmatter(&raw);
+
+        out.push(SkillInfo {
+            id: id.to_string(),
+            name: name.unwrap_or_else(|| id.to_string()),
+            description: description.unwrap_or_else(|| "Workspace skill".to_string()),
+            path: full_path,
+            source: "Workspace".to_string(),
         });
     }
 
-    let skill_dir = format!("/app/extensions/{}", id);
-    let body = serde_json::json!({
-        "skill_directory": skill_dir,
-        "use_behavioral": true,
-        "use_llm": false,
-    });
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(out)
+}
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+fn scanner_unavailable_result() -> PluginScanResult {
+    PluginScanResult {
+        scan_id: None,
+        is_safe: true,
+        max_severity: "UNKNOWN".to_string(),
+        findings_count: 0,
+        findings: vec![],
+        scanner_available: false,
+    }
+}
 
-    let scan_url = if std::path::Path::new("/.dockerenv").exists() {
-        format!("http://{}:8000/scan", SCANNER_CONTAINER)
-    } else {
-        "http://127.0.0.1:19790/scan".to_string()
-    };
-
-    let res = client
-        .post(&scan_url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Scan request failed: {}", e))?;
-
-    if !res.status().is_success() {
-        let status = res.status();
-        let text = res.text().await.unwrap_or_default();
-        return Err(format!("Scanner returned {}: {}", status, text));
+#[tauri::command]
+pub async fn scan_plugin(id: String) -> Result<PluginScanResult, String> {
+    let plugin_id = id.trim().to_string();
+    if !is_safe_component(&plugin_id) {
+        return Err("Invalid plugin id".to_string());
     }
 
-    let scan_response: serde_json::Value = res
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse scan response: {}", e))?;
+    start_scanner_sidecar();
+    if !scanner_running()? {
+        return Ok(scanner_unavailable_result());
+    }
 
-    let findings: Vec<ScanFinding> = scan_response
-        .get("findings")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .map(|f| ScanFinding {
-                    analyzer: f.get("analyzer").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    category: f.get("category").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    severity: f.get("severity").and_then(|v| v.as_str()).unwrap_or("UNKNOWN").to_string(),
-                    title: f.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    description: f.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    file_path: f.get("file_path").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    line_number: f.get("line_number").and_then(|v| v.as_u64()).map(|n| n as u32),
-                    snippet: f.get("snippet").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    remediation: f.get("remediation").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut source_dir = format!("/app/extensions/{}", plugin_id);
+    let mut exists = docker_command()
+        .args(["exec", OPENCLAW_CONTAINER, "test", "-d", &source_dir])
+        .output()
+        .map_err(|e| format!("Failed to inspect plugin directory: {}", e))?
+        .status
+        .success();
 
-    Ok(PluginScanResult {
-        scan_id: scan_response.get("scan_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        is_safe: scan_response.get("is_safe").and_then(|v| v.as_bool()).unwrap_or(false),
-        max_severity: scan_response
-            .get("max_severity")
-            .and_then(|v| v.as_str())
-            .unwrap_or("UNKNOWN")
-            .to_string(),
-        findings_count: findings.len() as u32,
-        findings,
-        scanner_available: true,
+    if !exists {
+        if let Some(skills_root) = read_container_env("NOVA_SKILLS_PATH") {
+            let candidate = format!("{}/{}", skills_root.trim_end_matches('/'), plugin_id);
+            let candidate_exists = docker_command()
+                .args(["exec", OPENCLAW_CONTAINER, "test", "-d", &candidate])
+                .output()
+                .map_err(|e| format!("Failed to inspect plugin directory: {}", e))?
+                .status
+                .success();
+            if candidate_exists {
+                source_dir = candidate;
+                exists = true;
+            }
+        }
+    }
+
+    if !exists {
+        return Err("Plugin directory not found".to_string());
+    }
+
+    let scanner_dir = format!("/tmp/nova-scan/plugins/{}", plugin_id);
+    clone_dir_from_openclaw_to_scanner(&source_dir, &scanner_dir)?;
+    scan_directory_with_scanner(&scanner_dir).await
+}
+
+#[tauri::command]
+pub async fn scan_workspace_skill(id: String) -> Result<PluginScanResult, String> {
+    let skill_id = id.trim().to_string();
+    if !is_safe_component(&skill_id) {
+        return Err("Invalid skill id".to_string());
+    }
+
+    start_scanner_sidecar();
+    if !scanner_running()? {
+        return Ok(scanner_unavailable_result());
+    }
+
+    let source_dir = format!("{}/skills/{}", WORKSPACE_ROOT, skill_id);
+    let exists = docker_command()
+        .args(["exec", OPENCLAW_CONTAINER, "test", "-d", &source_dir])
+        .output()
+        .map_err(|e| format!("Failed to inspect skill directory: {}", e))?
+        .status
+        .success();
+    if !exists {
+        return Err("Skill directory not found".to_string());
+    }
+
+    let scanner_dir = format!("/tmp/nova-scan/workspace-skills/{}", skill_id);
+    clone_dir_from_openclaw_to_scanner(&source_dir, &scanner_dir)?;
+    scan_directory_with_scanner(&scanner_dir).await
+}
+
+fn resolve_downloaded_skill_path(temp_root: &str, slug: &str) -> Result<(String, String), String> {
+    let slug_tail = slug
+        .split('/')
+        .last()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "Invalid skill slug".to_string())?;
+    if !is_safe_component(slug_tail) {
+        return Err("Invalid skill slug".to_string());
+    }
+
+    let candidate = format!("{}/skills/{}", temp_root, slug_tail);
+    let candidate_exists = docker_command()
+        .args(["exec", OPENCLAW_CONTAINER, "test", "-d", &candidate])
+        .output()
+        .map_err(|e| format!("Failed to inspect downloaded skill: {}", e))?
+        .status
+        .success();
+    if candidate_exists {
+        return Ok((candidate, slug_tail.to_string()));
+    }
+
+    let listing = docker_exec_output(&[
+        "exec",
+        OPENCLAW_CONTAINER,
+        "ls",
+        "-1",
+        "--",
+        &format!("{}/skills", temp_root),
+    ])?;
+    for line in listing.lines() {
+        let id = line.trim();
+        if !is_safe_component(id) {
+            continue;
+        }
+        let path = format!("{}/skills/{}", temp_root, id);
+        let exists = docker_command()
+            .args(["exec", OPENCLAW_CONTAINER, "test", "-d", &path])
+            .output()
+            .map_err(|e| format!("Failed to inspect downloaded skill: {}", e))?
+            .status
+            .success();
+        if exists {
+            return Ok((path, id.to_string()));
+        }
+    }
+
+    Err("Downloaded skill directory not found".to_string())
+}
+
+#[tauri::command]
+pub async fn scan_and_install_clawhub_skill(
+    slug: String,
+    allow_unsafe: bool,
+) -> Result<ClawhubInstallResult, String> {
+    let trimmed_slug = slug.trim().to_string();
+    if !is_safe_slug(&trimmed_slug) {
+        return Err("Invalid skill slug".to_string());
+    }
+
+    start_scanner_sidecar();
+    if !scanner_running()? {
+        return Ok(ClawhubInstallResult {
+            scan: scanner_unavailable_result(),
+            installed: false,
+            blocked: false,
+            message: Some("Scanner unavailable".to_string()),
+            installed_skill_id: None,
+        });
+    }
+
+    let temp_root = format!("/tmp/nova-clawhub-scan-{}", unique_id());
+    docker_exec_output(&[
+        "exec",
+        OPENCLAW_CONTAINER,
+        "mkdir",
+        "-p",
+        "--",
+        &format!("{}/skills", temp_root),
+    ])?;
+
+    let cleanup = |root: &str| {
+        let _ = docker_exec_output(&["exec", OPENCLAW_CONTAINER, "rm", "-rf", "--", root]);
+    };
+
+    let fetch_result = docker_command()
+        .args([
+            "exec",
+            OPENCLAW_CONTAINER,
+            "npx",
+            "-y",
+            "clawhub",
+            "install",
+            &trimmed_slug,
+            "--workdir",
+            &temp_root,
+            "--dir",
+            "skills",
+            "--no-input",
+            "--force",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to run ClawHub install: {}", e))?;
+
+    if !fetch_result.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch_result.stderr);
+        cleanup(&temp_root);
+        return Err(format!("ClawHub install failed: {}", stderr));
+    }
+
+    let (downloaded_path, detected_skill_id) =
+        match resolve_downloaded_skill_path(&temp_root, &trimmed_slug) {
+            Ok(value) => value,
+            Err(err) => {
+                cleanup(&temp_root);
+                return Err(err);
+            }
+        };
+    let scanner_dir = format!("/tmp/nova-scan/clawhub/{}", detected_skill_id);
+    if let Err(err) = clone_dir_from_openclaw_to_scanner(&downloaded_path, &scanner_dir) {
+        cleanup(&temp_root);
+        return Err(err);
+    }
+    let scan = match scan_directory_with_scanner(&scanner_dir).await {
+        Ok(value) => value,
+        Err(err) => {
+            cleanup(&temp_root);
+            return Err(err);
+        }
+    };
+
+    if !scan.is_safe
+        && scan.scanner_available
+        && (scan.max_severity == "CRITICAL" || scan.max_severity == "HIGH")
+        && !allow_unsafe
+    {
+        cleanup(&temp_root);
+        return Ok(ClawhubInstallResult {
+            scan,
+            installed: false,
+            blocked: true,
+            message: Some("Installation blocked due to high-severity findings".to_string()),
+            installed_skill_id: Some(detected_skill_id),
+        });
+    }
+
+    let install = match docker_command()
+        .args([
+            "exec",
+            OPENCLAW_CONTAINER,
+            "npx",
+            "-y",
+            "clawhub",
+            "install",
+            &trimmed_slug,
+            "--workdir",
+            WORKSPACE_ROOT,
+            "--dir",
+            "skills",
+            "--no-input",
+            "--force",
+        ])
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => {
+            cleanup(&temp_root);
+            return Err(format!("Failed to install skill: {}", err));
+        }
+    };
+
+    cleanup(&temp_root);
+
+    if !install.status.success() {
+        let stderr = String::from_utf8_lossy(&install.stderr);
+        return Err(format!("Skill install failed: {}", stderr));
+    }
+
+    Ok(ClawhubInstallResult {
+        scan,
+        installed: true,
+        blocked: false,
+        message: None,
+        installed_skill_id: Some(detected_skill_id),
     })
 }
 
@@ -2815,7 +3576,8 @@ pub async fn run_first_time_setup(
                 let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
                 *progress = SetupProgress {
                     stage: "vm".to_string(),
-                    message: "Starting container runtime (first time may download ~100MB)...".to_string(),
+                    message: "Starting container runtime (first time may download ~100MB)..."
+                        .to_string(),
                     percent: 10,
                     complete: false,
                     error: None,
@@ -2860,7 +3622,11 @@ pub async fn run_first_time_setup(
                     let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
                     *progress = SetupProgress {
                         stage: "docker".to_string(),
-                        message: format!("Waiting for Docker to start ({}/{}s)...", (i + 1) * 2, max_retries * 2),
+                        message: format!(
+                            "Waiting for Docker to start ({}/{}s)...",
+                            (i + 1) * 2,
+                            max_retries * 2
+                        ),
                         percent: 40 + ((i as u8) * 30 / max_retries as u8),
                         complete: false,
                         error: None,
@@ -3578,7 +4344,10 @@ async fn fetch_google_user(access_token: &str) -> Result<GoogleUserInfo, String>
         .await
         .map_err(|e| format!("Failed to fetch user info: {}", e))?;
     if !resp.status().is_success() {
-        return Ok(GoogleUserInfo { email: None, id: None });
+        return Ok(GoogleUserInfo {
+            email: None,
+            id: None,
+        });
     }
     resp.json::<GoogleUserInfo>()
         .await
@@ -3586,7 +4355,10 @@ async fn fetch_google_user(access_token: &str) -> Result<GoogleUserInfo, String>
 }
 
 #[tauri::command]
-pub async fn start_google_oauth(app: AppHandle, provider: String) -> Result<OAuthTokenBundle, String> {
+pub async fn start_google_oauth(
+    app: AppHandle,
+    provider: String,
+) -> Result<OAuthTokenBundle, String> {
     let scopes = oauth_scopes(&provider)?;
     let (verifier, challenge) = generate_pkce();
     let state = URL_SAFE_NO_PAD.encode({
@@ -3604,9 +4376,10 @@ pub async fn start_google_oauth(app: AppHandle, provider: String) -> Result<OAut
         .port();
     let redirect_uri = format!("http://127.0.0.1:{}/oauth/callback", port);
 
-    let mut auth_url = Url::parse(GOOGLE_AUTH_URL)
-        .map_err(|_| "Failed to build OAuth URL".to_string())?;
-    auth_url.query_pairs_mut()
+    let mut auth_url =
+        Url::parse(GOOGLE_AUTH_URL).map_err(|_| "Failed to build OAuth URL".to_string())?;
+    auth_url
+        .query_pairs_mut()
         .append_pair("client_id", &google_client_id()?)
         .append_pair("response_type", "code")
         .append_pair("redirect_uri", &redirect_uri)
@@ -3632,10 +4405,12 @@ pub async fn start_google_oauth(app: AppHandle, provider: String) -> Result<OAut
         .map_err(|_| "Clock error".to_string())?
         .as_millis() as u64;
     let expires_at = now_ms.saturating_add(expires_in * 1000);
-    let user_info = fetch_google_user(&token_response.access_token).await.unwrap_or(GoogleUserInfo {
-        email: None,
-        id: None,
-    });
+    let user_info = fetch_google_user(&token_response.access_token)
+        .await
+        .unwrap_or(GoogleUserInfo {
+            email: None,
+            id: None,
+        });
 
     let scopes_list = token_response
         .scope
@@ -3655,7 +4430,10 @@ pub async fn start_google_oauth(app: AppHandle, provider: String) -> Result<OAut
 }
 
 #[tauri::command]
-pub async fn refresh_google_token(provider: String, refresh_token: String) -> Result<RefreshTokenResponse, String> {
+pub async fn refresh_google_token(
+    provider: String,
+    refresh_token: String,
+) -> Result<RefreshTokenResponse, String> {
     oauth_scopes(&provider)?;
     let client_id = google_client_id()?;
     let client = reqwest::Client::new();

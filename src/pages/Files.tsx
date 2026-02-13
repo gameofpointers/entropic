@@ -1063,6 +1063,7 @@ export function Files({
             >
               <Suspense fallback={PANEL_FALLBACK}>
                 <PluginStore
+                  view="plugins"
                   integrationsSyncing={integrationsSyncing}
                   integrationsMissing={integrationsMissing}
                 />
@@ -1070,10 +1071,10 @@ export function Files({
             </AppWindow>
           )}
 
-          {/* ── CHANNELS WINDOW ──────────────────────────────────────── */}
+          {/* ── MESSAGING WINDOW ─────────────────────────────────────── */}
           {channelsOpen && (
             <AppWindow
-              title="Channels"
+              title="Messaging"
               icon={Radio}
               position={channelsPos}
               size={channelsSize}
@@ -1251,14 +1252,14 @@ export function Files({
               <div className={`w-1 h-1 rounded-full mt-1 transition-opacity ${pluginsOpen ? "bg-white/80" : "opacity-0"}`} />
             </button>
 
-            {/* Channels */}
+            {/* Messaging */}
             <button
               onClick={() => {
                 if (!channelsOpen) setChannelsOpen(true);
                 focusWindow("channels");
               }}
               className="group flex flex-col items-center"
-              title="Channels"
+              title="Messaging"
             >
               <div
                 className="w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-200 group-hover:scale-[1.15] group-hover:-translate-y-2.5"

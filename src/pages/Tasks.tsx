@@ -157,6 +157,7 @@ const PLUGIN_LABELS: Record<string, string> = {
   discord: "Discord",
   telegram: "Telegram",
   slack: "Slack",
+  googlechat: "Google Chat",
 };
 
 const CHANNEL_OPTIONS: Array<{ id: string; label: string; helper: string }> = [
@@ -164,6 +165,8 @@ const CHANNEL_OPTIONS: Array<{ id: string; label: string; helper: string }> = [
   { id: "whatsapp", label: "WhatsApp", helper: "Phone number with country code" },
   { id: "imessage", label: "iMessage", helper: "Phone number or email" },
   { id: "discord", label: "Discord", helper: "User ID or channel ID" },
+  { id: "slack", label: "Slack", helper: "User ID or channel ID" },
+  { id: "googlechat", label: "Google Chat", helper: "users/<id> or spaces/<id>" },
 ];
 
 const SCHEDULE_PRESETS: Array<{ id: SchedulePreset; label: string; needsTime?: boolean }> = [
@@ -544,6 +547,8 @@ export function Tasks({ gatewayRunning }: Props) {
           whatsapp_enabled?: boolean;
           discord_enabled?: boolean;
           imessage_enabled?: boolean;
+          slack_enabled?: boolean;
+          googlechat_enabled?: boolean;
         }>("get_agent_profile_state");
         if (cancelled) return;
         const enabledIds = new Set<string>();
@@ -551,6 +556,8 @@ export function Tasks({ gatewayRunning }: Props) {
         if (state.whatsapp_enabled) enabledIds.add("whatsapp");
         if (state.discord_enabled) enabledIds.add("discord");
         if (state.imessage_enabled) enabledIds.add("imessage");
+        if (state.slack_enabled) enabledIds.add("slack");
+        if (state.googlechat_enabled) enabledIds.add("googlechat");
         const filtered = CHANNEL_OPTIONS.filter((c) => enabledIds.has(c.id));
         setChannelOptions(filtered);
       } catch (e) {
@@ -1461,7 +1468,7 @@ export function Tasks({ gatewayRunning }: Props) {
                       )}
                       {!channelsLoading && channelOptions.length === 0 && (
                         <p className="text-xs" style={{ color: "var(--text-tertiary)" }}>
-                          No channels connected yet. Connect one in the Channels tab.
+                          No channels connected yet. Connect one in the Messaging tab.
                         </p>
                       )}
                       {channelOptions.length > 0 && (

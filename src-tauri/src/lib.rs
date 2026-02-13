@@ -1,9 +1,9 @@
-mod runtime;
 mod commands;
+mod runtime;
 
 use rand::RngCore;
-use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use std::fs;
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 
 pub fn run() {
     tauri::Builder::default()
@@ -16,9 +16,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             let urls: Vec<String> = args
                 .into_iter()
-                .filter(|arg| {
-                    arg.starts_with("nova://") || arg.starts_with("nova-dev://")
-                })
+                .filter(|arg| arg.starts_with("nova://") || arg.starts_with("nova-dev://"))
                 .collect();
 
             if urls.is_empty() {
@@ -89,8 +87,11 @@ pub fn run() {
             commands::save_attachment,
             commands::delete_attachment,
             commands::get_plugin_store,
+            commands::get_skill_store,
             commands::set_plugin_enabled,
             commands::scan_plugin,
+            commands::scan_workspace_skill,
+            commands::scan_and_install_clawhub_skill,
             commands::start_auth_localhost,
             commands::start_google_oauth,
             commands::refresh_google_token,
