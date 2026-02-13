@@ -27,7 +27,18 @@ type Message = {
     hadToolPayload: boolean;
   };
 };
-export type ChatSession = { key: string; label?: string; displayName?: string; derivedTitle?: string; updatedAt?: number | null };
+export type ChatSession = {
+  key: string;
+  label?: string;
+  displayName?: string;
+  derivedTitle?: string;
+  updatedAt?: number | null;
+  pinned?: boolean;
+};
+export type ChatSessionActionRequest =
+  | { id: string; type: "delete"; key: string }
+  | { id: string; type: "pin"; key: string; pinned: boolean }
+  | { id: string; type: "rename"; key: string; label: string };
 type Provider = { id: string; name: string; icon: string; placeholder: string; keyUrl: string };
 type PendingAttachment = { id: string; fileName: string; tempPath: string; savedPath?: string };
 type AuthState = { active_provider: string | null; providers: Array<{ id: string; has_key: boolean }> };
@@ -431,6 +442,16 @@ function stripInlineClawdbotMetadata(raw: string): string {
 function sanitizeAssistantDisplayContent(raw: string): string {
   if (!raw) return "";
   let text = stripConversationMetadata(raw);
+  text = stripExternalUntrustedSections(text);
+
+  try {
+    const direct = JSON.parse(text);
+    if (isToolTransportPayload(direct)) {
+      return "";
+    }
+  } catch {
+    // ignore non-JSON
+  }
 
   // Hide OpenClaw internal skill manifest metadata payloads (machine format).
   text = text.replace(
@@ -461,8 +482,10 @@ function buildAssistantPayload(raw: string) {
 
 function normalizeCachedMessage(message: Message): Message {
   if (message.role !== "assistant") return message;
-  if (message.assistantPayload) return message;
   const prepared = buildAssistantPayload(message.content || "");
+  if (!prepared.content && prepared.assistantPayload.events.length === 0 && prepared.assistantPayload.errors.length === 0) {
+    return { ...message, content: "", assistantPayload: prepared.assistantPayload };
+  }
   return {
     ...message,
     content: prepared.content,
@@ -782,6 +805,9 @@ export function Chat({
   const restoredFromCacheRef = useRef(false);
   const lastChatEventRef = useRef<ChatEvent | null>(null);
   const showDiagnosticsRef = useRef(false);
+  const activeRunIdRef = useRef<string | null>(null);
+  const activeRunSessionRef = useRef<string | null>(null);
+  const activeRunTimeoutRef = useRef<number | null>(null);
 
   function isProxyAuthFailure(message?: string | null): boolean {
     if (!message) return false;
@@ -977,6 +1003,16 @@ export function Chat({
       void selectSession(requestedSession);
     }
   }, [requestedSession, currentSession]);
+
+  useEffect(() => {
+    if (!requestedSessionAction) {
+      handledRequestedActionRef.current = null;
+      return;
+    }
+    if (handledRequestedActionRef.current === requestedSessionAction.id) return;
+    handledRequestedActionRef.current = requestedSessionAction.id;
+    void applySessionAction(requestedSessionAction);
+  }, [requestedSessionAction]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: isLoading ? "auto" : "smooth" });
@@ -1220,6 +1256,7 @@ export function Chat({
         (normalized.assistantPayload.events.length > 0 || normalized.assistantPayload.errors.length > 0)
       );
       if (text || hasRenderableAssistantPayload) {
+        setThinkingStatus(null);
         if (isProxyAuthFailure(text)) {
           triggerProxyAuthRecovery("chat message");
         }
@@ -1276,6 +1313,12 @@ export function Chat({
             timings.toolSeenAt = Date.now();
             addDiag(`timing tool_result runId=${event.runId} t=${timings.toolSeenAt - timings.startedAt}ms`);
           }
+        }
+      }
+      if (event.state === "final") {
+        setIsLoading(false);
+        if (event.runId && activeRunIdRef.current === event.runId) {
+          clearActiveRunTracking();
         }
       }
       if (event.state === "final" && event.runId) {

@@ -12,6 +12,15 @@ import {
   Clock,
   Puzzle,
   Sparkles,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Minus,
+  Square,
+  X,
+  MoreHorizontal,
+  Pencil,
+  Pin,
+  Trash2,
 } from "lucide-react";
 import novaLogo from "../assets/nova-logo.png";
 import type { ChatSession } from "../pages/Chat";
