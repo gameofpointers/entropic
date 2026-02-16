@@ -17,6 +17,16 @@ type ResponseFrame = {
   error?: { code: string; message: string };
 };
 
+export class GatewayError extends Error {
+  code?: string;
+
+  constructor(message: string, code?: string) {
+    super(message);
+    this.name = "GatewayError";
+    this.code = code;
+  }
+}
+
 type EventFrame = {
   type: "event";
   event: string;
@@ -191,7 +201,7 @@ export class GatewayClient {
         if (frame.ok) {
           pending.resolve(frame.payload);
         } else {
-          pending.reject(new Error(frame.error?.message || "RPC failed"));
+          pending.reject(new GatewayError(frame.error?.message || "RPC failed", frame.error?.code));
         }
       }
     }

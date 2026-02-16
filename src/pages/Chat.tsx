@@ -1795,8 +1795,11 @@ export function Chat({
       try {
         await clientRef.current?.deleteSession(action.key, true);
       } catch (err) {
-        addDiag(`delete failed key=${action.key}: ${String(err)}`);
-        setError("Failed to delete chat");
+        const message = err instanceof Error ? err.message : String(err);
+        const code = (err as { code?: unknown })?.code;
+        const suffix = code ? ` (${String(code)})` : "";
+        addDiag(`delete failed key=${action.key}: ${message}${suffix}`);
+        setError(`Failed to delete chat: ${message}${suffix}`);
         if (snapshotSession) {
           setSessions((prev) => applySessionTitles(normalizeSessionsList([...prev, snapshotSession])));
           if (snapshotMessages.length > 0) {
