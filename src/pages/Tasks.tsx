@@ -1116,38 +1116,43 @@ export function Tasks({ gatewayRunning }: Props) {
 
       {/* ── Editor Modal ────────────────────────────────────────── */}
       {editorOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/40 backdrop-blur-md px-4">
-          <div className="bg-white p-8 w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-[36px] shadow-2xl border border-gray-100 animate-in zoom-in-95 duration-200">
-            <div className="flex items-center justify-between mb-8">
-              <h2 className="text-2xl font-bold text-gray-900 tracking-tight">
-                {editingJob ? "Edit Automation" : "New Automation"}
-              </h2>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 backdrop-blur-sm px-4">
+          <div className="w-full max-w-2xl max-h-[90vh] bg-white rounded-2xl border border-[var(--border-subtle)] shadow-xl flex flex-col animate-in zoom-in-95 duration-200">
+            <div className="px-6 py-4 border-b border-[var(--border-subtle)] flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold text-[var(--text-primary)]">
+                  {editingJob ? "Edit Automation" : "New Automation"}
+                </h2>
+                <p className="text-xs text-[var(--text-tertiary)] mt-1">
+                  Configure schedule, tools, and instructions.
+                </p>
+              </div>
               <button
                 onClick={() => setEditorOpen(false)}
-                className="p-2 rounded-full hover:bg-gray-100 text-gray-400 transition-colors"
+                className="p-2 rounded-lg hover:bg-[var(--system-gray-6)] text-[var(--text-tertiary)] transition-colors"
               >
-                <X className="w-6 h-6" />
+                <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="space-y-8">
+            <div className="px-6 py-5 overflow-auto space-y-6">
               {/* Basic Info */}
-              <div className="space-y-4">
+              <div className="bg-[var(--system-gray-6)]/60 rounded-xl border border-[var(--border-subtle)] p-4 space-y-4">
                 <div>
-                  <label className="block text-[13px] font-bold text-gray-400 uppercase tracking-widest mb-2 ml-1">Task Name</label>
+                  <label className="block text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wide mb-2 ml-1">Task Name</label>
                   <input
                     type="text"
-                    className="w-full px-5 py-3.5 bg-gray-50 border-none rounded-[18px] text-[15px] font-medium placeholder:text-gray-400 focus:ring-2 focus:ring-blue-500/20 focus:bg-white transition-all"
+                    className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
                     placeholder="Morning Briefing, Sync Repo, etc."
                     value={editor.name}
                     onChange={(e) => updateEditor({ name: e.target.value })}
                   />
                 </div>
                 <div>
-                  <label className="block text-[13px] font-bold text-gray-400 uppercase tracking-widest mb-2 ml-1">Goal (optional)</label>
+                  <label className="block text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wide mb-2 ml-1">Goal (optional)</label>
                   <input
                     type="text"
-                    className="w-full px-5 py-3.5 bg-gray-50 border-none rounded-[18px] text-[15px] font-medium placeholder:text-gray-400 focus:ring-2 focus:ring-blue-500/20 focus:bg-white transition-all"
+                    className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
                     placeholder="What is this task trying to achieve?"
                     value={editor.description}
                     onChange={(e) => updateEditor({ description: e.target.value })}
@@ -1156,36 +1161,34 @@ export function Tasks({ gatewayRunning }: Props) {
               </div>
 
               {/* Schedule Section */}
-              <div className="bg-gray-50 rounded-[24px] p-6 border border-gray-100 space-y-6">
-                <div>
-                  <label className="block text-[13px] font-bold text-gray-400 uppercase tracking-widest mb-4">Select Schedule</label>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    {SCHEDULE_PRESETS.map((preset) => (
-                      <button
-                        key={preset.id}
-                        type="button"
-                        onClick={() => applySchedulePreset(preset.id)}
-                        className={clsx(
-                          "px-3 py-2 rounded-xl text-[13px] font-bold transition-all border-2",
-                          editor.schedulePreset === preset.id
-                            ? "bg-blue-600 text-white border-blue-600 shadow-md"
-                            : "bg-white text-gray-500 border-gray-100 hover:border-gray-200"
-                        )}
-                      >
-                        {preset.label}
-                      </button>
-                    ))}
-                  </div>
+              <div className="bg-[var(--system-gray-6)]/60 rounded-xl border border-[var(--border-subtle)] p-4 space-y-4">
+                <label className="block text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wide mb-1 ml-1">Select Schedule</label>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {SCHEDULE_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => applySchedulePreset(preset.id)}
+                      className={clsx(
+                        "px-3 py-2 rounded-lg text-xs font-semibold transition-all border",
+                        editor.schedulePreset === preset.id
+                          ? "bg-[var(--system-blue)] text-white border-[var(--system-blue)]"
+                          : "bg-white text-[var(--text-secondary)] border-[var(--border-default)] hover:bg-[var(--system-gray-6)]"
+                      )}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
                 </div>
 
                 {/* Conditional Inputs */}
-                <div className="pt-2">
+                <div className="pt-1">
                   {["daily", "weekdays", "weekends", "mwf"].includes(editor.schedulePreset) && (
                     <div className="flex flex-col gap-2">
-                      <label className="text-xs font-bold text-gray-400 uppercase ml-1">Execution Time</label>
+                      <label className="text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wide ml-1">Execution Time</label>
                       <input
                         type="time"
-                        className="w-full px-5 py-3 bg-white border border-gray-200 rounded-[14px] text-[15px] font-bold focus:ring-2 focus:ring-blue-500/20"
+                        className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm font-semibold text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
                         value={editor.scheduleTime}
                         onChange={(e) => {
                           const nextTime = e.target.value || defaultEditor.scheduleTime;
@@ -1204,10 +1207,10 @@ export function Tasks({ gatewayRunning }: Props) {
                   )}
                   {editor.schedulePreset === "once" && (
                     <div className="flex flex-col gap-2">
-                      <label className="text-xs font-bold text-gray-400 uppercase ml-1">Date & Time</label>
+                      <label className="text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wide ml-1">Date & Time</label>
                       <input
                         type="datetime-local"
-                        className="w-full px-5 py-3 bg-white border border-gray-200 rounded-[14px] text-[15px] font-bold focus:ring-2 focus:ring-blue-500/20"
+                        className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm font-semibold text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
                         value={editor.atDate ? editor.atDate.slice(0, 16) : ""}
                         onChange={(e) =>
                           updateEditor({
@@ -1220,11 +1223,11 @@ export function Tasks({ gatewayRunning }: Props) {
                   )}
                   {editor.schedulePreset === "custom" && editor.scheduleType === "every" && (
                     <div className="flex flex-col gap-2">
-                      <label className="text-xs font-bold text-gray-400 uppercase ml-1">Interval (minutes)</label>
+                      <label className="text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wide ml-1">Interval (minutes)</label>
                       <input
                         type="number"
                         min="1"
-                        className="w-full px-5 py-3 bg-white border border-gray-200 rounded-[14px] text-[15px] font-bold focus:ring-2 focus:ring-blue-500/20"
+                        className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm font-semibold text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
                         value={editor.intervalMinutes}
                         onChange={(e) => updateEditor({ scheduleType: "every", intervalMinutes: e.target.value })}
                       />
@@ -1232,10 +1235,10 @@ export function Tasks({ gatewayRunning }: Props) {
                   )}
                   {editor.schedulePreset === "custom" && editor.scheduleType === "cron" && (
                     <div className="flex flex-col gap-2">
-                      <label className="text-xs font-bold text-gray-400 uppercase ml-1">Cron Expression</label>
+                      <label className="text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wide ml-1">Cron Expression</label>
                       <input
                         type="text"
-                        className="w-full px-5 py-3 bg-white border border-gray-200 rounded-[14px] text-[15px] font-mono focus:ring-2 focus:ring-blue-500/20"
+                        className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm font-mono text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
                         placeholder="0 * * * *"
                         value={editor.cronExpr}
                         onChange={(e) => updateEditor({ scheduleType: "cron", cronExpr: e.target.value })}
@@ -1246,17 +1249,17 @@ export function Tasks({ gatewayRunning }: Props) {
               </div>
 
               {/* Plugins Selection */}
-              <div>
-                <div className="flex items-center justify-between mb-4">
-                  <label className="text-[13px] font-bold text-gray-400 uppercase tracking-widest ml-1">Select Tools</label>
+              <div className="bg-[var(--system-gray-6)]/60 rounded-xl border border-[var(--border-subtle)] p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <label className="text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wide ml-1">Select Tools</label>
                   {skills.length > 0 && (
-                    <div className="flex gap-4">
-                      <button type="button" className="text-[11px] font-bold text-blue-600 hover:underline" onClick={() => updateSkillSelection(skills.map(s => s.id))}>Select All</button>
-                      <button type="button" className="text-[11px] font-bold text-gray-400 hover:underline" onClick={() => updateSkillSelection([])}>Clear</button>
+                    <div className="flex gap-3">
+                      <button type="button" className="text-[11px] font-semibold text-[var(--system-blue)] hover:underline" onClick={() => updateSkillSelection(skills.map(s => s.id))}>Select All</button>
+                      <button type="button" className="text-[11px] font-semibold text-[var(--text-tertiary)] hover:underline" onClick={() => updateSkillSelection([])}>Clear</button>
                     </div>
                   )}
                 </div>
-                
+
                 {skills.length > 0 ? (
                   <div className="flex flex-wrap gap-2">
                     {skills.map((skill) => {
@@ -1270,8 +1273,8 @@ export function Tasks({ gatewayRunning }: Props) {
                             updateSkillSelection(next);
                           }}
                           className={clsx(
-                            "px-4 py-2 rounded-full text-[12px] font-bold transition-all border-2",
-                            sel ? "bg-blue-50 text-blue-600 border-blue-200" : "bg-white text-gray-500 border-gray-100 hover:border-gray-200"
+                            "px-3 py-1.5 rounded-full text-[11px] font-semibold transition-all border",
+                            sel ? "bg-[var(--system-blue)]/10 text-[var(--system-blue)] border-[var(--system-blue)]/20" : "bg-white text-[var(--text-secondary)] border-[var(--border-default)] hover:bg-[var(--system-gray-6)]"
                           )}
                         >
                           {skill.label}
@@ -1280,45 +1283,45 @@ export function Tasks({ gatewayRunning }: Props) {
                     })}
                   </div>
                 ) : (
-                  <p className="text-[13px] text-gray-400 font-medium italic ml-1">No tools connected.</p>
+                  <p className="text-sm text-[var(--text-tertiary)] italic ml-1">No tools connected.</p>
                 )}
               </div>
 
               {/* Instructions Section */}
-              <div className="space-y-4">
+              <div className="space-y-3">
                 <div className="flex items-center justify-between">
-                  <label className="text-[13px] font-bold text-gray-400 uppercase tracking-widest ml-1">Task Instructions</label>
+                  <label className="text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wide ml-1">Task Instructions</label>
                   <button
                     type="button"
                     onClick={handleGenerateSteps}
                     disabled={generatingSteps}
-                    className="flex items-center gap-1.5 text-blue-600 hover:text-blue-700 font-bold text-[12px]"
+                    className="flex items-center gap-1.5 text-[var(--system-blue)] hover:opacity-80 font-semibold text-xs"
                   >
                     {generatingSteps ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
                     Auto-Generate
                   </button>
                 </div>
                 <textarea
-                  className="w-full px-5 py-4 bg-gray-50 border-none rounded-[24px] text-[15px] font-medium placeholder:text-gray-400 focus:ring-2 focus:ring-blue-500/20 focus:bg-white transition-all min-h-[160px] leading-relaxed"
+                  className="w-full px-4 py-3.5 bg-white border border-[var(--border-default)] rounded-xl text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20 min-h-[160px] leading-relaxed"
                   placeholder="Tell Nova exactly what steps to take during this run..."
                   value={editor.message}
                   onChange={(e) => updateEditor({ message: e.target.value })}
                 />
-                {generateStepsError && <p className="text-xs text-red-500 font-bold ml-1">{generateStepsError}</p>}
+                {generateStepsError && <p className="text-xs text-red-500 font-semibold ml-1">{generateStepsError}</p>}
               </div>
 
               {/* Notifications */}
-              <div className="pt-4 border-t border-gray-100">
-                <div className="flex items-center justify-between mb-6">
+              <div className="pt-4 border-t border-[var(--border-subtle)]">
+                <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center gap-2">
-                    <Bell className={clsx("w-5 h-5", editor.notifyEnabled ? "text-blue-600" : "text-gray-300")} />
-                    <span className="font-bold text-gray-900">Push Notifications</span>
+                    <Bell className={clsx("w-5 h-5", editor.notifyEnabled ? "text-[var(--system-blue)]" : "text-[var(--text-tertiary)]")} />
+                    <span className="text-sm font-semibold text-[var(--text-primary)]">Push Notifications</span>
                   </div>
                   <button
                     onClick={() => updateEditor({ notifyEnabled: !editor.notifyEnabled })}
                     className={clsx(
                       "relative inline-flex h-7 w-12 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
-                      editor.notifyEnabled ? "bg-blue-600" : "bg-gray-200"
+                      editor.notifyEnabled ? "bg-[var(--system-blue)]" : "bg-gray-200"
                     )}
                   >
                     <span className={clsx(
@@ -1329,7 +1332,7 @@ export function Tasks({ gatewayRunning }: Props) {
                 </div>
 
                 {editor.notifyEnabled && (
-                  <div className="space-y-4 animate-in fade-in slide-in-from-top-2">
+                  <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
                     <div className="flex flex-wrap gap-2">
                       {channelOptions.map((c) => {
                         const sel = editor.notifyChannel === c.id;
@@ -1339,8 +1342,8 @@ export function Tasks({ gatewayRunning }: Props) {
                             type="button"
                             onClick={() => updateEditor({ notifyChannel: c.id })}
                             className={clsx(
-                              "px-4 py-2 rounded-full text-[12px] font-bold transition-all border-2",
-                              sel ? "bg-blue-50 text-blue-600 border-blue-200" : "bg-white text-gray-500 border-gray-100 hover:border-gray-200"
+                              "px-3 py-1.5 rounded-full text-[11px] font-semibold transition-all border",
+                              sel ? "bg-[var(--system-blue)]/10 text-[var(--system-blue)] border-[var(--system-blue)]/20" : "bg-white text-[var(--text-secondary)] border-[var(--border-default)] hover:bg-[var(--system-gray-6)]"
                             )}
                           >
                             {c.label}
@@ -1350,7 +1353,7 @@ export function Tasks({ gatewayRunning }: Props) {
                     </div>
                     <input
                       type="text"
-                      className="w-full px-5 py-3.5 bg-gray-50 border-none rounded-[18px] text-[14px] font-medium placeholder:text-gray-400 focus:ring-2 focus:ring-blue-500/20 focus:bg-white transition-all"
+                      className="w-full px-4 py-3 bg-white border border-[var(--border-default)] rounded-lg text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
                       placeholder={selectedChannelMeta?.helper || "Recipient address..."}
                       value={editor.notifyTo}
                       onChange={(e) => updateEditor({ notifyTo: e.target.value })}
@@ -1361,17 +1364,17 @@ export function Tasks({ gatewayRunning }: Props) {
             </div>
 
             {/* Modal Footer */}
-            <div className="flex items-center gap-3 mt-12 pt-6 border-t border-gray-50">
-              <button 
-                onClick={() => setEditorOpen(false)} 
-                className="flex-1 py-4 text-[15px] font-bold text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-2xl transition-colors"
+            <div className="px-6 py-4 border-t border-[var(--border-subtle)] bg-white flex items-center gap-3">
+              <button
+                onClick={() => setEditorOpen(false)}
+                className="flex-1 py-2.5 text-sm font-semibold text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] rounded-lg transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={handleSave}
                 disabled={saving || !editor.name.trim() || notifyInvalid}
-                className="flex-1 py-4 text-[15px] font-bold bg-blue-600 text-white rounded-2xl hover:bg-blue-700 disabled:opacity-50 disabled:shadow-none shadow-lg shadow-blue-200 transition-all"
+                className="flex-1 py-2.5 text-sm font-semibold bg-[var(--system-blue)] text-white rounded-lg hover:opacity-90 disabled:opacity-50 transition-all"
               >
                 {saving ? "Saving..." : editingJob ? "Update Task" : "Create Task"}
               </button>
