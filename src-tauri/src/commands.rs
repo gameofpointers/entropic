@@ -1,4 +1,7 @@
-use crate::runtime::{macos_docker_socket_candidates, Platform, Runtime, RuntimeStatus};
+use crate::runtime::{
+    macos_docker_socket_candidates, nova_colima_home_path, Platform, Runtime, RuntimeStatus,
+    NOVA_QEMU_PROFILE, NOVA_VZ_PROFILE,
+};
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine as _,
@@ -9,12 +12,12 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -270,7 +273,11 @@ fn bundled_runtime_signature_from_manifest(tar_path: &Path) -> Result<String, St
         .map_err(|e| format!("failed to read manifest from {}: {}", tar_path, e))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("failed to read manifest.json from {}: {}", tar_path, stderr.trim()));
+        return Err(format!(
+            "failed to read manifest.json from {}: {}",
+            tar_path,
+            stderr.trim()
+        ));
     }
 
     let manifest: serde_json::Value = serde_json::from_slice(&output.stdout)
@@ -1044,6 +1051,14 @@ const OPENCLAW_CONTAINER: &str = "nova-openclaw";
 const SCANNER_CONTAINER: &str = "nova-skill-scanner";
 const SCANNER_HOST_PORT: &str = "19791";
 const NOVA_GATEWAY_SCHEMA_VERSION: &str = "2026-02-13";
+const OPENCLAW_STATE_ROOT: &str = "/home/node/.openclaw";
+const WORKSPACE_ROOT: &str = "/data/workspace";
+const SKILLS_ROOT: &str = "/data/skills";
+const SKILL_MANIFESTS_ROOT: &str = "/data/skill-manifests";
+const LEGACY_SKILLS_ROOTS: &[&str] = &[
+    "/data/workspace/skills",
+    "/home/node/.openclaw/workspace/skills",
+];
 const MANAGED_PLUGIN_IDS: &[&str] = &["nova-integrations", "nova-x"];
 static GATEWAY_START_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 static APPLIED_AGENT_SETTINGS_FINGERPRINT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
@@ -1054,6 +1069,173 @@ fn gateway_start_lock() -> &'static AsyncMutex<()> {
 
 fn applied_agent_settings_fingerprint() -> &'static Mutex<Option<String>> {
     APPLIED_AGENT_SETTINGS_FINGERPRINT.get_or_init(|| Mutex::new(None))
+}
+
+fn workspace_file(path: &str) -> String {
+    let trimmed = path.trim_start_matches('/');
+    if trimmed.is_empty() {
+        WORKSPACE_ROOT.to_string()
+    } else {
+        format!("{}/{}", WORKSPACE_ROOT, trimmed)
+    }
+}
+
+fn state_file(path: &str) -> String {
+    let trimmed = path.trim_start_matches('/');
+    if trimmed.is_empty() {
+        OPENCLAW_STATE_ROOT.to_string()
+    } else {
+        format!("{}/{}", OPENCLAW_STATE_ROOT, trimmed)
+    }
+}
+
+fn container_dir_exists(path: &str) -> Result<bool, String> {
+    Ok(docker_command()
+        .args(["exec", OPENCLAW_CONTAINER, "test", "-d", path])
+        .output()
+        .map_err(|e| format!("Failed to inspect container path: {}", e))?
+        .status
+        .success())
+}
+
+fn list_container_subdirs(path: &str) -> Result<Vec<String>, String> {
+    if !container_dir_exists(path)? {
+        return Ok(vec![]);
+    }
+
+    let listing = docker_exec_output(&["exec", OPENCLAW_CONTAINER, "ls", "-1", "--", path])?;
+    let mut out = Vec::new();
+    for line in listing.lines() {
+        let id = line.trim();
+        if !is_safe_component(id) {
+            continue;
+        }
+        let full_path = format!("{}/{}", path.trim_end_matches('/'), id);
+        if container_dir_exists(&full_path)? {
+            out.push(id.to_string());
+        }
+    }
+    Ok(out)
+}
+
+fn resolve_versioned_skill_dir(skill_id: &str) -> Result<Option<String>, String> {
+    let skill_root = format!("{}/{}", SKILLS_ROOT, skill_id);
+    if !container_dir_exists(&skill_root)? {
+        return Ok(None);
+    }
+
+    let current = format!("{}/current", skill_root);
+    if container_dir_exists(&current)? {
+        return Ok(Some(current));
+    }
+
+    let mut versions = list_container_subdirs(&skill_root)?;
+    if versions.is_empty() {
+        return Ok(None);
+    }
+    versions.sort();
+    let version = versions.pop().unwrap_or_else(|| "latest".to_string());
+    Ok(Some(format!("{}/{}", skill_root, version)))
+}
+
+fn resolve_installed_skill_dir(skill_id: &str) -> Result<Option<String>, String> {
+    if let Some(dir) = resolve_versioned_skill_dir(skill_id)? {
+        return Ok(Some(dir));
+    }
+
+    for legacy_root in LEGACY_SKILLS_ROOTS {
+        let legacy_path = format!("{}/{}", legacy_root.trim_end_matches('/'), skill_id);
+        if container_dir_exists(&legacy_path)? {
+            return Ok(Some(legacy_path));
+        }
+    }
+    Ok(None)
+}
+
+fn collect_skill_ids() -> Result<Vec<String>, String> {
+    let mut ids = list_container_subdirs(SKILLS_ROOT)?;
+    for legacy_root in LEGACY_SKILLS_ROOTS {
+        ids.extend(list_container_subdirs(legacy_root)?);
+    }
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
+fn sanitize_skill_version_component(version: &str) -> String {
+    let trimmed = version.trim();
+    if trimmed.is_empty() {
+        return "latest".to_string();
+    }
+    let mut out = String::with_capacity(trimmed.len());
+    for ch in trimmed.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "latest".to_string()
+    } else {
+        out
+    }
+}
+
+fn clawhub_latest_version(slug: &str) -> Result<Option<String>, String> {
+    let raw = clawhub_exec_output(&["inspect", slug, "--json"])?;
+    let payload: serde_json::Value = parse_clawhub_json(&raw)?;
+    let version = payload
+        .get("latestVersion")
+        .and_then(|v| v.get("version"))
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            payload
+                .get("skill")
+                .and_then(|v| v.get("tags"))
+                .and_then(|v| v.get("latest"))
+                .and_then(|v| v.as_str())
+        })
+        .map(sanitize_skill_version_component);
+    Ok(version)
+}
+
+fn infer_skill_scope_flags(skill_md: &str) -> serde_json::Value {
+    let lower = skill_md.to_lowercase();
+    let needs_network = lower.contains("http://")
+        || lower.contains("https://")
+        || lower.contains(" api ")
+        || lower.contains("fetch(")
+        || lower.contains("web search")
+        || lower.contains("web-search");
+    let needs_browser =
+        lower.contains("browser") || lower.contains("playwright") || lower.contains("chromium");
+    serde_json::json!({
+        "filesystem": true,
+        "network": needs_network,
+        "browser": needs_browser
+    })
+}
+
+fn compute_skill_tree_hash(path: &str) -> Option<String> {
+    let quoted = sh_single_quote(path);
+    let script = format!(
+        "set -e; cd {path}; if command -v sha256sum >/dev/null 2>&1; then find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{{print $1}}'; elif command -v shasum >/dev/null 2>&1; then find . -type f -print0 | sort -z | xargs -0 shasum -a 256 | shasum -a 256 | awk '{{print $1}}'; else exit 1; fi",
+        path = quoted
+    );
+    let output = docker_command()
+        .args(["exec", OPENCLAW_CONTAINER, "sh", "-c", &script])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if hash.is_empty() {
+        None
+    } else {
+        Some(hash)
+    }
 }
 
 fn start_scanner_sidecar() {
@@ -1176,8 +1358,11 @@ fn clawhub_exec(args: &[&str]) -> Result<Output, String> {
         OPENCLAW_CONTAINER,
         "env",
         "HOME=/data",
+        "TMPDIR=/data/tmp",
         "XDG_CONFIG_HOME=/data/.config",
+        "XDG_CACHE_HOME=/data/.cache",
         "npm_config_cache=/data/.npm",
+        "PLAYWRIGHT_BROWSERS_PATH=/data/playwright",
         "npx",
         "-y",
         "clawhub@0.7.0",
@@ -1626,7 +1811,7 @@ fn current_local_date() -> String {
 }
 
 fn read_openclaw_config() -> serde_json::Value {
-    let mut cfg = if let Some(raw) = read_container_file("/home/node/.openclaw/openclaw.json") {
+    let mut cfg = if let Some(raw) = read_container_file(&state_file("openclaw.json")) {
         match serde_json::from_str(&raw) {
             Ok(val) => val,
             Err(_) => serde_json::json!({}),
@@ -1665,7 +1850,7 @@ fn container_path_exists(path: &str) -> bool {
 
 fn write_openclaw_config(value: &serde_json::Value) -> Result<(), String> {
     let payload = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-    write_container_file("/home/node/.openclaw/openclaw.json", &payload)
+    write_container_file(&state_file("openclaw.json"), &payload)
 }
 
 fn set_openclaw_config_value(cfg: &mut serde_json::Value, path: &[&str], value: serde_json::Value) {
@@ -1800,7 +1985,10 @@ fn apply_default_qmd_memory_config(
         if !limits.contains_key("timeoutMs") {
             limits.insert("timeoutMs".to_string(), serde_json::json!(4000));
         }
-    } else if let Some(memory) = cfg_obj.get_mut("memory").and_then(|memory| memory.as_object_mut()) {
+    } else if let Some(memory) = cfg_obj
+        .get_mut("memory")
+        .and_then(|memory| memory.as_object_mut())
+    {
         if let Some(qmd) = memory.get_mut("qmd").and_then(|qmd| qmd.as_object_mut()) {
             if qmd.get("command").and_then(|value| value.as_str()) == Some("/data/qmd-wrapper") {
                 qmd.remove("command");
@@ -2175,13 +2363,16 @@ Use it for durable decisions, preferences, and facts that should persist across 
 "#;
 
     let today = current_local_date();
-    let mut daily_path = String::from("/home/node/.openclaw/workspace/memory/");
-    daily_path.push_str(&today);
-    daily_path.push_str(".md");
+    let daily_path = workspace_file(&format!("memory/{}.md", today));
     let daily_note = format!(
         "# {date}\n\n- [ ] Add raw notes from this session here while they are still fresh.\n",
         date = today
     );
+    let heartbeat_path = workspace_file("HEARTBEAT.md");
+    let tools_path = workspace_file("TOOLS.md");
+    let identity_path = workspace_file("IDENTITY.md");
+    let memory_path = workspace_file("MEMORY.md");
+    let soul_path = workspace_file("SOUL.md");
     let thinking_level_env = read_container_env("NOVA_THINKING_LEVEL");
     let fingerprint_payload = serde_json::json!({
         "container_id": container_id,
@@ -2215,22 +2406,22 @@ Use it for durable decisions, preferences, and facts that should persist across 
 
     let mut writes: Vec<ContainerFileWrite<'_>> = vec![
         ContainerFileWrite {
-            path: "/home/node/.openclaw/workspace/HEARTBEAT.md",
+            path: &heartbeat_path,
             content: &hb_body,
             only_if_missing: false,
         },
         ContainerFileWrite {
-            path: "/home/node/.openclaw/workspace/TOOLS.md",
+            path: &tools_path,
             content: &tools_body,
             only_if_missing: false,
         },
         ContainerFileWrite {
-            path: "/home/node/.openclaw/workspace/IDENTITY.md",
+            path: &identity_path,
             content: &id_body,
             only_if_missing: false,
         },
         ContainerFileWrite {
-            path: "/home/node/.openclaw/workspace/MEMORY.md",
+            path: &memory_path,
             content: memory_bootstrap,
             only_if_missing: true,
         },
@@ -2244,7 +2435,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
         writes.insert(
             0,
             ContainerFileWrite {
-                path: "/home/node/.openclaw/workspace/SOUL.md",
+                path: &soul_path,
                 content: &settings.soul,
                 only_if_missing: false,
             },
@@ -2396,7 +2587,13 @@ Use it for durable decisions, preferences, and facts that should persist across 
     let mut has_nova_x = container_path_exists("/app/extensions/nova-x");
     let mut nova_x_path: Option<String> = None;
     if let Some(skills_root) = read_container_env("NOVA_SKILLS_PATH") {
-        let candidate = format!("{}/nova-x", skills_root.trim_end_matches('/'));
+        let base = format!("{}/nova-x", skills_root.trim_end_matches('/'));
+        let current = format!("{}/current", base);
+        let candidate = if container_path_exists(&current) {
+            current
+        } else {
+            base
+        };
         if container_path_exists(&candidate) {
             has_nova_x = true;
             nova_x_path = Some(candidate);
@@ -3804,6 +4001,67 @@ fn container_instance_id() -> Option<String> {
     }
 }
 
+fn container_running() -> bool {
+    let output = docker_command()
+        .args([
+            "ps",
+            "-q",
+            "-f",
+            "name=nova-openclaw",
+            "-f",
+            "status=running",
+        ])
+        .output()
+        .ok();
+    match output {
+        Some(out) if out.status.success() => !out.stdout.is_empty(),
+        _ => false,
+    }
+}
+
+fn colima_daemon_killed_hint() -> Option<String> {
+    if !matches!(Platform::detect(), Platform::MacOS) {
+        return None;
+    }
+
+    let colima_home = nova_colima_home_path();
+    for profile in [NOVA_VZ_PROFILE, NOVA_QEMU_PROFILE] {
+        let daemon_log = colima_home.join(profile).join("daemon").join("daemon.log");
+        let content = match fs::read_to_string(&daemon_log) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        if let Some(line) = content
+            .lines()
+            .rev()
+            .take(300)
+            .find(|line| line.contains("signal: killed"))
+        {
+            println!(
+                "[Nova] Colima daemon crash marker in {} ({}): {}",
+                profile,
+                daemon_log.display(),
+                line.trim()
+            );
+            return Some(format!(
+                "Detected Colima {} daemon crash marker (`signal: killed`) in {}. This usually means the VM was killed by host resource pressure; increase Nova runtime memory and keep Colima running.",
+                profile,
+                daemon_log.display()
+            ));
+        }
+    }
+
+    None
+}
+
+fn append_colima_runtime_hint(message: String) -> String {
+    if let Some(hint) = colima_daemon_killed_hint() {
+        format!("{}\n\n{}", message, hint)
+    } else {
+        message
+    }
+}
+
 fn finish_health_wait_or_tolerate_starting(err: String, context: &str) -> Result<(), String> {
     if err.contains("container health=starting") {
         println!(
@@ -3812,7 +4070,7 @@ fn finish_health_wait_or_tolerate_starting(err: String, context: &str) -> Result
         );
         return Ok(());
     }
-    Err(format!("{}: {}", context, err))
+    Err(append_colima_runtime_hint(format!("{}: {}", context, err)))
 }
 
 fn default_agent_settings() -> StoredAgentSettings {
@@ -3872,7 +4130,9 @@ pub async fn append_client_log(message: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn start_runtime(app: AppHandle) -> Result<(), String> {
     let runtime = get_runtime(&app);
-    runtime.start_colima().map_err(|e| e.to_string())
+    runtime
+        .start_colima()
+        .map_err(|e| append_colima_runtime_hint(e.to_string()))
 }
 
 #[tauri::command]
@@ -3895,7 +4155,10 @@ pub async fn ensure_runtime(app: AppHandle) -> Result<RuntimeStatus, String> {
         if status.colima_installed && !status.vm_running && !status.docker_ready {
             // Try to start Colima
             if let Err(e) = runtime.start_colima() {
-                return Err(format!("Failed to start Colima: {}", e));
+                return Err(append_colima_runtime_hint(format!(
+                    "Failed to start Colima: {}",
+                    e
+                )));
             }
             // Re-check status after starting
             status = runtime.check_status();
@@ -3906,7 +4169,9 @@ pub async fn ensure_runtime(app: AppHandle) -> Result<RuntimeStatus, String> {
         if !status.docker_installed {
             return Err("Docker is not installed. Please install Docker to continue.".to_string());
         }
-        return Err("Docker is not running. Please ensure Docker is started.".to_string());
+        return Err(append_colima_runtime_hint(
+            "Docker is not running. Please ensure Docker is started.".to_string(),
+        ));
     }
 
     Ok(status)
@@ -4025,9 +4290,9 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
             && !status.vm_running
         {
             // Auto-start Colima on macOS if installed
-            runtime
-                .start_colima()
-                .map_err(|e| format!("Failed to start Colima: {}", e))?;
+            runtime.start_colima().map_err(|e| {
+                append_colima_runtime_hint(format!("Failed to start Colima: {}", e))
+            })?;
         } else if !status.docker_installed {
             let install_msg = match Platform::detect() {
                 Platform::Linux => "Docker is not installed. Please install Docker Engine: sudo apt install docker.io",
@@ -4036,7 +4301,9 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
             };
             return Err(install_msg.to_string());
         } else {
-            return Err("Docker is not running. Please start Docker and try again.".to_string());
+            return Err(append_colima_runtime_hint(
+                "Docker is not running. Please start Docker and try again.".to_string(),
+            ));
         }
     }
     println!(
@@ -4169,19 +4436,25 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
 
     // Build docker run command - pass API keys as env vars
     let mut env_entries: Vec<(&str, &str)> = vec![
-        (
-            "OPENCLAW_GATEWAY_TOKEN",
-            gateway_token.as_str(),
-        ),
-        (
-            "NOVA_GATEWAY_SCHEMA_VERSION",
-            NOVA_GATEWAY_SCHEMA_VERSION,
-        ),
-        // OPENCLAW_MODEL is read by apply_agent_settings to write openclaw.json config
+        ("OPENCLAW_GATEWAY_TOKEN", gateway_token.as_str()),
+        ("NOVA_GATEWAY_SCHEMA_VERSION", NOVA_GATEWAY_SCHEMA_VERSION),
+        // OPENCLAW_MODEL is read by apply_agent_settings to write openclaw.json config.
+        // Keep base model and pass reasoning/thinking separately.
         ("OPENCLAW_MODEL", base_model),
         ("OPENCLAW_MEMORY_SLOT", memory_slot),
         // NOVA_THINKING_LEVEL is read by apply_agent_settings to set thinkingDefault in config
         ("NOVA_THINKING_LEVEL", thinking_level),
+        ("NOVA_WORKSPACE_PATH", WORKSPACE_ROOT),
+        ("NOVA_SKILLS_PATH", SKILLS_ROOT),
+        ("NOVA_SKILL_MANIFESTS_PATH", SKILL_MANIFESTS_ROOT),
+        ("HOME", "/data"),
+        ("TMPDIR", "/data/tmp"),
+        ("XDG_CONFIG_HOME", "/data/.config"),
+        ("XDG_CACHE_HOME", "/data/.cache"),
+        ("npm_config_cache", "/data/.npm"),
+        ("PLAYWRIGHT_BROWSERS_PATH", "/data/playwright"),
+        ("NOVA_BROWSER_PROFILE", "/data/browser/profile"),
+        ("NOVA_TOOLS_PATH", "/data/tools"),
     ];
 
     // Anthropic: use ANTHROPIC_OAUTH_TOKEN for OAuth tokens (sk-ant-oat01-...), ANTHROPIC_API_KEY for regular keys
@@ -4222,6 +4495,8 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
         "-d".to_string(),
         "--name".to_string(),
         "nova-openclaw".to_string(),
+        "--restart".to_string(),
+        "unless-stopped".to_string(),
         "--user".to_string(),
         "1000:1000".to_string(),
         "--add-host".to_string(),
@@ -4274,12 +4549,15 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
     let run = docker_command()
         .args(&docker_args)
         .output()
-        .map_err(|e| format!("Failed to run container: {}", e))?;
+        .map_err(|e| append_colima_runtime_hint(format!("Failed to run container: {}", e)))?;
 
     if !run.status.success() {
         let stderr = String::from_utf8_lossy(&run.stderr);
         println!("[Nova] Failed to start container: {}", stderr);
-        return Err(format!("Failed to start container: {}", stderr));
+        return Err(append_colima_runtime_hint(format!(
+            "Failed to start container: {}",
+            stderr
+        )));
     }
 
     println!("[Nova] Container started successfully");
@@ -4298,7 +4576,8 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
 
     let health_started = Instant::now();
     if let Err(initial) = wait_for_gateway_health_strict(&gateway_token, 12).await {
-        if matches!(container_health_status().as_deref(), Some("starting")) {
+        let health_status = container_health_status();
+        if matches!(health_status.as_deref(), Some("starting")) {
             println!(
                 "[Nova] Gateway strict health check failed while health=starting; extending wait: {}",
                 initial
@@ -4309,15 +4588,28 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
                     "Gateway failed strict health check after extended wait",
                 )?;
             }
-        } else {
+        } else if matches!(health_status.as_deref(), Some("healthy")) {
             println!(
-                "[Nova] Gateway strict health check failed after start, attempting restart: {}",
+                "[Nova] Gateway strict health check failed but container health=healthy; extending wait without restart: {}",
                 initial
+            );
+            if let Err(e) = wait_for_gateway_health_strict(&gateway_token, 16).await {
+                finish_health_wait_or_tolerate_starting(
+                    e,
+                    "Gateway failed strict health check after extended wait",
+                )?;
+            }
+        } else if matches!(health_status.as_deref(), Some("unhealthy")) || !container_running() {
+            println!(
+                "[Nova] Gateway strict health check failed with container state {:?}; attempting restart: {}",
+                health_status, initial
             );
             let restart = docker_command()
                 .args(["restart", OPENCLAW_CONTAINER])
                 .output()
-                .map_err(|e| format!("Failed to restart container: {}", e))?;
+                .map_err(|e| {
+                    append_colima_runtime_hint(format!("Failed to restart container: {}", e))
+                })?;
             if !restart.status.success() {
                 let stderr = String::from_utf8_lossy(&restart.stderr);
                 if stderr.contains("is not running") || stderr.contains("no such container") {
@@ -4334,20 +4626,22 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
                             String::from_utf8_lossy(&cleanup.stderr)
                         );
                     }
-                    let rerun = docker_command()
-                        .args(&docker_args)
-                        .output()
-                        .map_err(|e| format!("Failed to rerun container: {}", e))?;
+                    let rerun = docker_command().args(&docker_args).output().map_err(|e| {
+                        append_colima_runtime_hint(format!("Failed to rerun container: {}", e))
+                    })?;
                     if !rerun.status.success() {
                         let rerun_stderr = String::from_utf8_lossy(&rerun.stderr);
-                        return Err(format!("Failed to rerun container: {}", rerun_stderr));
+                        return Err(append_colima_runtime_hint(format!(
+                            "Failed to rerun container: {}",
+                            rerun_stderr
+                        )));
                     }
                 } else {
-                    return Err(format!(
+                    return Err(append_colima_runtime_hint(format!(
                         "Gateway failed health check ({}) and restart failed: {}",
                         initial,
                         stderr.trim()
-                    ));
+                    )));
                 }
             }
             apply_agent_settings(&app, &state)?;
@@ -4355,6 +4649,17 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
                 finish_health_wait_or_tolerate_starting(
                     e,
                     "Gateway failed strict health check after recovery",
+                )?;
+            }
+        } else {
+            println!(
+                "[Nova] Gateway strict health check failed with container state {:?}; extending wait without restart: {}",
+                health_status, initial
+            );
+            if let Err(e) = wait_for_gateway_health_strict(&gateway_token, 16).await {
+                finish_health_wait_or_tolerate_starting(
+                    e,
+                    "Gateway failed strict health check after extended wait",
                 )?;
             }
         }
@@ -4431,13 +4736,15 @@ pub async fn start_gateway_with_proxy(
             && status.colima_installed
             && !status.vm_running
         {
-            runtime
-                .start_colima()
-                .map_err(|e| format!("Failed to start Colima: {}", e))?;
+            runtime.start_colima().map_err(|e| {
+                append_colima_runtime_hint(format!("Failed to start Colima: {}", e))
+            })?;
         } else if !status.docker_installed {
             return Err("Docker is not installed. Please install Docker to continue.".to_string());
         } else {
-            return Err("Docker is not running. Please start Docker and try again.".to_string());
+            return Err(append_colima_runtime_hint(
+                "Docker is not running. Please start Docker and try again.".to_string(),
+            ));
         }
     }
     println!(
@@ -4447,20 +4754,25 @@ pub async fn start_gateway_with_proxy(
     let local_gateway_token = expected_gateway_token(&app)?;
     let build_proxy_docker_args = || -> Result<(Vec<String>, GatewayEnvFile), String> {
         let mut env_entries: Vec<(&str, &str)> = vec![
-            (
-                "OPENCLAW_GATEWAY_TOKEN",
-                local_gateway_token.as_str(),
-            ),
-            (
-                "NOVA_GATEWAY_SCHEMA_VERSION",
-                NOVA_GATEWAY_SCHEMA_VERSION,
-            ),
+            ("OPENCLAW_GATEWAY_TOKEN", local_gateway_token.as_str()),
+            ("NOVA_GATEWAY_SCHEMA_VERSION", NOVA_GATEWAY_SCHEMA_VERSION),
             ("OPENCLAW_MODEL", model.as_str()),
             ("OPENCLAW_MEMORY_SLOT", "memory-core"),
             ("NOVA_PROXY_MODE", "1"),
             ("OPENROUTER_API_KEY", gateway_token.as_str()),
             ("NOVA_PROXY_BASE_URL", docker_proxy_api_url.as_str()),
             ("NOVA_WEB_BASE_URL", resolved_proxy_url.as_str()),
+            ("NOVA_WORKSPACE_PATH", WORKSPACE_ROOT),
+            ("NOVA_SKILLS_PATH", SKILLS_ROOT),
+            ("NOVA_SKILL_MANIFESTS_PATH", SKILL_MANIFESTS_ROOT),
+            ("HOME", "/data"),
+            ("TMPDIR", "/data/tmp"),
+            ("XDG_CONFIG_HOME", "/data/.config"),
+            ("XDG_CACHE_HOME", "/data/.cache"),
+            ("npm_config_cache", "/data/.npm"),
+            ("PLAYWRIGHT_BROWSERS_PATH", "/data/playwright"),
+            ("NOVA_BROWSER_PROFILE", "/data/browser/profile"),
+            ("NOVA_TOOLS_PATH", "/data/tools"),
         ];
         if let Some(image_model) = image_model.as_deref() {
             if !image_model.trim().is_empty() {
@@ -4475,6 +4787,8 @@ pub async fn start_gateway_with_proxy(
             "-d".to_string(),
             "--name".to_string(),
             "nova-openclaw".to_string(),
+            "--restart".to_string(),
+            "unless-stopped".to_string(),
             "--user".to_string(),
             "1000:1000".to_string(),
             "--add-host".to_string(),
@@ -4488,8 +4802,7 @@ pub async fn start_gateway_with_proxy(
             "--tmpfs".to_string(),
             "/run:rw,noexec,nosuid,nodev,size=10m".to_string(),
             "--tmpfs".to_string(),
-            "/home/node/.openclaw:rw,noexec,nosuid,nodev,size=50m,uid=1000,gid=1000"
-                .to_string(),
+            "/home/node/.openclaw:rw,noexec,nosuid,nodev,size=50m,uid=1000,gid=1000".to_string(),
             "--env-file".to_string(),
             env_file_path,
         ];
@@ -4541,7 +4854,6 @@ pub async fn start_gateway_with_proxy(
         let expected_image = image_model.clone().unwrap_or_default();
 
         let proxy_matches = current_proxy.as_deref() == Some(expected_proxy_env.as_str());
-        let token_matches = current_token.as_deref() == Some(gateway_token.as_str());
         let gateway_token_matches =
             current_gateway_token.as_deref() == Some(local_gateway_token.as_str());
         let schema_matches = current_schema.as_deref() == Some(NOVA_GATEWAY_SCHEMA_VERSION);
@@ -4550,12 +4862,16 @@ pub async fn start_gateway_with_proxy(
             expected_image.is_empty() || current_image.as_deref() == Some(expected_image.as_str());
 
         if proxy_matches
-            && token_matches
             && gateway_token_matches
             && schema_matches
             && model_matches
             && image_matches
         {
+            if current_token.as_deref() != Some(gateway_token.as_str()) {
+                println!(
+                    "[Nova] Proxy token changed but container config is otherwise compatible; keeping running container to avoid churn."
+                );
+            }
             println!("[Nova] Proxy container already running with matching config. Reusing.");
             let reuse_prepare_started = Instant::now();
             apply_agent_settings(&app, &state)?;
@@ -4565,7 +4881,8 @@ pub async fn start_gateway_with_proxy(
             );
             let health_started = Instant::now();
             if let Err(initial) = wait_for_gateway_health_strict(&local_gateway_token, 12).await {
-                if matches!(container_health_status().as_deref(), Some("starting")) {
+                let health_status = container_health_status();
+                if matches!(health_status.as_deref(), Some("starting")) {
                     println!(
                         "[Nova] Proxy health check failed while health=starting; extending wait: {}",
                         initial
@@ -4576,15 +4893,33 @@ pub async fn start_gateway_with_proxy(
                             "Proxy gateway failed strict health check after extended wait",
                         )?;
                     }
-                } else {
+                } else if matches!(health_status.as_deref(), Some("healthy")) {
                     println!(
-                        "[Nova] Proxy gateway health check failed, attempting container restart: {}",
+                        "[Nova] Proxy health check failed but container health=healthy; extending wait without restart: {}",
                         initial
+                    );
+                    if let Err(e) = wait_for_gateway_health_strict(&local_gateway_token, 16).await {
+                        finish_health_wait_or_tolerate_starting(
+                            e,
+                            "Proxy gateway failed strict health check after extended wait",
+                        )?;
+                    }
+                } else if matches!(health_status.as_deref(), Some("unhealthy"))
+                    || !container_running()
+                {
+                    println!(
+                        "[Nova] Proxy gateway health check failed with container state {:?}; attempting container restart: {}",
+                        health_status, initial
                     );
                     let restart = docker_command()
                         .args(["restart", OPENCLAW_CONTAINER])
                         .output()
-                        .map_err(|e| format!("Failed to restart container: {}", e))?;
+                        .map_err(|e| {
+                            append_colima_runtime_hint(format!(
+                                "Failed to restart container: {}",
+                                e
+                            ))
+                        })?;
                     if !restart.status.success() {
                         let stderr = String::from_utf8_lossy(&restart.stderr);
                         if stderr.contains("is not running") || stderr.contains("no such container")
@@ -4603,24 +4938,27 @@ pub async fn start_gateway_with_proxy(
                                     String::from_utf8_lossy(&cleanup.stderr)
                                 );
                             }
-                            let rerun = docker_command()
-                                .args(&rerun_args)
-                                .output()
-                                .map_err(|e| format!("Failed to rerun proxy container: {}", e))?;
+                            let rerun =
+                                docker_command().args(&rerun_args).output().map_err(|e| {
+                                    append_colima_runtime_hint(format!(
+                                        "Failed to rerun proxy container: {}",
+                                        e
+                                    ))
+                                })?;
                             if !rerun.status.success() {
                                 let rerun_stderr = String::from_utf8_lossy(&rerun.stderr);
-                                return Err(format!(
+                                return Err(append_colima_runtime_hint(format!(
                                     "Proxy gateway failed health check ({}) and recreate failed: {}",
                                     initial,
                                     rerun_stderr.trim()
-                                ));
+                                )));
                             }
                         } else {
-                            return Err(format!(
+                            return Err(append_colima_runtime_hint(format!(
                                 "Proxy gateway failed health check ({}) and restart failed: {}",
                                 initial,
                                 stderr.trim()
-                            ));
+                            )));
                         }
                     }
                     apply_agent_settings(&app, &state)?;
@@ -4628,6 +4966,17 @@ pub async fn start_gateway_with_proxy(
                         finish_health_wait_or_tolerate_starting(
                             e,
                             "Proxy gateway failed strict health check after recovery",
+                        )?;
+                    }
+                } else {
+                    println!(
+                        "[Nova] Proxy health check failed with container state {:?}; extending wait without restart: {}",
+                        health_status, initial
+                    );
+                    if let Err(e) = wait_for_gateway_health_strict(&local_gateway_token, 16).await {
+                        finish_health_wait_or_tolerate_starting(
+                            e,
+                            "Proxy gateway failed strict health check after extended wait",
                         )?;
                     }
                 }
@@ -4687,7 +5036,7 @@ pub async fn start_gateway_with_proxy(
     let run = docker_command()
         .args(&docker_args)
         .output()
-        .map_err(|e| format!("Failed to run container: {}", e))?;
+        .map_err(|e| append_colima_runtime_hint(format!("Failed to run container: {}", e)))?;
 
     if !run.status.success() {
         let stderr = String::from_utf8_lossy(&run.stderr);
@@ -4697,25 +5046,35 @@ pub async fn start_gateway_with_proxy(
             let cleanup = docker_command()
                 .args(["rm", "-f", OPENCLAW_CONTAINER])
                 .output()
-                .map_err(|e| format!("Failed to cleanup conflicting container: {}", e))?;
+                .map_err(|e| {
+                    append_colima_runtime_hint(format!(
+                        "Failed to cleanup conflicting container: {}",
+                        e
+                    ))
+                })?;
             if !cleanup.status.success() {
                 let cleanup_stderr = String::from_utf8_lossy(&cleanup.stderr);
-                return Err(format!(
+                return Err(append_colima_runtime_hint(format!(
                     "Failed to start container: {} (conflict cleanup failed: {})",
                     stderr.trim(),
                     cleanup_stderr.trim()
-                ));
+                )));
             }
-            let rerun = docker_command()
-                .args(&docker_args)
-                .output()
-                .map_err(|e| format!("Failed to rerun container: {}", e))?;
+            let rerun = docker_command().args(&docker_args).output().map_err(|e| {
+                append_colima_runtime_hint(format!("Failed to rerun container: {}", e))
+            })?;
             if !rerun.status.success() {
                 let rerun_stderr = String::from_utf8_lossy(&rerun.stderr);
-                return Err(format!("Failed to start container: {}", rerun_stderr));
+                return Err(append_colima_runtime_hint(format!(
+                    "Failed to start container: {}",
+                    rerun_stderr
+                )));
             }
         } else {
-            return Err(format!("Failed to start container: {}", stderr));
+            return Err(append_colima_runtime_hint(format!(
+                "Failed to start container: {}",
+                stderr
+            )));
         }
     }
 
@@ -4735,7 +5094,8 @@ pub async fn start_gateway_with_proxy(
 
     let health_started = Instant::now();
     if let Err(initial) = wait_for_gateway_health_strict(&local_gateway_token, 12).await {
-        if matches!(container_health_status().as_deref(), Some("starting")) {
+        let health_status = container_health_status();
+        if matches!(health_status.as_deref(), Some("starting")) {
             println!(
                 "[Nova] Proxy strict health check failed while health=starting; extending wait: {}",
                 initial
@@ -4746,15 +5106,28 @@ pub async fn start_gateway_with_proxy(
                     "Proxy gateway failed strict health check after extended wait",
                 )?;
             }
-        } else {
+        } else if matches!(health_status.as_deref(), Some("healthy")) {
             println!(
-                "[Nova] Proxy gateway strict health check failed after start, attempting restart: {}",
+                "[Nova] Proxy strict health check failed but container health=healthy; extending wait without restart: {}",
                 initial
+            );
+            if let Err(e) = wait_for_gateway_health_strict(&local_gateway_token, 16).await {
+                finish_health_wait_or_tolerate_starting(
+                    e,
+                    "Proxy gateway failed strict health check after extended wait",
+                )?;
+            }
+        } else if matches!(health_status.as_deref(), Some("unhealthy")) || !container_running() {
+            println!(
+                "[Nova] Proxy gateway strict health check failed with container state {:?}; attempting restart: {}",
+                health_status, initial
             );
             let restart = docker_command()
                 .args(["restart", OPENCLAW_CONTAINER])
                 .output()
-                .map_err(|e| format!("Failed to restart container: {}", e))?;
+                .map_err(|e| {
+                    append_colima_runtime_hint(format!("Failed to restart container: {}", e))
+                })?;
             if !restart.status.success() {
                 let stderr = String::from_utf8_lossy(&restart.stderr);
                 if stderr.contains("is not running") || stderr.contains("no such container") {
@@ -4771,23 +5144,25 @@ pub async fn start_gateway_with_proxy(
                             String::from_utf8_lossy(&cleanup.stderr)
                         );
                     }
-                    let rerun = docker_command()
-                        .args(&docker_args)
-                        .output()
-                        .map_err(|e| format!("Failed to rerun proxy container: {}", e))?;
+                    let rerun = docker_command().args(&docker_args).output().map_err(|e| {
+                        append_colima_runtime_hint(format!(
+                            "Failed to rerun proxy container: {}",
+                            e
+                        ))
+                    })?;
                     if !rerun.status.success() {
                         let rerun_stderr = String::from_utf8_lossy(&rerun.stderr);
-                        return Err(format!(
+                        return Err(append_colima_runtime_hint(format!(
                             "Failed to start proxy container after restart failure: {}",
                             rerun_stderr
-                        ));
+                        )));
                     }
                 } else {
-                    return Err(format!(
+                    return Err(append_colima_runtime_hint(format!(
                         "Proxy gateway failed health check ({}) and restart failed: {}",
                         initial,
                         stderr.trim()
-                    ));
+                    )));
                 }
             }
             apply_agent_settings(&app, &state)?;
@@ -4795,6 +5170,17 @@ pub async fn start_gateway_with_proxy(
                 finish_health_wait_or_tolerate_starting(
                     e,
                     "Proxy gateway failed strict health check after recovery",
+                )?;
+            }
+        } else {
+            println!(
+                "[Nova] Proxy gateway strict health check failed with container state {:?}; extending wait without restart: {}",
+                health_status, initial
+            );
+            if let Err(e) = wait_for_gateway_health_strict(&local_gateway_token, 16).await {
+                finish_health_wait_or_tolerate_starting(
+                    e,
+                    "Proxy gateway failed strict health check after extended wait",
                 )?;
             }
         }
@@ -4892,23 +5278,50 @@ pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
     let token = effective_gateway_token(&app)?;
 
     println!("[Nova] Checking gateway health via WS at: {}", ws_url);
-    match check_gateway_ws_health(ws_url, &token).await {
-        Ok(true) => {
-            println!("[Nova] Gateway health check passed");
-            Ok(true)
-        }
-        Ok(false) => {
-            println!("[Nova] Gateway health check failed");
-            Ok(false)
-        }
-        Err(e) => {
-            println!("[Nova] Gateway health check failed: {}", e);
-            if let Some(health_status) = container_health_status() {
-                println!("[Nova] Container health status: {}", health_status);
+    let mut last_error: Option<String> = None;
+    for attempt in 1..=2 {
+        match check_gateway_ws_health(ws_url, &token).await {
+            Ok(true) => {
+                println!("[Nova] Gateway health check passed");
+                return Ok(true);
             }
-            Ok(false)
+            Ok(false) => {
+                last_error = Some("health rpc rejected".to_string());
+            }
+            Err(e) => {
+                last_error = Some(e);
+            }
+        }
+
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }
+
+    if let Some(health_status) = container_health_status() {
+        println!("[Nova] Container health status: {}", health_status);
+        if health_status == "healthy" || health_status == "starting" {
+            println!(
+                "[Nova] Gateway WS probe failed after retries but container health is {}; treating as running.",
+                health_status
+            );
+            return Ok(true);
+        }
+    }
+
+    if !container_running() {
+        println!("[Nova] Container stopped while checking gateway health");
+        return Ok(false);
+    }
+
+    println!(
+        "[Nova] Gateway health check failed after retries: {}",
+        last_error.unwrap_or_else(|| "unknown health failure".to_string())
+    );
+    if let Some(hint) = colima_daemon_killed_hint() {
+        println!("[Nova] {}", hint);
+    }
+    Ok(false)
 }
 
 #[tauri::command]
@@ -4927,9 +5340,8 @@ pub async fn get_gateway_auth(app: AppHandle) -> Result<GatewayAuthPayload, Stri
 #[tauri::command]
 pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState, String> {
     let stored = load_agent_settings(&app);
-    let soul = read_container_file("/home/node/.openclaw/workspace/SOUL.md").unwrap_or_default();
-    let heartbeat_raw =
-        read_container_file("/home/node/.openclaw/workspace/HEARTBEAT.md").unwrap_or_default();
+    let soul = read_container_file(&workspace_file("SOUL.md")).unwrap_or_default();
+    let heartbeat_raw = read_container_file(&workspace_file("HEARTBEAT.md")).unwrap_or_default();
     let heartbeat_tasks = heartbeat_raw
         .lines()
         .filter_map(|line| {
@@ -5086,7 +5498,7 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
         .filter(|device| device.is_online)
         .count();
     let bridge_paired = bridge_enabled && bridge_device_count > 0;
-    let tools = read_container_file("/home/node/.openclaw/workspace/TOOLS.md").unwrap_or_default();
+    let tools = read_container_file(&workspace_file("TOOLS.md")).unwrap_or_default();
     let capabilities = if tools.trim().is_empty() {
         stored.capabilities.clone()
     } else {
@@ -5164,7 +5576,7 @@ pub async fn get_agent_profile_state(app: AppHandle) -> Result<AgentProfileState
 
 #[tauri::command]
 pub async fn set_personality(app: AppHandle, soul: String) -> Result<(), String> {
-    write_container_file("/home/node/.openclaw/workspace/SOUL.md", &soul)?;
+    write_container_file(&workspace_file("SOUL.md"), &soul)?;
     let mut settings = load_agent_settings(&app);
     settings.soul = soul;
     save_agent_settings(&app, settings)?;
@@ -5212,7 +5624,7 @@ pub async fn set_heartbeat(
             }
         }
     }
-    write_container_file("/home/node/.openclaw/workspace/HEARTBEAT.md", &body)?;
+    write_container_file(&workspace_file("HEARTBEAT.md"), &body)?;
     let mut settings = load_agent_settings(&app);
     settings.heartbeat_every = every;
     settings.heartbeat_tasks = tasks;
@@ -5314,7 +5726,7 @@ pub async fn set_capabilities(app: AppHandle, list: Vec<CapabilityState>) -> Res
         let mark = if cap.enabled { "x" } else { " " };
         body.push_str(&format!("- [{}] {}\n", mark, cap.label));
     }
-    write_container_file("/home/node/.openclaw/workspace/TOOLS.md", &body)?;
+    write_container_file(&workspace_file("TOOLS.md"), &body)?;
     let mut settings = load_agent_settings(&app);
     settings.capabilities = list;
     save_agent_settings(&app, settings)?;
@@ -5335,7 +5747,7 @@ pub async fn set_identity(
     } else {
         body.push_str("- **Avatar:**\n");
     }
-    write_container_file("/home/node/.openclaw/workspace/IDENTITY.md", &body)?;
+    write_container_file(&workspace_file("IDENTITY.md"), &body)?;
     let mut settings = load_agent_settings(&app);
     settings.identity_name = name.trim().to_string();
     settings.identity_avatar = avatar_data_url;
@@ -5894,48 +6306,24 @@ pub async fn set_plugin_enabled(id: String, enabled: bool) -> Result<(), String>
 
 #[tauri::command]
 pub async fn get_skill_store() -> Result<Vec<SkillInfo>, String> {
-    let skills_root = format!("{}/skills", WORKSPACE_ROOT);
-    let skills_dir_exists = docker_command()
-        .args(["exec", OPENCLAW_CONTAINER, "test", "-d", &skills_root])
-        .output()
-        .map_err(|e| format!("Failed to check skills directory: {}", e))?
-        .status
-        .success();
-
-    if !skills_dir_exists {
-        return Ok(vec![]);
-    }
-
-    let listing =
-        docker_exec_output(&["exec", OPENCLAW_CONTAINER, "ls", "-1", "--", &skills_root])?;
+    let listing = collect_skill_ids()?;
     let mut out = Vec::new();
 
-    for line in listing.lines() {
-        let id = line.trim();
-        if !is_safe_component(id) {
-            continue;
-        }
-        let full_path = format!("{}/{}", skills_root, id);
-        let is_dir = docker_command()
-            .args(["exec", OPENCLAW_CONTAINER, "test", "-d", &full_path])
-            .output()
-            .map_err(|e| format!("Failed to inspect skill path: {}", e))?
-            .status
-            .success();
-        if !is_dir {
-            continue;
-        }
-
+    for id in listing {
+        let full_path = match resolve_installed_skill_dir(&id)? {
+            Some(path) => path,
+            None => continue,
+        };
         let skill_md_path = format!("{}/SKILL.md", full_path);
         let raw = read_container_file(&skill_md_path).unwrap_or_default();
         let (name, description) = parse_skill_frontmatter(&raw);
 
         out.push(SkillInfo {
-            id: id.to_string(),
-            name: name.unwrap_or_else(|| id.to_string()),
+            id: id.clone(),
+            name: name.unwrap_or_else(|| id.clone()),
             description: description.unwrap_or_else(|| "Workspace skill".to_string()),
             path: full_path,
-            source: "Workspace".to_string(),
+            source: "User Skills".to_string(),
         });
     }
 
@@ -5953,19 +6341,28 @@ pub async fn remove_workspace_skill(id: String) -> Result<(), String> {
         return Err("Nova-managed skills cannot be removed".to_string());
     }
 
-    let full_path = format!("{}/skills/{}", WORKSPACE_ROOT, skill_id);
-    let exists = docker_command()
-        .args(["exec", OPENCLAW_CONTAINER, "test", "-d", &full_path])
-        .output()
-        .map_err(|e| format!("Failed to inspect skill: {}", e))?
-        .status
-        .success();
-
-    if !exists {
-        return Err("Skill not found".to_string());
+    let mut removed_any = false;
+    let mut remove_paths = vec![format!("{}/{}", SKILLS_ROOT, skill_id)];
+    for legacy_root in LEGACY_SKILLS_ROOTS {
+        remove_paths.push(format!(
+            "{}/{}",
+            legacy_root.trim_end_matches('/'),
+            skill_id
+        ));
     }
 
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "rm", "-rf", "--", &full_path])?;
+    for full_path in remove_paths {
+        let exists = container_dir_exists(&full_path)?;
+        if !exists {
+            continue;
+        }
+        docker_exec_output(&["exec", OPENCLAW_CONTAINER, "rm", "-rf", "--", &full_path])?;
+        removed_any = true;
+    }
+
+    if !removed_any {
+        return Err("Skill not found".to_string());
+    }
     Ok(())
 }
 
@@ -6199,7 +6596,13 @@ pub async fn scan_plugin(id: String) -> Result<PluginScanResult, String> {
 
     if !exists {
         if let Some(skills_root) = read_container_env("NOVA_SKILLS_PATH") {
-            let candidate = format!("{}/{}", skills_root.trim_end_matches('/'), plugin_id);
+            let base = format!("{}/{}", skills_root.trim_end_matches('/'), plugin_id);
+            let current = format!("{}/current", base);
+            let candidate = if container_path_exists(&current) {
+                current
+            } else {
+                base
+            };
             let candidate_exists = docker_command()
                 .args(["exec", OPENCLAW_CONTAINER, "test", "-d", &candidate])
                 .output()
@@ -6234,16 +6637,8 @@ pub async fn scan_workspace_skill(id: String) -> Result<PluginScanResult, String
         return Ok(scanner_unavailable_result());
     }
 
-    let source_dir = format!("{}/skills/{}", WORKSPACE_ROOT, skill_id);
-    let exists = docker_command()
-        .args(["exec", OPENCLAW_CONTAINER, "test", "-d", &source_dir])
-        .output()
-        .map_err(|e| format!("Failed to inspect skill directory: {}", e))?
-        .status
-        .success();
-    if !exists {
-        return Err("Skill directory not found".to_string());
-    }
+    let source_dir = resolve_installed_skill_dir(&skill_id)?
+        .ok_or_else(|| "Skill directory not found".to_string())?;
 
     let scanner_dir = format!("/tmp/nova-scan/workspace-skills/{}", skill_id);
     clone_dir_from_openclaw_to_scanner(&source_dir, &scanner_dir)?;
@@ -6391,13 +6786,18 @@ pub async fn scan_and_install_clawhub_skill(
         });
     }
 
+    let skill_version = clawhub_latest_version(&trimmed_slug)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "latest".to_string());
+
     let install = match clawhub_exec(&[
         "install",
         &trimmed_slug,
         "--workdir",
-        WORKSPACE_ROOT,
+        "/data",
         "--dir",
-        "skills",
+        &format!("skills/{}/{}", detected_skill_id, skill_version),
         "--no-input",
         "--force",
     ]) {
@@ -6416,6 +6816,58 @@ pub async fn scan_and_install_clawhub_skill(
             command_output_error(&install)
         ));
     }
+
+    let skill_family_root = format!("{}/{}", SKILLS_ROOT, detected_skill_id);
+    let current_link = format!("{}/current", skill_family_root);
+    let _ = docker_exec_output(&[
+        "exec",
+        OPENCLAW_CONTAINER,
+        "sh",
+        "-c",
+        &format!(
+            "mkdir -p -- {} && ln -sfn {} {}",
+            sh_single_quote(&skill_family_root),
+            sh_single_quote(&skill_version),
+            sh_single_quote(&current_link)
+        ),
+    ]);
+
+    let installed_skill_path = format!("{}/{}/{}", SKILLS_ROOT, detected_skill_id, skill_version);
+    let installed_skill_md =
+        read_container_file(&format!("{}/SKILL.md", installed_skill_path)).unwrap_or_default();
+    let manifest_path = format!(
+        "{}/{}/{}.json",
+        SKILL_MANIFESTS_ROOT, detected_skill_id, skill_version
+    );
+    let tree_hash = compute_skill_tree_hash(&installed_skill_path);
+    let scope_flags = infer_skill_scope_flags(&installed_skill_md);
+    let manifest_skill_id = detected_skill_id.clone();
+    let manifest_source_slug = trimmed_slug.clone();
+    let manifest_version = skill_version.clone();
+    let manifest_path_value = installed_skill_path.clone();
+    let manifest = serde_json::json!({
+        "schema": "nova-skill-manifest/v1",
+        "skill_id": manifest_skill_id,
+        "source_slug": manifest_source_slug,
+        "version": manifest_version,
+        "installed_at_ms": current_millis(),
+        "path": manifest_path_value,
+        "integrity": {
+            "sha256_tree": tree_hash,
+            "signature": serde_json::Value::Null
+        },
+        "scopes": scope_flags,
+        "scan": {
+            "is_safe": scan.is_safe,
+            "max_severity": scan.max_severity,
+            "findings_count": scan.findings_count,
+        }
+    });
+    write_container_file(
+        &manifest_path,
+        &serde_json::to_string_pretty(&manifest)
+            .map_err(|e| format!("Failed to serialize skill manifest: {}", e))?,
+    )?;
 
     Ok(ClawhubInstallResult {
         scan,
@@ -6574,9 +7026,15 @@ async fn run_first_time_setup_internal(
                     message: "Failed to start container runtime".to_string(),
                     percent: 0,
                     complete: false,
-                    error: Some(format!("Failed to start Colima: {}", e)),
+                    error: Some(append_colima_runtime_hint(format!(
+                        "Failed to start Colima: {}",
+                        e
+                    ))),
                 };
-                return Err(format!("Failed to start Colima: {}", e));
+                return Err(append_colima_runtime_hint(format!(
+                    "Failed to start Colima: {}",
+                    e
+                )));
             }
 
             // Update progress
@@ -6635,9 +7093,12 @@ async fn run_first_time_setup_internal(
 
     if !status.docker_ready {
         let error_msg = if matches!(Platform::detect(), Platform::MacOS) {
-            "Docker connection failed. The container runtime may still be starting - try again in a moment."
+            append_colima_runtime_hint(
+                "Docker connection failed. The container runtime may still be starting - try again in a moment."
+                    .to_string(),
+            )
         } else {
-            "Please install Docker and ensure the daemon is running."
+            "Please install Docker and ensure the daemon is running.".to_string()
         };
         let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
         *progress = SetupProgress {
@@ -6645,7 +7106,7 @@ async fn run_first_time_setup_internal(
             message: "Docker is not available".to_string(),
             percent: 0,
             complete: false,
-            error: Some(error_msg.to_string()),
+            error: Some(error_msg),
         };
         return Err("Docker not available".to_string());
     }
@@ -6724,8 +7185,6 @@ pub async fn run_first_time_setup_with_cleanup(
 }
 
 // ── Workspace File Commands ──────────────────────────────────────────
-
-const WORKSPACE_ROOT: &str = "/home/node/.openclaw/workspace";
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WorkspaceFileEntry {

@@ -39,6 +39,7 @@ type Props = {
 // Default models per mode
 const DEFAULT_PROXY_MODEL = "openai/gpt-5.2";
 const DEFAULT_LOCAL_MODEL = "anthropic/claude-opus-4-6:thinking";
+const GATEWAY_FAILURE_THRESHOLD = 3;
 
 export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const { isAuthenticated, isAuthConfigured } = useAuth();
@@ -76,6 +77,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     newProvider: string;
     newModel: string;
   } | null>(null);
+  const gatewayHealthFailureStreakRef = useRef(0);
 
   // Load saved model preference
   useEffect(() => {
@@ -318,6 +320,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     setStartupError(null);
     setShowGatewayStartup(true);
     setGatewayStartupStage("credits");
+    gatewayHealthFailureStreakRef.current = 0;
     setGatewayRunning(false);
     try {
       if (stopFirst) {
@@ -371,7 +374,6 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       if (startGatewayAttemptRef.current !== attemptId) {
         return false;
       }
-
       // The Rust side may return Ok while the container is still in the
       // "starting" Docker health state (WS not accepting connections yet).
       // Poll until the WS endpoint is actually ready before declaring success.
@@ -397,7 +399,6 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           );
         }
       }
-
       gatewayHealthFailureStreakRef.current = 0;
       setGatewayRunning(true);
       clearGatewayRetry();
@@ -498,6 +499,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
       if (alreadyRunning) {
         autoStartAttemptedRef.current = true;
+        gatewayHealthFailureStreakRef.current = 0;
+        clearGatewayRetry();
+        setStartupError(null);
+        setGatewayStartupStage("idle");
+        setShowGatewayStartup(false);
 
         if (proxyEnabled) {
           // Proxy mode — refresh token/config so stale gateway tokens don't persist across app launches.
@@ -588,16 +594,38 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   async function checkGateway(): Promise<boolean> {
     try {
       const running = await getGatewayStatusCached({ force: true });
-      setGatewayRunning(running);
-      console.log("[Nova] Gateway health check:", running ? "healthy" : "not responding");
       if (running) {
+        gatewayHealthFailureStreakRef.current = 0;
+        setGatewayRunning(true);
+        console.log("[Nova] Gateway health check: healthy");
         setGatewayStartupStage("idle");
         setShowGatewayStartup(false);
         clearGatewayRetry();
+        return true;
       }
-      return running;
+
+      gatewayHealthFailureStreakRef.current += 1;
+      const failureStreak = gatewayHealthFailureStreakRef.current;
+      if (gatewayRunning && failureStreak < GATEWAY_FAILURE_THRESHOLD) {
+        console.warn(
+          `[Nova] Gateway health transient miss (${failureStreak}/${GATEWAY_FAILURE_THRESHOLD}); keeping running state`
+        );
+        return true;
+      }
+
+      setGatewayRunning(false);
+      console.log("[Nova] Gateway health check: not responding");
+      return false;
     } catch (error) {
       console.error("[Nova] Gateway check failed:", error);
+      gatewayHealthFailureStreakRef.current += 1;
+      const failureStreak = gatewayHealthFailureStreakRef.current;
+      if (gatewayRunning && failureStreak < GATEWAY_FAILURE_THRESHOLD) {
+        console.warn(
+          `[Nova] Gateway status check error treated as transient (${failureStreak}/${GATEWAY_FAILURE_THRESHOLD})`
+        );
+        return true;
+      }
       setGatewayRunning(false);
       return false;
     }
@@ -610,9 +638,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         console.log("[Nova] Stopping gateway...");
         await invoke("stop_gateway");
         console.log("[Nova] Gateway stopped successfully");
+        gatewayHealthFailureStreakRef.current = 0;
         setGatewayRunning(false);
       } else {
         console.log("[Nova] Starting gateway...");
+        gatewayHealthFailureStreakRef.current = 0;
         setGatewayRunning(false);
         // If authenticated via OAuth, use proxy mode
         if (isAuthConfigured && isAuthenticated && !useLocalKeys) {

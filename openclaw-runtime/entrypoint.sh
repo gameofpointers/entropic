@@ -46,34 +46,68 @@ cat > "$AUTH_DIR/auth-profiles.json" << EOF
 }
 EOF
 
-# Create other directories OpenClaw needs
+# Create other directories OpenClaw needs.
+# /home/node/.openclaw remains tmpfs-backed for sensitive runtime state.
 mkdir -p /home/node/.openclaw/canvas
 mkdir -p /home/node/.openclaw/cron
 mkdir -p /home/node/.openclaw/logs
-mkdir -p /home/node/.openclaw/.cache/qmd
-# OpenClaw resolves state under ~/.openclaw. With HOME set to /home/node/.openclaw
-# for hardened runtime writes, that becomes /home/node/.openclaw/.openclaw.
-# Keep both paths mapped to the same writable tmpfs root.
-ln -sfn /home/node/.openclaw /home/node/.openclaw/.openclaw
-mkdir -p /data/qmd-models
-ln -sfn /data/qmd-models /home/node/.openclaw/.cache/qmd/models
+mkdir -p /home/node/.openclaw/.cache
 
-# Seed workspace directory expected by qmd plugins.
-mkdir -p /home/node/.openclaw/workspace
-mkdir -p /home/node/.openclaw/workspace/node_modules
+# Durable Nova storage classes (backed by /data volume).
+mkdir -p /data/workspace
+mkdir -p /data/skills
+mkdir -p /data/skill-manifests
+mkdir -p /data/.cache/qmd
+mkdir -p /data/.config
+mkdir -p /data/.npm
+mkdir -p /data/playwright
+mkdir -p /data/tools
+mkdir -p /data/browser/profile
+mkdir -p /data/tmp
+mkdir -p /data/qmd-models
+
+# Keep OpenClaw's expected ~/.openclaw path mapped to tmpfs-backed state
+# even when HOME points at /data for durable tool caches.
+if [ -d /data/.openclaw ] && [ ! -L /data/.openclaw ]; then
+  cp -a /data/.openclaw/. /home/node/.openclaw/ 2>/dev/null || true
+  rm -rf /data/.openclaw
+fi
+ln -sfn /home/node/.openclaw /data/.openclaw
+ln -sfn /home/node/.openclaw /home/node/.openclaw/.openclaw
+rm -rf /home/node/.openclaw/.cache/qmd
+ln -sfn /data/.cache/qmd /home/node/.openclaw/.cache/qmd
+rm -rf /data/.cache/qmd/models
+ln -sfn /data/qmd-models /data/.cache/qmd/models
+
+# Migrate legacy workspace (if present) and bind Home/workspace to durable storage.
+if [ -d /home/node/.openclaw/workspace ] && [ ! -L /home/node/.openclaw/workspace ]; then
+  if [ -n "$(ls -A /home/node/.openclaw/workspace 2>/dev/null)" ] && [ -z "$(ls -A /data/workspace 2>/dev/null)" ]; then
+    cp -a /home/node/.openclaw/workspace/. /data/workspace/ 2>/dev/null || true
+  fi
+  rm -rf /home/node/.openclaw/workspace
+fi
+ln -sfn /data/workspace /home/node/.openclaw/workspace
+mkdir -p /data/workspace/node_modules
 
 # Ensure qmd's workspace-local tsx resolver stays available even in ESM context.
 # The qmd rewrite changed the command from /data/qmd-wrapper to `qmd`,
 # but the package still uses tsx internally from workspace-relative resolution.
 # Linking only tsx (not full global node_modules) avoids read-only root writes.
 if [ -d /home/node/.bun/install/global/node_modules/tsx ]; then
-  ln -sfn /home/node/.bun/install/global/node_modules/tsx /home/node/.openclaw/workspace/node_modules/tsx
+  ln -sfn /home/node/.bun/install/global/node_modules/tsx /data/workspace/node_modules/tsx
 fi
 
-# qmd runtime environment for the bundled runtime image.
-export HOME=/home/node/.openclaw
-export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/home/node/.openclaw/agents/main/qmd/xdg-config}"
-export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/home/node/.openclaw/agents/main/qmd/xdg-cache}"
+# Runtime environment for durable user assets and tool/browser caches.
+export NOVA_WORKSPACE_PATH="${NOVA_WORKSPACE_PATH:-/data/workspace}"
+export NOVA_SKILLS_PATH="${NOVA_SKILLS_PATH:-/data/skills}"
+export NOVA_SKILL_MANIFESTS_PATH="${NOVA_SKILL_MANIFESTS_PATH:-/data/skill-manifests}"
+export NOVA_BROWSER_PROFILE="${NOVA_BROWSER_PROFILE:-/data/browser/profile}"
+export HOME="${HOME:-/data}"
+export TMPDIR="${TMPDIR:-/data/tmp}"
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/data/.config}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/data/.cache}"
+export npm_config_cache="${npm_config_cache:-/data/.npm}"
+export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/data/playwright}"
 export NODE_PATH="/home/node/.bun/install/global/node_modules${NODE_PATH:+:$NODE_PATH}"
 
 # Write a minimal config to select the primary model when provided
@@ -106,7 +140,7 @@ fi
 PLUGIN_ENTRIES="\"nova-integrations\": { \"enabled\": true }"
 ALSO_ALLOW="\"nova-integrations\""
 
-if [ -d "/app/extensions/nova-x" ] || [ -d "/data/nova-skills/nova-x" ]; then
+if [ -d "/app/extensions/nova-x" ] || [ -d "/data/nova-skills/nova-x" ] || [ -d "${NOVA_SKILLS_PATH}/nova-x" ] || [ -d "${NOVA_SKILLS_PATH}/nova-x/current" ]; then
     PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, \"nova-x\": { \"enabled\": true }"
     ALSO_ALLOW="${ALSO_ALLOW}, \"x_search\", \"x_profile\", \"x_thread\", \"x_user_tweets\""
 fi
@@ -144,7 +178,13 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
 
     MODELS_BLOCK=""
     LOAD_PATHS_BLOCK=""
-    if [ -d "/data/nova-skills/nova-x" ]; then
+    if [ -d "${NOVA_SKILLS_PATH}/nova-x/current" ]; then
+        LOAD_PATHS_BLOCK=",
+    \"load\": { \"paths\": [\"${NOVA_SKILLS_PATH}/nova-x/current\"] }"
+    elif [ -d "${NOVA_SKILLS_PATH}/nova-x" ]; then
+        LOAD_PATHS_BLOCK=",
+    \"load\": { \"paths\": [\"${NOVA_SKILLS_PATH}/nova-x\"] }"
+    elif [ -d "/data/nova-skills/nova-x" ]; then
         LOAD_PATHS_BLOCK=",
     \"load\": { \"paths\": [\"/data/nova-skills/nova-x\"] }"
     fi
