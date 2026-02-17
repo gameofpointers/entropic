@@ -13,9 +13,6 @@ import {
   Sparkles,
   PanelLeftClose,
   PanelLeftOpen,
-  Minus,
-  Square,
-  X,
   MoreHorizontal,
   Pencil,
   Pin,
@@ -179,21 +176,6 @@ export function Layout({
     item.id === "files" ? experimentalDesktop : true
   );
 
-  async function windowAction(action: "close" | "minimize" | "expand") {
-    try {
-      const win = getCurrentWindow();
-      if (action === "close") {
-        await win.close();
-      } else if (action === "minimize") {
-        await win.minimize();
-      } else {
-        await win.toggleMaximize();
-      }
-    } catch (err) {
-      console.error("[Nova] Window action failed:", err);
-    }
-  }
-
   return (
     <div className="h-screen w-screen flex bg-[var(--bg-app)] text-[var(--text-primary)] font-sans overflow-hidden">
       {/* Sidebar - Transparent blend */}
@@ -205,65 +187,46 @@ export function Layout({
           sidebarCollapsed ? "w-[74px] pl-1.5 pr-1" : "w-[240px] pl-3 pr-2"
         )}
       >
-        <div className={clsx("h-8 mb-3 flex items-center gap-2", sidebarCollapsed ? "justify-between px-0.5" : "px-1")}>
-          {isMacOS && (
-            <div className="flex items-center gap-2">
-              <button
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={() => windowAction("close")}
-                className="group w-3 h-3 rounded-full bg-[#ff5f57] border border-black/10 hover:brightness-95 transition"
-                title="Close"
-                aria-label="Close window"
-              >
-                <X className="w-2 h-2 mx-auto text-black/60 opacity-0 group-hover:opacity-100 transition-opacity" />
-              </button>
-              <button
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={() => windowAction("minimize")}
-                className="group w-3 h-3 rounded-full bg-[#ffbd2e] border border-black/10 hover:brightness-95 transition"
-                title="Minimize"
-                aria-label="Minimize window"
-              >
-                <Minus className="w-2 h-2 mx-auto text-black/60 opacity-0 group-hover:opacity-100 transition-opacity" />
-              </button>
-              <button
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={() => windowAction("expand")}
-                className="group w-3 h-3 rounded-full bg-[#28c840] border border-black/10 hover:brightness-95 transition"
-                title="Expand"
-                aria-label="Expand window"
-              >
-                <Square className="w-2 h-2 mx-auto text-black/60 opacity-0 group-hover:opacity-100 transition-opacity" />
-              </button>
-            </div>
-          )}
-
-          <div
-            data-tauri-drag-region
-            onMouseDown={startDrag}
-            className={clsx(
-              "h-full flex items-center",
-              sidebarCollapsed ? "justify-center flex-1" : "gap-3 flex-1 min-w-0"
-            )}
-          >
-            <img src={novaLogo} alt="Nova" className="w-8 h-8 rounded-lg shadow-md pointer-events-none" />
-            {!sidebarCollapsed && (
+        {sidebarCollapsed ? (
+          /* Collapsed: stack vertically — traffic-light clearance, then toggle, then nav */
+          <div className="flex flex-col items-center mb-2">
+            {/* Clear native macOS traffic light buttons */}
+            {isMacOS && <div className="h-7 shrink-0" />}
+            <button
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={toggleSidebarCollapsed}
+              className="w-8 h-8 rounded-md bg-black/5 hover:bg-black/10 text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center justify-center transition-colors"
+              title="Expand navigation"
+              aria-label="Expand navigation"
+            >
+              <PanelLeftOpen className="w-4 h-4" />
+            </button>
+          </div>
+        ) : (
+          /* Expanded: horizontal row — spacer, logo + title, collapse button */
+          <div className="h-8 mb-3 flex items-center gap-2 px-1">
+            {isMacOS && <div className="w-[68px] shrink-0" />}
+            <div
+              data-tauri-drag-region
+              onMouseDown={startDrag}
+              className="h-full flex items-center gap-3 flex-1 min-w-0"
+            >
+              <img src={novaLogo} alt="Nova" className="w-8 h-8 rounded-lg shadow-md pointer-events-none" />
               <div className="font-semibold text-lg tracking-tight text-[var(--text-primary)] pointer-events-none">
                 Nova
               </div>
-            )}
+            </div>
+            <button
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={toggleSidebarCollapsed}
+              className="w-7 h-7 rounded-md bg-black/5 hover:bg-black/10 text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center justify-center transition-colors"
+              title="Collapse navigation"
+              aria-label="Collapse navigation"
+            >
+              <PanelLeftClose className="w-4 h-4" />
+            </button>
           </div>
-
-          <button
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={toggleSidebarCollapsed}
-            className="w-7 h-7 rounded-md bg-black/5 hover:bg-black/10 text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center justify-center transition-colors"
-            title={sidebarCollapsed ? "Expand navigation" : "Collapse navigation"}
-            aria-label={sidebarCollapsed ? "Expand navigation" : "Collapse navigation"}
-          >
-            {sidebarCollapsed ? <PanelLeftOpen className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
-          </button>
-        </div>
+        )}
 
         {/* Navigation */}
         <nav className={clsx("flex-1 space-y-0.5 overflow-y-auto custom-scrollbar", sidebarCollapsed ? "pr-1" : "pr-2")}>

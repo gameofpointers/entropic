@@ -1315,10 +1315,17 @@ export function Chat({
       connectInFlightRef.current = false;
       return;
     }
-    if (!clientRef.current && !connectInFlightRef.current) {
+    const hasLiveClient = Boolean(clientRef.current?.isConnected());
+    if (!hasLiveClient && !connectInFlightRef.current) {
+      if (clientRef.current) {
+        addDiag("stale gateway client detected; reconnecting");
+        detachGatewayListeners(clientRef.current);
+        clientRef.current.disconnect();
+        clientRef.current = null;
+      }
       void connectToGateway();
     }
-  }, [gatewayRunning, gatewayStarting, connectedProvider, proxyEnabled]);
+  }, [gatewayRunning, gatewayStarting, connectedProvider, proxyEnabled, connected]);
 
   useEffect(() => {
     return () => {
@@ -1399,6 +1406,10 @@ export function Chat({
         addDiag("gateway connected");
       };
       const onDisconnected = () => {
+        if (clientRef.current === client) {
+          detachGatewayListeners(client);
+          clientRef.current = null;
+        }
         setConnected(false);
         setIsConnecting(false);
         if (activeRunIdRef.current) {
@@ -1414,6 +1425,7 @@ export function Chat({
       const onError = (err: string) => {
         const normalizedError = sanitizeGatewayErrorMessage(err);
         const suppressError = gatewayStarting || isConnecting || !gatewayRunning;
+        setConnected(false);
         if (!suppressError) {
           setError(normalizedError);
         }
@@ -2061,6 +2073,13 @@ export function Chat({
     schedulePersist();
   }
 
+  function ensureComposerSession(): string | null {
+    const existing = currentSessionRef.current;
+    if (existing) return existing;
+    createNewSession({ force: true });
+    return currentSessionRef.current;
+  }
+
   async function handleSend(content?: string) {
     let sendSession = currentSessionRef.current;
     if (!sendSession) {
@@ -2070,7 +2089,12 @@ export function Chat({
     const currentDraft = sendSession ? (draftsRef.current[sendSession] || "") : "";
     const messageContent = content || currentDraft.trim();
     const failedDraftRestore = content ? null : currentDraft;
-    if (!sendSession || !connected || isLoading || (!messageContent && pendingAttachments.length === 0)) return;
+    if (!sendSession || isLoading || (!messageContent && pendingAttachments.length === 0)) return;
+    if (!connected) {
+      setError("Gateway is still connecting. Please try again in a moment.");
+      addDiag("send blocked: gateway not connected");
+      return;
+    }
 
     const userMessage: Message = { id: crypto.randomUUID(), role: "user", content: messageContent, sentAt: Date.now() };
     visibleMessagesSessionRef.current = sendSession;
@@ -2728,12 +2752,16 @@ export function Chat({
           <textarea
             ref={textareaRef}
             value={activeDraft}
+            onFocus={() => {
+              ensureComposerSession();
+            }}
             onChange={e => {
-              if (!currentSession) return;
+              const sessionKey = currentSession || ensureComposerSession();
+              if (!sessionKey) return;
               const nextValue = e.target.value;
               setDraftsBySession((prev) => {
-                if ((prev[currentSession] || "") === nextValue) return prev;
-                return { ...prev, [currentSession]: nextValue };
+                if ((prev[sessionKey] || "") === nextValue) return prev;
+                return { ...prev, [sessionKey]: nextValue };
               });
             }}
             onKeyDown={e => {if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }}}

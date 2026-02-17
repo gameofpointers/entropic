@@ -304,20 +304,64 @@ fn bundled_runtime_signature_from_manifest(tar_path: &Path) -> Result<String, St
     Ok(normalized)
 }
 
-fn runtime_image_id() -> Result<Option<String>, String> {
+enum RuntimeImageInspectState {
+    Present(String),
+    Missing,
+    Unavailable(String),
+}
+
+fn runtime_image_inspect_once() -> Result<RuntimeImageInspectState, String> {
     let output = docker_command()
         .args(["image", "inspect", RUNTIME_IMAGE, "--format", "{{.Id}}"])
         .output()
         .map_err(|e| format!("Failed to check image id: {}", e))?;
-    if !output.status.success() {
-        return Ok(None);
+    if output.status.success() {
+        let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if id.is_empty() {
+            return Ok(RuntimeImageInspectState::Missing);
+        }
+        return Ok(RuntimeImageInspectState::Present(id));
     }
 
-    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if id.is_empty() {
-        return Ok(None);
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("no such image")
+        || lower.contains("no such object")
+        || lower.contains("not found")
+    {
+        return Ok(RuntimeImageInspectState::Missing);
     }
-    Ok(Some(id))
+
+    Ok(RuntimeImageInspectState::Unavailable(if stderr.is_empty() {
+        "unknown docker inspect failure".to_string()
+    } else {
+        stderr
+    }))
+}
+
+fn runtime_image_id() -> Result<Option<String>, String> {
+    const MAX_ATTEMPTS: usize = 4;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match runtime_image_inspect_once()? {
+            RuntimeImageInspectState::Present(id) => return Ok(Some(id)),
+            RuntimeImageInspectState::Missing => return Ok(None),
+            RuntimeImageInspectState::Unavailable(err) => {
+                if attempt < MAX_ATTEMPTS {
+                    println!(
+                        "[Nova] Runtime image inspect unavailable (attempt {}/{}): {}. Retrying...",
+                        attempt, MAX_ATTEMPTS, err
+                    );
+                    std::thread::sleep(Duration::from_millis(300));
+                } else {
+                    println!(
+                        "[Nova] Runtime image inspect unavailable after {} attempts: {}. Proceeding with bundled runtime fallback.",
+                        MAX_ATTEMPTS, err
+                    );
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn find_runtime_tar() -> Option<PathBuf> {
@@ -4390,7 +4434,9 @@ async fn wait_for_gateway_health_strict(token: &str, attempts: usize) -> Result<
             match status.as_str() {
                 "starting" => {
                     last_error = "container health=starting".to_string();
-                    should_probe_ws = false;
+                    // While Docker reports "starting", still probe WS after the first
+                    // couple of cycles so we don't wait the full health grace period.
+                    should_probe_ws = attempt > 2;
                 }
                 "unhealthy" => {
                     last_error = "container health=unhealthy".to_string();
@@ -5600,10 +5646,9 @@ pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
         println!("[Nova] Container health status: {}", health_status);
         if health_status == "healthy" || health_status == "starting" {
             println!(
-                "[Nova] Gateway WS probe failed after retries but container health is {}; treating as running.",
+                "[Nova] Gateway WS probe failed after retries while container health is {}; reporting not running until WS recovers.",
                 health_status
             );
-            return Ok(true);
         }
     }
 
