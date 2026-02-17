@@ -3874,7 +3874,6 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
         &["plugins", "slots"],
         &["plugins", "load", "paths"],
         &["plugins", "entries", "nova-integrations"],
-        &["plugins", "entries", "nova-x"],
         &["plugins", "entries", "memory-lancedb"],
         &["plugins", "entries", "discord"],
         &["plugins", "entries", "telegram"],
@@ -6191,7 +6190,11 @@ pub async fn set_channels_config(
     whatsapp_enabled: bool,
     whatsapp_allow_from: String,
 ) -> Result<(), String> {
+    eprintln!("[set_channels_config] Called with telegram_enabled={}, token_len={}", telegram_enabled, telegram_token.len());
+
     let mut cfg = read_openclaw_config();
+    eprintln!("[set_channels_config] OpenClaw config read successfully");
+
     let discord_token = discord_token.trim().to_string();
     let telegram_token = telegram_token.trim().to_string();
     let slack_bot_token = slack_bot_token.trim().to_string();
@@ -6388,8 +6391,11 @@ pub async fn set_channels_config(
         serde_json::json!(whatsapp_enabled),
     );
 
+    eprintln!("[set_channels_config] Writing OpenClaw config...");
     write_openclaw_config(&cfg)?;
+    eprintln!("[set_channels_config] OpenClaw config written successfully");
 
+    eprintln!("[set_channels_config] Loading agent settings...");
     let mut settings = load_agent_settings(&app);
     settings.discord_enabled = discord_enabled;
     settings.discord_token = discord_token;
@@ -6404,15 +6410,21 @@ pub async fn set_channels_config(
     settings.googlechat_audience = googlechat_audience;
     settings.whatsapp_enabled = whatsapp_enabled;
     settings.whatsapp_allow_from = whatsapp_allow_from;
+    eprintln!("[set_channels_config] Saving agent settings...");
     save_agent_settings(&app, settings)?;
+    eprintln!("[set_channels_config] Agent settings saved successfully");
+    eprintln!("[set_channels_config] Completed successfully");
     Ok(())
 }
 
 #[tauri::command]
 pub async fn approve_pairing(channel: String, code: String) -> Result<String, String> {
+    eprintln!("[approve_pairing] Called with channel='{}', code length={}", channel, code.len());
+
     let channel = channel.trim();
     let code = code.trim();
     if channel.is_empty() || code.is_empty() {
+        eprintln!("[approve_pairing] Error: channel or code is empty");
         return Err("Channel and code are required".to_string());
     }
     let args = [
@@ -6425,7 +6437,10 @@ pub async fn approve_pairing(channel: String, code: String) -> Result<String, St
         channel,
         code,
     ];
-    docker_exec_output(&args)
+    eprintln!("[approve_pairing] Executing docker command...");
+    let result = docker_exec_output(&args);
+    eprintln!("[approve_pairing] Docker command result: {:?}", result);
+    result
 }
 
 #[tauri::command]

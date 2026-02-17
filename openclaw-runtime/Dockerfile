@@ -49,6 +49,9 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=5s \
 
 EXPOSE 18789
 
+# Set credentials directory to persistent storage
+ENV OPENCLAW_OAUTH_DIR=/data/credentials
+
 # Entrypoint script that creates auth from env vars, then starts gateway
 COPY --chown=node:node entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh

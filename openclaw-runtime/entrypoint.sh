@@ -1,6 +1,6 @@
 #!/bin/sh
 set -e
-
+# CACHE BUST: OPENCLAW_OAUTH_DIR persistence fix v2
 # Create auth-profiles.json from environment variables
 # Keys stay in memory (tmpfs), never written to host disk
 
@@ -78,6 +78,13 @@ rm -rf /home/node/.openclaw/.cache/qmd
 ln -sfn /data/.cache/qmd /home/node/.openclaw/.cache/qmd
 rm -rf /data/.cache/qmd/models
 ln -sfn /data/qmd-models /data/.cache/qmd/models
+
+# Persist credentials (pairing data, etc.) in durable storage by overriding OPENCLAW_OAUTH_DIR
+# This environment variable tells OpenClaw to store credentials directly in /data/credentials
+# instead of trying to create ~/.openclaw/credentials (which would be ephemeral)
+mkdir -p /data/credentials
+chmod 700 /data/credentials
+export OPENCLAW_OAUTH_DIR=/data/credentials
 
 # Migrate legacy workspace (if present) and bind Home/workspace to durable storage.
 if [ -d /home/node/.openclaw/workspace ] && [ ! -L /home/node/.openclaw/workspace ]; then
