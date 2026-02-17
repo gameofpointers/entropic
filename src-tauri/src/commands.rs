@@ -1748,9 +1748,80 @@ fn read_skill_scan_from_manifest(skill_id: &str) -> Option<PluginScanResult> {
     best.map(|(_, scan)| scan)
 }
 
+fn resolve_scannable_skill_root(scanner_root: &str) -> Result<String, String> {
+    let direct_skill_md = format!("{}/SKILL.md", scanner_root);
+    let has_direct = docker_command()
+        .args([
+            "exec",
+            SCANNER_CONTAINER,
+            "test",
+            "-f",
+            "--",
+            &direct_skill_md,
+        ])
+        .output()
+        .map_err(|e| format!("Failed to inspect skill directory: {}", e))?
+        .status
+        .success();
+    if has_direct {
+        return Ok(scanner_root.to_string());
+    }
+
+    let search_cmd = docker_command()
+        .args([
+            "exec",
+            SCANNER_CONTAINER,
+            "find",
+            scanner_root,
+            "-maxdepth",
+            "4",
+            "-name",
+            "SKILL.md",
+            "-type",
+            "f",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to locate skill metadata files: {}", e))?;
+    if !search_cmd.status.success() {
+        return Err(format!(
+            "Failed to locate SKILL.md in scanner directory {}",
+            scanner_root
+        ));
+    }
+
+    let mut candidates = Vec::<String>::new();
+    for line in String::from_utf8_lossy(&search_cmd.stdout).lines() {
+        let candidate = line.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        if !candidate.starts_with(scanner_root) {
+            continue;
+        }
+        if !candidate.ends_with("/SKILL.md") {
+            continue;
+        }
+        let parent = candidate.trim_end_matches("/SKILL.md").to_string();
+        if !parent.is_empty() {
+            candidates.push(parent);
+        }
+    }
+
+    if candidates.is_empty() {
+        return Err(format!(
+            "SKILL.md not found in scanner directory {}",
+            scanner_root
+        ));
+    }
+
+    candidates.sort_by_key(|path| path.matches('/').count());
+    Ok(candidates[0].clone())
+}
+
 async fn scan_directory_with_scanner(scanner_dir: &str) -> Result<PluginScanResult, String> {
+    let scan_target = resolve_scannable_skill_root(scanner_dir)?;
     let body = serde_json::json!({
-        "skill_directory": scanner_dir,
+        "skill_directory": scan_target,
         "use_behavioral": true,
         "use_llm": false,
     });
@@ -1776,7 +1847,19 @@ async fn scan_directory_with_scanner(scanner_dir: &str) -> Result<PluginScanResu
     if !res.status().is_success() {
         let status = res.status();
         let text = res.text().await.unwrap_or_default();
-        return Err(format!("Scanner returned {}: {}", status, text));
+        let detail = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("detail")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.to_string())
+            })
+            .unwrap_or_else(|| text);
+        return Err(format!(
+            "Scanner returned {} for {}: {}",
+            status, scanner_dir, detail
+        ));
     }
 
     let scan_response: serde_json::Value = res
@@ -6432,8 +6515,16 @@ pub async fn remove_workspace_skill(id: String) -> Result<(), String> {
         return Err("Nova-managed skills cannot be removed".to_string());
     }
 
+    let mut config_removal_paths: Vec<String> = Vec::new();
+    if let Ok(Some(path)) = resolve_installed_skill_dir(&skill_id) {
+        config_removal_paths.push(path);
+    }
+
     let mut removed_any = false;
-    let mut remove_paths = vec![format!("{}/{}", SKILLS_ROOT, skill_id)];
+    let mut remove_paths = vec![
+        format!("{}/{}", SKILLS_ROOT, skill_id),
+        format!("{}/{}", SKILL_MANIFESTS_ROOT, skill_id),
+    ];
     for legacy_root in LEGACY_SKILLS_ROOTS {
         remove_paths.push(format!(
             "{}/{}",
@@ -6449,11 +6540,35 @@ pub async fn remove_workspace_skill(id: String) -> Result<(), String> {
         }
         docker_exec_output(&["exec", OPENCLAW_CONTAINER, "rm", "-rf", "--", &full_path])?;
         removed_any = true;
+        if !config_removal_paths.contains(&full_path) {
+            config_removal_paths.push(full_path.clone());
+        }
     }
 
     if !removed_any {
         return Err("Skill not found".to_string());
     }
+
+    let mut cfg = read_openclaw_config();
+    remove_openclaw_config_value(&mut cfg, &["plugins", "entries", &skill_id]);
+    if let Some(load_paths) = cfg
+        .pointer_mut("/plugins/load/paths")
+        .and_then(|v| v.as_array_mut())
+    {
+        load_paths.retain(|path| {
+            let path_value = path.as_str().unwrap_or("");
+            if path_value.is_empty() {
+                return true;
+            }
+
+            !config_removal_paths.iter().any(|prefix| {
+                let normalized_prefix = prefix.trim_end_matches('/');
+                path_value == normalized_prefix
+                    || path_value.starts_with(&format!("{}/", normalized_prefix))
+            })
+        });
+    }
+    write_openclaw_config(&cfg)?;
     Ok(())
 }
 
