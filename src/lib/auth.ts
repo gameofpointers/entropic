@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-shell";
 import { Store } from "@tauri-apps/plugin-store";
 import { invoke } from "@tauri-apps/api/core";
 import { platform } from "@tauri-apps/plugin-os";
+import { getDeviceFingerprintHash } from "./localCredits";
 
 // These should be set via environment variables
 const SUPABASE_URL = (import.meta as any).env?.VITE_SUPABASE_URL || "";
@@ -543,28 +544,56 @@ export interface GatewayTokenResponse {
 }
 
 /**
- * Create a gateway token for OpenClaw to use
- * Includes retry logic for auth timing issues
+ * Create a gateway token for OpenClaw to use.
+ * If allowAnonymous is true and no auth session exists, a local anonymous
+ * device fingerprint hash is sent so the backend can issue a trial token.
  */
-export async function createGatewayToken(): Promise<GatewayTokenResponse> {
-  // Try up to 3 times with increasing delays
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      return await apiRequest<GatewayTokenResponse>("/create-gateway-token", {
-        method: "POST",
-      });
-    } catch (error: any) {
-      if (error?.message?.includes("Unauthorized") && attempt < 3) {
-        // Wait a bit for auth to propagate, then retry
-        await new Promise(resolve => setTimeout(resolve, attempt * 1000));
-        continue;
-      }
-      throw error;
-    }
+export async function createGatewayToken(opts?: {
+  allowAnonymous?: boolean;
+}): Promise<GatewayTokenResponse> {
+  const allowAnonymous = opts?.allowAnonymous === true;
+  const accessToken = await getAccessToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+
+  if (accessToken) {
+    headers.Authorization = `Bearer ${accessToken}`;
+  } else if (allowAnonymous) {
+    headers["X-Nova-Device-Fingerprint"] = await getDeviceFingerprintHash();
+  } else {
+    throw new ApiRequestError("Not authenticated", { status: 401, kind: "http" });
   }
 
-  // Should never reach here, but TypeScript needs this
-  throw new Error("Failed to create gateway token after retries");
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}/create-gateway-token`, {
+      method: "POST",
+      headers,
+      body: "{}",
+    });
+  } catch (error: any) {
+    throw new ApiRequestError("Network request failed", { kind: "network", data: error });
+  }
+
+  if (!response.ok) {
+    let errorBody: any = {};
+    try {
+      errorBody = await response.json();
+    } catch {
+      try {
+        errorBody = { raw: await response.text() };
+      } catch {
+        errorBody = {};
+      }
+    }
+    throw new ApiRequestError(
+      errorBody?.error?.message || `API error: ${response.status}`,
+      { status: response.status, data: errorBody, kind: "http" }
+    );
+  }
+
+  return response.json();
 }
 
 /**

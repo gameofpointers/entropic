@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { platform } from "@tauri-apps/plugin-os";
 import { check } from "@tauri-apps/plugin-updater";
@@ -8,7 +8,12 @@ import { DockerInstall } from "./pages/DockerInstall";
 import { Dashboard } from "./pages/Dashboard";
 import { Onboarding } from "./pages/Onboarding";
 import { SignIn } from "./pages/SignIn";
-import { isOnboardingComplete } from "./lib/profile";
+import {
+  isOnboardingComplete,
+  saveOnboardingData,
+  saveProfile,
+  setOnboardingComplete,
+} from "./lib/profile";
 import { clientLog } from "./lib/clientLog";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 
@@ -21,11 +26,19 @@ type RuntimeStatus = {
 
 type AppState = "loading" | "signin" | "onboarding" | "docker-install" | "setup" | "ready";
 
+const DEFAULT_AGENT_NAME = "Nova";
+const DEFAULT_SOUL = `# About Nova
+
+You are Nova, a helpful AI assistant for coding, research, and execution tasks.
+Be concise, practical, and action-oriented.
+`;
+
 function AppContent() {
   const { isLoading: authLoading, isAuthenticated, isAuthConfigured } = useAuth();
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
   const [appState, setAppState] = useState<AppState>("loading");
   const [_os, setOs] = useState<string>("");
+  const appStateBeforeSignInRef = useRef<AppState>("ready");
 
   useEffect(() => {
     if (import.meta.env.DEV) {
@@ -78,23 +91,49 @@ function AppContent() {
     return () => clearTimeout(timer);
   }, [authLoading, appState, isAuthenticated, isAuthConfigured]);
 
+  useEffect(() => {
+    const onRequireSignIn = () => {
+      setAppState((current) => {
+        if (current !== "signin") {
+          appStateBeforeSignInRef.current = current;
+        }
+        return "signin";
+      });
+    };
+    window.addEventListener("nova-require-signin", onRequireSignIn);
+    return () => window.removeEventListener("nova-require-signin", onRequireSignIn);
+  }, []);
+
   async function init() {
     clientLog("app.init.start", { isAuthenticated, isAuthConfigured });
-    // If auth is configured but not authenticated, show sign in
-    if (isAuthConfigured && !isAuthenticated) {
-      setAppState("signin");
-      clientLog("app.state.signin");
-      return;
-    }
 
     // Check if onboarding is complete first
     try {
       const onboarded = await isOnboardingComplete();
       console.log("Onboarding complete:", onboarded);
       if (!onboarded) {
-        setAppState("onboarding");
-        clientLog("app.state.onboarding");
-        return;
+        clientLog("app.onboarding.bootstrap.start");
+        await saveOnboardingData({
+          soul: DEFAULT_SOUL,
+          agentName: DEFAULT_AGENT_NAME,
+          completedAt: new Date().toISOString(),
+        });
+        try {
+          await invoke("sync_onboarding_to_settings", {
+            soul: DEFAULT_SOUL,
+            agentName: DEFAULT_AGENT_NAME,
+          });
+        } catch (error) {
+          console.warn("Onboarding sync warning:", error);
+        }
+        try {
+          await saveProfile({ name: DEFAULT_AGENT_NAME });
+        } catch (error) {
+          console.warn("Profile save warning:", error);
+        }
+        await setOnboardingComplete(true);
+        window.dispatchEvent(new Event("nova-profile-updated"));
+        clientLog("app.onboarding.bootstrap.success");
       }
     } catch (error) {
       console.error("Failed to check onboarding:", error);
@@ -166,9 +205,13 @@ function AppContent() {
           // We'll wait for the deep link callback
         }}
         onSkipAuth={() => {
-          // User chose to skip auth and use their own API keys
-          // Go directly to onboarding/setup
-          setAppState("onboarding");
+          // Return to previous flow state when user exits sign-in.
+          const resume = appStateBeforeSignInRef.current;
+          if (resume === "loading" || resume === "signin") {
+            init();
+            return;
+          }
+          setAppState(resume);
         }}
       />
     );

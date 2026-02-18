@@ -11,6 +11,7 @@ import { BillingPage } from "./BillingPage";
 import { Settings } from "./Settings";
 import { useAuth } from "../contexts/AuthContext";
 import { createGatewayToken, getProxyUrl, getBalance, ApiRequestError } from "../lib/auth";
+import { getLocalCreditBalance } from "../lib/localCredits";
 import {
   hasPendingIntegrationImports,
   syncPendingIntegrationImports,
@@ -39,6 +40,15 @@ type Props = {
 const DEFAULT_PROXY_MODEL = "openai/gpt-5.2";
 const DEFAULT_LOCAL_MODEL = "anthropic/claude-opus-4-6:thinking";
 const GATEWAY_FAILURE_THRESHOLD = 3;
+const SANDBOX_STARTUP_FACTS = [
+  "Secure Execution: Nova runs all shell commands in an isolated sandbox to protect your local system.",
+  "Custom Providers: Add your own API keys in Settings for direct access to the latest models.",
+  "Deep Context: Stage logs or documentation in 'Files' so Nova can analyze them with full technical detail.",
+  "Autonomous Tasks: Use 'Tasks' for complex coding goals that require sustained, multi-step agent work.",
+  "Codebase Awareness: Ask Nova to 'read the repo' to generate precise implementation roadmaps.",
+  "Seamless Integrations: Connect GitHub, Slack, or Linear via Plugins to extend Nova's capabilities.",
+  "One-click Workflow: Quickly initialize projects or deploy environments with a single command.",
+];
 
 export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const { isAuthenticated, isAuthConfigured } = useAuth();
@@ -53,6 +63,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     actions?: Array<{ label: string; onClick: () => void }>;
   } | null>(null);
   const [gatewayRetryIn, setGatewayRetryIn] = useState<number | null>(null);
+  const [startupFactIndex, setStartupFactIndex] = useState(0);
   const [integrationsSyncing, setIntegrationsSyncing] = useState(false);
   const [integrationsMissing, setIntegrationsMissing] = useState(false);
   const [prefsLoaded, setPrefsLoaded] = useState(false);
@@ -64,6 +75,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const [currentChatSession, setCurrentChatSession] = useState<string | null>(null);
   const [pendingChatSession, setPendingChatSession] = useState<string | null>(null);
   const [pendingChatAction, setPendingChatAction] = useState<ChatSessionActionRequest | null>(null);
+  const [localCreditBalanceCents, setLocalCreditBalanceCents] = useState<number | null>(null);
   const gatewayTokenRef = useRef<string | null>(null);
   const autoStartAttemptedRef = useRef(false);
   const startGatewayAttemptRef = useRef(0);
@@ -78,6 +90,41 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     newModel: string;
   } | null>(null);
   const gatewayHealthFailureStreakRef = useRef(0);
+
+  function requestSignIn() {
+    window.dispatchEvent(
+      new CustomEvent("nova-require-signin", {
+        detail: { source: "credits" },
+      })
+    );
+  }
+
+  function buildOutOfCreditsStartupError() {
+    if (isAuthenticated) {
+      return {
+        message: "You’re out of credits. Add credits to continue using Nova in proxy mode.",
+        actions: [{ label: "Add Credits", onClick: () => setCurrentPage("billing") }],
+      };
+    }
+    return {
+      message:
+        "You’ve used all free trial credits. Sign in to continue and add paid credits.",
+      actions: [
+        { label: "Sign In", onClick: requestSignIn },
+        { label: "Billing", onClick: () => setCurrentPage("billing") },
+      ],
+    };
+  }
+
+  async function refreshLocalCredits() {
+    try {
+      const balance = await getLocalCreditBalance();
+      setLocalCreditBalanceCents(balance.balance_cents);
+    } catch (error) {
+      console.warn("[Nova] Failed to load local credits:", error);
+      setLocalCreditBalanceCents(0);
+    }
+  }
 
   // Load saved model preference
   useEffect(() => {
@@ -118,6 +165,41 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
     loadModel();
   }, []);
+
+  useEffect(() => {
+    if (isAuthenticated || !isAuthConfigured) {
+      setLocalCreditBalanceCents(null);
+      return;
+    }
+
+    refreshLocalCredits();
+    const onLocalCreditsChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ balanceCents?: number }>).detail;
+      if (detail && typeof detail.balanceCents === "number") {
+        setLocalCreditBalanceCents(detail.balanceCents);
+      } else {
+        refreshLocalCredits();
+      }
+    };
+    window.addEventListener("nova-local-credits-changed", onLocalCreditsChanged as EventListener);
+    return () => {
+      window.removeEventListener(
+        "nova-local-credits-changed",
+        onLocalCreditsChanged as EventListener
+      );
+    };
+  }, [isAuthenticated, isAuthConfigured]);
+
+  useEffect(() => {
+    if (!showGatewayStartup) {
+      setStartupFactIndex(0);
+      return;
+    }
+    const interval = window.setInterval(() => {
+      setStartupFactIndex((current) => (current + 1) % SANDBOX_STARTUP_FACTS.length);
+    }, 4500);
+    return () => window.clearInterval(interval);
+  }, [showGatewayStartup]);
 
   useEffect(() => {
     const intervalMs =
@@ -310,13 +392,34 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       allowRetry,
       isAuthConfigured,
       isAuthenticated,
-      useLocalKeys
+      useLocalKeys,
+      localCreditBalanceCents,
     });
 
-    if (!isAuthConfigured || !isAuthenticated || useLocalKeys) {
-      console.log("[Nova] Skipping proxy flow - auth not ready or using local keys");
+    if (!isAuthConfigured || useLocalKeys) {
+      console.log("[Nova] Skipping proxy flow - proxy mode disabled");
       return false;
     }
+
+    let anonymousBalanceCents = localCreditBalanceCents ?? 0;
+    if (!isAuthenticated) {
+      if (anonymousBalanceCents <= 0) {
+        try {
+          const localBalance = await getLocalCreditBalance();
+          anonymousBalanceCents = localBalance.balance_cents;
+          setLocalCreditBalanceCents(localBalance.balance_cents);
+        } catch (error) {
+          console.warn("[Nova] Failed to read anonymous balance:", error);
+          anonymousBalanceCents = 0;
+        }
+      }
+      if (anonymousBalanceCents <= 0) {
+        setStartupError(buildOutOfCreditsStartupError());
+        setShowGatewayStartup(false);
+        return false;
+      }
+    }
+
     if (startGatewayInFlightRef.current) {
       console.log("[Nova] Waiting for in-flight gateway start attempt to finish");
       while (startGatewayInFlightRef.current) {
@@ -342,14 +445,19 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       }
 
       try {
-        const balance = await getBalance();
-        if (balance.balance_cents <= 0) {
-          setStartupError({
-            message: "You’re out of credits. Add credits to continue using Nova in proxy mode.",
-            actions: [{ label: "Add Credits", onClick: () => setCurrentPage("billing") }],
-          });
-          setShowGatewayStartup(false);
-          return false;
+        if (isAuthenticated) {
+          const balance = await getBalance();
+          if (balance.balance_cents <= 0) {
+            setStartupError(buildOutOfCreditsStartupError());
+            setShowGatewayStartup(false);
+            return false;
+          }
+        } else {
+          if (anonymousBalanceCents <= 0) {
+            setStartupError(buildOutOfCreditsStartupError());
+            setShowGatewayStartup(false);
+            return false;
+          }
         }
       } catch (error) {
         console.warn("[Nova] Balance check failed:", error);
@@ -357,7 +465,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
       setGatewayStartupStage("token");
       console.log("[Nova] Creating gateway token...");
-      const { token } = await createGatewayToken();
+      const { token } = await createGatewayToken({
+        allowAnonymous: !isAuthenticated,
+      });
       gatewayTokenRef.current = token;
       console.log("[Nova] Gateway token created successfully");
 
@@ -431,20 +541,24 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           /load failed|failed to fetch|network/i.test(message));
 
       if (status === 402) {
-        setStartupError({
-          message: "You’re out of credits. Add credits to continue using Nova in proxy mode.",
-          actions: [{ label: "Add Credits", onClick: () => setCurrentPage("billing") }],
-        });
+        setStartupError(buildOutOfCreditsStartupError());
         setGatewayStartupStage("idle");
         setShowGatewayStartup(false);
         return false;
       }
 
       if (status === 401) {
-        setStartupError({
-          message: "Your session expired. Please sign in again.",
-          actions: [{ label: "Open Settings", onClick: () => setCurrentPage("settings") }],
-        });
+        setStartupError(
+          isAuthenticated
+            ? {
+                message: "Your session expired. Please sign in again.",
+                actions: [{ label: "Open Settings", onClick: () => setCurrentPage("settings") }],
+              }
+            : {
+                message: "Trial session expired. Sign in to continue.",
+                actions: [{ label: "Sign In", onClick: requestSignIn }],
+              }
+        );
         setGatewayStartupStage("idle");
         setShowGatewayStartup(false);
         return false;
@@ -480,15 +594,22 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
   }
 
-  // Auto-start gateway for authenticated users
+  // Auto-start gateway for proxy or local-key modes
   useEffect(() => {
     if (!prefsLoaded) return; // Wait for stored preferences before deciding proxy vs local
+    if (!isAuthenticated && isAuthConfigured && !useLocalKeys && localCreditBalanceCents === null) {
+      return;
+    }
 
     async function autoStartGateway() {
-      const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
+      const proxyEnabled =
+        isAuthConfigured &&
+        !useLocalKeys &&
+        (isAuthenticated || (localCreditBalanceCents ?? 0) > 0);
       console.log("[Nova] Auto-start check:", {
         isAuthConfigured,
         isAuthenticated,
+        localCreditBalanceCents,
         useLocalKeys,
         proxyEnabled,
         prefsLoaded,
@@ -598,7 +719,18 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
 
     autoStartGateway();
-  }, [prefsLoaded, isAuthenticated, isAuthConfigured, useLocalKeys, gatewayRunning, isTogglingGateway, selectedModel, gatewayRetryIn, imageModel]);
+  }, [
+    prefsLoaded,
+    isAuthenticated,
+    isAuthConfigured,
+    localCreditBalanceCents,
+    useLocalKeys,
+    gatewayRunning,
+    isTogglingGateway,
+    selectedModel,
+    gatewayRetryIn,
+    imageModel,
+  ]);
 
   async function checkGateway(): Promise<boolean> {
     try {
@@ -642,6 +774,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
   async function toggleGateway() {
     setIsTogglingGateway(true);
+    setStartupError(null);
     try {
       if (gatewayRunning) {
         console.log("[Nova] Stopping gateway...");
@@ -653,8 +786,13 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         console.log("[Nova] Starting gateway...");
         gatewayHealthFailureStreakRef.current = 0;
         setGatewayRunning(false);
-        // If authenticated via OAuth, use proxy mode
-        if (isAuthConfigured && isAuthenticated && !useLocalKeys) {
+        const proxyEnabled =
+          isAuthConfigured &&
+          !useLocalKeys &&
+          (isAuthenticated || (localCreditBalanceCents ?? 0) > 0);
+
+        if (proxyEnabled) {
+          // If proxy mode is available, start with proxy flow.
           const started = await startGatewayProxyFlow({
             model: selectedModel,
             image: imageModel,
@@ -665,8 +803,13 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             console.error("[Nova] Proxy mode failed; not falling back to local mode.");
             return;
           }
+        } else if (isAuthConfigured && !useLocalKeys) {
+          // Auth-configured proxy mode is selected but currently unavailable (typically no credits).
+          // Don't fall back to local-key startup unless the user explicitly enables local keys.
+          setStartupError(buildOutOfCreditsStartupError());
+          return;
         } else {
-          // Not authenticated, use direct API keys
+          // Local keys mode (or auth disabled), use direct API keys.
           await invoke("start_gateway", { model: selectedModel });
         }
 
@@ -676,7 +819,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       await checkGateway();
     } catch (error) {
       console.error("[Nova] Failed to toggle gateway:", error);
-      setStartupError({ message: error instanceof Error ? error.message : "Failed to toggle gateway" });
+      setStartupError({ message: extractGatewayStartError(error) });
     } finally {
       setIsTogglingGateway(false);
     }
@@ -688,7 +831,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   }
 
   async function recoverProxyAuthFromChat(): Promise<boolean> {
-    if (!isAuthConfigured || !isAuthenticated || useLocalKeys) {
+    if (
+      !isAuthConfigured ||
+      useLocalKeys ||
+      (!isAuthenticated && (localCreditBalanceCents ?? 0) <= 0)
+    ) {
       return false;
     }
     if (isTogglingGateway) {
@@ -744,7 +891,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
     if (!gatewayRunning) return;
 
-    if (isAuthConfigured && isAuthenticated && !useLocalKeys && gatewayTokenRef.current) {
+    if (
+      isAuthConfigured &&
+      !useLocalKeys &&
+      gatewayTokenRef.current &&
+      (isAuthenticated || (localCreditBalanceCents ?? 0) > 0)
+    ) {
       // Proxy mode — restart with new model via proxy flow
       setIsTogglingGateway(true);
       try {
@@ -943,7 +1095,13 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
                 console.error("[Nova] Failed to save imageModel:", error);
               }
 
-              if (gatewayRunning && isAuthConfigured && isAuthenticated && !useLocalKeys && gatewayTokenRef.current) {
+              if (
+                gatewayRunning &&
+                isAuthConfigured &&
+                !useLocalKeys &&
+                gatewayTokenRef.current &&
+                (isAuthenticated || (localCreditBalanceCents ?? 0) > 0)
+              ) {
                 try {
                   await startGatewayProxyFlow({
                     model: selectedModel,
@@ -1019,48 +1177,76 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
               </div>
               <div>
                 <h2 className="text-sm font-semibold text-[var(--text-primary)]">
-                  {gatewayRetryIn ? "Reconnecting secure sandbox" : "Starting secure sandbox"}
+                  {gatewayRetryIn ? "Reconnecting Sandbox" : "Starting Secure Sandbox"}
                 </h2>
-                <p className="text-xs text-[var(--text-secondary)] mt-1">
+                <p className="text-xs text-[var(--text-secondary)] mt-1 leading-relaxed">
                   {gatewayRetryIn
-                    ? `Retrying in ${gatewayRetryIn}s. We’ll keep trying until the sandbox is ready.`
-                    : "Nova is preparing the secure sandbox so tools and plugins are available."}
+                    ? `Retrying in ${gatewayRetryIn}s. We’ll keep trying until the environment is ready.`
+                    : "Nova is initializing an isolated environment to safely run tools and plugins."}
                 </p>
-                <div className="mt-3 text-xs text-[var(--text-tertiary)]">
-                  This can take a few seconds the first time.
+              </div>
+            </div>
+
+            <div className="mt-5 rounded-xl border border-violet-100 bg-violet-50/70 p-4">
+              <div className="text-[10px] uppercase tracking-wider text-violet-700 font-bold mb-2">
+                Did you know?
+              </div>
+              <div className="text-xs leading-relaxed text-violet-900 font-medium">
+                {SANDBOX_STARTUP_FACTS[startupFactIndex]}
+              </div>
+            </div>
+
+            <div className="mt-6 pt-4 border-t border-[var(--border-subtle)]">
+              <div className="flex items-center justify-between text-[10px] text-[var(--text-tertiary)] uppercase tracking-widest font-semibold mb-3">
+                System Status
+                {gatewayStartupStage === "health" ? (
+                  <span className="text-green-600">Ready</span>
+                ) : (
+                  <span className="animate-pulse">Initializing...</span>
+                )}
+              </div>
+              <div className="space-y-2.5">
+                <div className="flex items-center gap-2.5 text-[11px] text-[var(--text-secondary)]">
+                  {gatewayStartupStage === "credits" || gatewayStartupStage === "token" ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-violet-500" />
+                  ) : gatewayStartupStage === "launch" || gatewayStartupStage === "health" ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />
+                  ) : (
+                    <div className="w-3.5 h-3.5 rounded-full border border-[var(--border-subtle)]" />
+                  )}
+                  <span className={gatewayStartupStage === "credits" || gatewayStartupStage === "token" ? "font-medium text-[var(--text-primary)]" : ""}>
+                    Securing gateway credentials
+                  </span>
+                </div>
+                <div className="flex items-center gap-2.5 text-[11px] text-[var(--text-secondary)]">
+                  {gatewayStartupStage === "launch" ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-violet-500" />
+                  ) : gatewayStartupStage === "health" ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />
+                  ) : (
+                    <div className="w-3.5 h-3.5 rounded-full border border-[var(--border-subtle)]" />
+                  )}
+                  <span className={gatewayStartupStage === "launch" ? "font-medium text-[var(--text-primary)]" : ""}>
+                    Provisioning isolated container
+                  </span>
+                </div>
+                <div className="flex items-center gap-2.5 text-[11px] text-[var(--text-secondary)]">
+                  {gatewayStartupStage === "health" ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-violet-500" />
+                  ) : (
+                    <div className="w-3.5 h-3.5 rounded-full border border-[var(--border-subtle)]" />
+                  )}
+                  <span className={gatewayStartupStage === "health" ? "font-medium text-[var(--text-primary)]" : ""}>
+                    Verifying sandbox health
+                  </span>
                 </div>
               </div>
             </div>
-            <div className="mt-4 space-y-2 text-xs text-[var(--text-secondary)]">
-              <div className="flex items-center gap-2">
-                {gatewayStartupStage === "credits" || gatewayStartupStage === "token" ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--text-tertiary)]" />
-                ) : gatewayStartupStage === "launch" || gatewayStartupStage === "health" ? (
-                  <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />
-                ) : (
-                  <div className="w-3.5 h-3.5 rounded-full border border-[var(--border-subtle)]" />
-                )}
-                <span>Creating gateway token</span>
+            {!gatewayRetryIn && (
+              <div className="mt-4 text-[10px] text-[var(--text-tertiary)] text-center italic">
+                First-time setup may take a few seconds.
               </div>
-              <div className="flex items-center gap-2">
-                {gatewayStartupStage === "launch" ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--text-tertiary)]" />
-                ) : gatewayStartupStage === "health" ? (
-                  <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />
-                ) : (
-                  <div className="w-3.5 h-3.5 rounded-full border border-[var(--border-subtle)]" />
-                )}
-                <span>Launching gateway container</span>
-              </div>
-              <div className="flex items-center gap-2">
-                {gatewayStartupStage === "health" ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--text-tertiary)]" />
-                ) : (
-                  <div className="w-3.5 h-3.5 rounded-full border border-[var(--border-subtle)]" />
-                )}
-                <span>Waiting for health check</span>
-              </div>
-            </div>
+            )}
             {startupError && (
               <div className="mt-3 text-xs text-red-600">
                 {startupError.message}

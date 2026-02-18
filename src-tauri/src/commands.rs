@@ -8821,6 +8821,116 @@ async fn wait_for_openai_oauth_callback(
     Ok(code)
 }
 
+fn read_linux_machine_id() -> Option<String> {
+    let candidates = ["/etc/machine-id", "/var/lib/dbus/machine-id"];
+    for path in candidates {
+        if let Ok(value) = fs::read_to_string(path) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_lowercase());
+            }
+        }
+    }
+    None
+}
+
+fn read_macos_platform_uuid() -> Option<String> {
+    let output = Command::new("ioreg")
+        .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if !line.contains("IOPlatformUUID") {
+            continue;
+        }
+        let first_quote = line.find('"')?;
+        let tail = &line[first_quote + 1..];
+        let second_quote = tail.find('"')?;
+        let key = &tail[..second_quote];
+        if key != "IOPlatformUUID" {
+            continue;
+        }
+        let equals_idx = line.find('=')?;
+        let value_part = line[equals_idx + 1..].trim();
+        let value = value_part.trim_matches('"').trim();
+        if !value.is_empty() {
+            return Some(value.to_lowercase());
+        }
+    }
+    None
+}
+
+fn read_hostname() -> Option<String> {
+    if let Ok(value) = std::env::var("HOSTNAME") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    let output = Command::new("hostname").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn resolve_raw_device_identifier() -> String {
+    match Platform::detect() {
+        Platform::Linux => {
+            if let Some(machine_id) = read_linux_machine_id() {
+                return format!("linux:machine-id:{machine_id}");
+            }
+        }
+        Platform::MacOS => {
+            if let Some(uuid) = read_macos_platform_uuid() {
+                return format!("macos:ioplatformuuid:{uuid}");
+            }
+        }
+        Platform::Windows => {}
+    }
+
+    let mut fallback_parts: Vec<String> = Vec::new();
+    if let Some(hostname) = read_hostname() {
+        fallback_parts.push(format!("host={hostname}"));
+    }
+    if let Ok(user) = std::env::var("USER") {
+        let trimmed = user.trim();
+        if !trimmed.is_empty() {
+            fallback_parts.push(format!("user={trimmed}"));
+        }
+    }
+    if fallback_parts.is_empty() {
+        fallback_parts.push("unknown".to_string());
+    }
+    format!(
+        "fallback:{}:{}",
+        match Platform::detect() {
+            Platform::Linux => "linux",
+            Platform::MacOS => "macos",
+            Platform::Windows => "windows",
+        },
+        fallback_parts.join("|")
+    )
+}
+
+#[tauri::command]
+pub async fn get_device_fingerprint_hash() -> Result<String, String> {
+    let raw = resolve_raw_device_identifier();
+    let mut hasher = Sha256::new();
+    hasher.update("nova-device-fingerprint-v1:");
+    hasher.update(raw.as_bytes());
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 #[tauri::command]
 pub async fn refresh_provider_token(
     app: AppHandle,

@@ -61,9 +61,10 @@ export async function resetOnboarding(): Promise<void> {
 }
 
 export type OnboardingData = {
-  userName: string;
-  agentName: string;
+  userName?: string;
+  agentName?: string;
   soul: string;
+  completedAt?: string;
 };
 
 export async function saveOnboardingData(data: OnboardingData): Promise<void> {
@@ -75,9 +76,17 @@ export async function saveOnboardingData(data: OnboardingData): Promise<void> {
 export async function loadOnboardingData(): Promise<OnboardingData | null> {
   try {
     const store = await getStore();
-    const data = await store.get("onboardingData");
-    if (!data || typeof data !== "object") return null;
-    return data as OnboardingData;
+    const raw = await store.get("onboardingData");
+    if (!raw || typeof raw !== "object") return null;
+    const data = raw as Record<string, unknown>;
+    const soul = typeof data.soul === "string" ? data.soul : "";
+    if (!soul.trim()) return null;
+    return {
+      soul,
+      userName: typeof data.userName === "string" ? data.userName : undefined,
+      agentName: typeof data.agentName === "string" ? data.agentName : undefined,
+      completedAt: typeof data.completedAt === "string" ? data.completedAt : undefined,
+    };
   } catch {
     return null;
   }

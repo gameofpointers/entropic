@@ -1,118 +1,70 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ArrowRight, ArrowLeft, Sparkles } from "lucide-react";
-import { saveProfile, setOnboardingComplete, saveOnboardingData } from "../lib/profile";
+import { Loader2, Sparkles } from "lucide-react";
+import { saveProfile, saveOnboardingData, setOnboardingComplete } from "../lib/profile";
 import { clientLog } from "../lib/clientLog";
-
-type OnboardingData = {
-  userName: string;
-  agentName: string;
-};
 
 type Props = {
   onComplete: () => void;
 };
 
-const steps = [
-  { id: "user", title: "Welcome", subtitle: "First, what's your name?" },
-  { id: "agent", title: "Name your AI", subtitle: "What would you like to call your assistant?" },
-];
+const DEFAULT_AGENT_NAME = "Nova";
+
+const DEFAULT_SOUL = `# About Nova
+
+You are Nova, a helpful AI assistant for coding, research, and execution tasks.
+Be concise, practical, and action-oriented.
+`;
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  label: string,
+  timeoutMs = 15000
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${label} timed out after ${Math.floor(timeoutMs / 1000)}s`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 export function Onboarding({ onComplete }: Props) {
-  const [currentStep, setCurrentStep] = useState(0);
-  const [data, setData] = useState<OnboardingData>({
-    userName: "",
-    agentName: "Nova",
-  });
+  const startedRef = useRef(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitStage, setSubmitStage] = useState("");
   const [submitError, setSubmitError] = useState("");
-
-  async function withTimeout<T>(
-    promise: Promise<T>,
-    label: string,
-    timeoutMs = 15000
-  ): Promise<T> {
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    try {
-      return await Promise.race([
-        promise,
-        new Promise<T>((_, reject) => {
-          timer = setTimeout(() => {
-            reject(new Error(`${label} timed out after ${Math.floor(timeoutMs / 1000)}s`));
-          }, timeoutMs);
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  }
-
-  const canProceed = () => {
-    switch (currentStep) {
-      case 0: return data.userName.trim().length > 0;
-      case 1: return data.agentName.trim().length > 0;
-      default: return false;
-    }
-  };
-
-  const handleNext = async () => {
-    if (currentStep < steps.length - 1) {
-      setCurrentStep(currentStep + 1);
-    } else {
-      await handleComplete();
-    }
-  };
-
-  const handleBack = () => {
-    if (currentStep > 0) {
-      setCurrentStep(currentStep - 1);
-    }
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && canProceed() && !isSubmitting) {
-      handleNext();
-    }
-  };
-
-  const generateSoul = (): string => {
-    return `# About ${data.userName}
-
-You are ${data.agentName}, ${data.userName}'s helpful AI assistant.
-Be friendly, knowledgeable, and ready to help.
-`;
-  };
 
   const handleComplete = async () => {
     setIsSubmitting(true);
     setSubmitError("");
     clientLog("onboarding.complete.start");
-    try {
-      // Generate the SOUL.md content
-      const soul = generateSoul();
 
-      // Save onboarding data locally
-      setSubmitStage("Saving profile...");
-      clientLog("onboarding.stage.save_profile");
+    try {
+      setSubmitStage("Preparing your workspace...");
       await withTimeout(
         saveOnboardingData({
-          userName: data.userName,
-          agentName: data.agentName,
-          soul,
+          soul: DEFAULT_SOUL,
+          agentName: DEFAULT_AGENT_NAME,
+          completedAt: new Date().toISOString(),
         }),
         "Saving onboarding data"
       );
 
-      // Sync to Rust store (best effort)
       setSubmitStage("Syncing settings...");
-      clientLog("onboarding.stage.sync_settings");
       try {
         await withTimeout(
           invoke("sync_onboarding_to_settings", {
-            soul,
-            agentName: data.agentName,
+            soul: DEFAULT_SOUL,
+            agentName: DEFAULT_AGENT_NAME,
           }),
           "Syncing onboarding settings"
         );
@@ -120,22 +72,14 @@ Be friendly, knowledgeable, and ready to help.
         console.warn("Onboarding sync warning:", error);
       }
 
-      // Save the agent profile (best effort)
       setSubmitStage("Finalizing...");
-      clientLog("onboarding.stage.finalize");
       try {
-        await withTimeout(saveProfile({ name: data.agentName }), "Saving agent profile");
+        await withTimeout(saveProfile({ name: DEFAULT_AGENT_NAME }), "Saving agent profile");
       } catch (error) {
         console.warn("Profile save warning:", error);
       }
 
-      // Mark onboarding as complete (required)
-      await withTimeout(
-        setOnboardingComplete(true),
-        "Marking onboarding as complete"
-      );
-
-      // Notify that profile was updated
+      await withTimeout(setOnboardingComplete(true), "Marking onboarding complete");
       window.dispatchEvent(new Event("nova-profile-updated"));
 
       clientLog("onboarding.complete.success");
@@ -151,10 +95,14 @@ Be friendly, knowledgeable, and ready to help.
     }
   };
 
-  return (
-    <div className="h-screen w-screen flex flex-col items-center justify-center bg-[var(--bg-primary)] transition-colors duration-500">
+  useEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    void handleComplete();
+  }, []);
 
-      {/* Drag region for window movement */}
+  return (
+    <div className="h-screen w-screen flex flex-col items-center justify-center bg-[var(--bg-primary)] px-6">
       <div
         data-tauri-drag-region
         onMouseDown={(e) => {
@@ -166,85 +114,44 @@ Be friendly, knowledgeable, and ready to help.
         className="absolute top-0 left-0 right-0 h-12"
       />
 
-      {/* Progress Indicator - Minimalist at top */}
-      <div className="absolute top-12 flex gap-3">
-        {steps.map((_, index) => (
-          <div
-            key={index}
-            className={`h-1 rounded-full transition-all duration-500 ${
-              index === currentStep ? "w-8 bg-black" : "w-2 bg-gray-300"
-            }`}
-          />
-        ))}
-      </div>
-
-      <div className="w-full max-w-2xl px-8 flex flex-col items-center animate-scale-in">
-        
-        {/* Step Icon/Decoration */}
-        <div className="mb-8 p-4 bg-white rounded-3xl shadow-xl shadow-purple-500/10">
-          <Sparkles className="w-8 h-8 text-[var(--purple-accent)] transition-colors duration-500" />
+      <div className="w-full max-w-xl bg-white border border-gray-100 rounded-3xl shadow-xl p-8 text-center animate-scale-in">
+        <div className="mb-6 p-4 bg-gray-50 rounded-2xl inline-flex">
+          <Sparkles className="w-7 h-7 text-[var(--purple-accent)]" />
         </div>
 
-        {/* Text Content */}
-        <h1 className="text-4xl font-bold text-gray-900 mb-3 text-center tracking-tight">
-          {steps[currentStep].title}
+        <h1 className="text-3xl font-bold text-gray-900 tracking-tight mb-3">
+          Welcome to Nova
         </h1>
-        <p className="text-xl text-gray-500 mb-12 text-center font-medium">
-          {steps[currentStep].subtitle}
+        <p className="text-gray-600 mb-8">
+          Nova runs a secure local runtime for tools and coding workflows. We&apos;ll finish setup next.
         </p>
 
-        {/* Input Area */}
-        <div className="w-full max-w-md relative mb-16 group">
-          <input
-            type="text"
-            value={currentStep === 0 ? data.userName : data.agentName}
-            onChange={(e) => {
-              if (currentStep === 0) setData({ ...data, userName: e.target.value });
-              else setData({ ...data, agentName: e.target.value });
-            }}
-            onKeyDown={handleKeyDown}
-            placeholder={currentStep === 0 ? "Type your name..." : "Name your assistant..."}
-            className="w-full bg-transparent text-4xl text-center font-medium text-gray-900 placeholder:text-gray-300
-                     focus:outline-none border-b-2 border-gray-100 focus:border-black transition-all pb-4"
-            autoFocus
-          />
+        <div className="text-left rounded-2xl bg-gray-50 border border-gray-100 p-4 mb-8">
+          <p className="text-sm font-semibold text-gray-800 mb-2">What happens next</p>
+          <ul className="text-sm text-gray-600 space-y-1 list-disc pl-5">
+            <li>Set up Docker/Colima runtime once</li>
+            <li>Start a secure OpenClaw sandbox locally</li>
+            <li>Begin with free credits and sign in later if needed</li>
+          </ul>
         </div>
 
-        {/* Navigation Actions */}
-        <div className="flex flex-col items-center gap-6">
-          <button
-            onClick={handleNext}
-            disabled={!canProceed() || isSubmitting}
-            className="group relative flex items-center gap-3 px-12 py-4 bg-black text-white rounded-full font-semibold text-lg
-                     hover:bg-gray-800 disabled:opacity-30 disabled:cursor-not-allowed transition-all shadow-lg hover:shadow-xl hover:-translate-y-0.5"
-          >
-            {isSubmitting ? (
-              <span className="flex items-center gap-2">
-                {submitStage || "Setup..."}
-              </span>
-            ) : (
-              <span className="flex items-center gap-2">
-                {currentStep === steps.length - 1 ? "Get Started" : "Continue"}
-                <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
-              </span>
-            )}
-          </button>
-
-          {submitError && (
-            <div className="max-w-md text-center text-xs text-red-500">
-              {submitError}
-            </div>
-          )}
-
-          <button
-            onClick={handleBack}
-            className={`text-sm font-medium text-gray-400 hover:text-gray-600 transition-all
-                     ${currentStep === 0 ? "opacity-0 pointer-events-none" : "opacity-100"}`}
-          >
-            Go back
-          </button>
+        <div className="w-full flex items-center justify-center gap-2 px-6 py-4 bg-black text-white rounded-2xl font-semibold">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          <span>{submitStage || "Preparing..."}</span>
         </div>
 
+        {submitError && (
+          <div className="mt-4 text-xs text-red-500">
+            {submitError}
+            <button
+              onClick={handleComplete}
+              disabled={isSubmitting}
+              className="ml-3 underline"
+            >
+              Retry
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

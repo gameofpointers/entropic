@@ -24,6 +24,15 @@ type SetupErrorDiagnosis = {
   technical: string;
 };
 
+const EDUCATIONAL_FACTS = [
+  "Nova runs OpenClaw in an isolated container so generated commands stay sandboxed.",
+  "Colima is a lightweight local VM runtime that Nova uses on macOS for secure container execution.",
+  "Use Plugins to connect tools like Calendar or Gmail after setup completes.",
+  "Local Keys mode lets you use your own provider keys directly from Settings.",
+  "Proxy mode uses Nova credits and keeps model routing and billing centralized.",
+  "Tasks and Files are designed for longer-running automation, while Chat is best for quick iterations.",
+];
+
 function sanitizeSetupError(rawError: string): string {
   return rawError
     .split("\n")
@@ -95,6 +104,7 @@ export function SetupScreen({ onComplete }: Props) {
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState<SetupProgress | null>(null);
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">("idle");
+  const [factIndex, setFactIndex] = useState(0);
 
   useEffect(() => {
     if (isRunning) {
@@ -109,6 +119,16 @@ export function SetupScreen({ onComplete }: Props) {
       return () => clearInterval(interval);
     }
   }, [isRunning, onComplete]);
+
+  useEffect(() => {
+    if (!isRunning || !progress || progress.complete || progress.error) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      setFactIndex((current) => (current + 1) % EDUCATIONAL_FACTS.length);
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [isRunning, progress]);
 
   async function startSetup(withCleanup = false) {
     setCopyStatus("idle");
@@ -191,6 +211,12 @@ export function SetupScreen({ onComplete }: Props) {
               />
             </div>
             <p className="text-gray-400 text-sm">{progress.percent}%</p>
+            <div className="mt-5 rounded-xl border border-violet-100 bg-violet-50/70 p-3 text-left">
+              <p className="text-[10px] uppercase tracking-wide text-violet-700 font-semibold mb-1">
+                Setup Fact
+              </p>
+              <p className="text-xs text-violet-900">{EDUCATIONAL_FACTS[factIndex]}</p>
+            </div>
           </div>
         )}
 

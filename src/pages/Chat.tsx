@@ -1,5 +1,21 @@
-import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Sparkles, X, Loader2, ExternalLink, Paperclip, MessageSquare, Calendar, Globe, Mail, Activity, TrendingUp, FolderPlus } from "lucide-react";
+import { useState, useRef, useEffect, useCallback, type FormEvent } from "react";
+import {
+  Send,
+  Sparkles,
+  X,
+  Loader2,
+  ExternalLink,
+  Paperclip,
+  MessageSquare,
+  Calendar,
+  Globe,
+  Mail,
+  Activity,
+  TrendingUp,
+  FolderPlus,
+  ChevronDown,
+  ChevronUp,
+} from "lucide-react";
 import { open } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
@@ -13,6 +29,9 @@ import { useAuth } from "../contexts/AuthContext";
 import { syncAllIntegrationsToGateway, getCachedIntegrationProviders, getIntegrations } from "../lib/integrations";
 import { resolveGatewayAuth } from "../lib/gateway-auth";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
+import { getLocalCreditBalance } from "../lib/localCredits";
+import { signInWithDiscord, signInWithEmail, signInWithGoogle, signUpWithEmail } from "../lib/auth";
+import novaLogo from "../assets/nova-logo.png";
 import type { Page } from "../components/Layout";
 
 // NOTE: Most type definitions are omitted for brevity in this example
@@ -46,6 +65,25 @@ type PendingAttachment = { id: string; fileName: string; tempPath: string; saved
 type AuthState = { active_provider: string | null; providers: Array<{ id: string; has_key: boolean }> };
 type CalendarEvent = { id?: string; summary?: string; start?: string; end?: string; attendees?: Array<{ email?: string; displayName?: string }> };
 type ToolError = { tool?: string; error?: string; status?: string };
+
+function GoogleIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24">
+      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+      <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+    </svg>
+  );
+}
+
+function DiscordIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor">
+      <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
+    </svg>
+  );
+}
 
 // ── Local chat persistence ─────────────────────────────────────
 const CHAT_STORE_FILE = "nova-chat-history.json";
@@ -272,6 +310,8 @@ function isBillingIssueMessage(raw?: string | null): boolean {
   return (
     message.includes("insufficient credits") ||
     message.includes("out of credits") ||
+    message.includes("out of free credits") ||
+    message.includes("trial credits") ||
     message.includes("add more credits") ||
     message.includes("payment required") ||
     message.includes("billing issue") ||
@@ -860,7 +900,13 @@ export function Chat({
   requestedSessionAction?: ChatSessionActionRequest | null;
 }) {
   const { isAuthenticated, isAuthConfigured } = useAuth();
-  const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
+  const [localCreditsCents, setLocalCreditsCents] = useState<number | null>(null);
+  const localTrialLoading =
+    !isAuthenticated && isAuthConfigured && !useLocalKeys && localCreditsCents === null;
+  const proxyEnabled =
+    isAuthConfigured &&
+    !useLocalKeys &&
+    (isAuthenticated || (localCreditsCents ?? 0) > 0);
   const [messages, setMessages] = useState<Message[]>([]);
   const [draftsBySession, setDraftsBySession] = useState<Record<string, string>>({});
   const [isLoading, setIsLoading] = useState(false);
@@ -877,6 +923,14 @@ export function Chat({
   const [oauthLoading, setOauthLoading] = useState<string | null>(null);
   const [anthropicCodePending, setAnthropicCodePending] = useState(false);
   const [anthropicCodeInput, setAnthropicCodeInput] = useState("");
+  const [authLoading, setAuthLoading] = useState<"google" | "discord" | "email-signin" | "email-signup" | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [showEmailAuth, setShowEmailAuth] = useState(false);
+  const [emailAuthMode, setEmailAuthMode] = useState<"signin" | "signup">("signin");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [showOwnProviderOptions, setShowOwnProviderOptions] = useState(false);
   const [providerStatus, setProviderStatus] = useState<AuthState["providers"]>([]);
   const connectedProviders = providerStatus.filter(p => p.has_key).map(p => p.id);
   const [gatewayUrl, setGatewayUrl] = useState(DEFAULT_GATEWAY_URL);
@@ -937,6 +991,75 @@ export function Chat({
   const runHistoryRecoveryRef = useRef<Record<string, boolean>>({});
   const gatewaySessionKeysRef = useRef<Set<string>>(new Set());
   const visibleMessagesSessionRef = useRef<string | null>(null);
+
+  function requestSignIn() {
+    window.dispatchEvent(
+      new CustomEvent("nova-require-signin", {
+        detail: { source: "chat-credits" },
+      })
+    );
+  }
+
+  async function refreshTrialCredits() {
+    if (isAuthenticated || !isAuthConfigured || useLocalKeys) {
+      return;
+    }
+    try {
+      const balance = await getLocalCreditBalance();
+      setLocalCreditsCents(balance.balance_cents);
+    } catch (error) {
+      console.warn("[Nova] Failed to refresh trial credits:", error);
+    }
+  }
+
+  async function handleNovaOAuthSignIn(provider: "google" | "discord") {
+    setAuthLoading(provider);
+    setAuthError(null);
+    setAuthNotice(null);
+    try {
+      if (provider === "google") {
+        await signInWithGoogle();
+      } else {
+        await signInWithDiscord();
+      }
+      window.setTimeout(() => {
+        if (sessionStorage.getItem("nova_oauth_pending")) {
+          setAuthError("Sign in is taking longer than expected. If your browser did not open, try again.");
+          setAuthLoading(null);
+        }
+      }, 10000);
+    } catch (error) {
+      console.error("OAuth sign in failed:", error);
+      setAuthError("Failed to start sign in. Please try again.");
+      setAuthLoading(null);
+    }
+  }
+
+  async function handleNovaEmailAuthSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (!authEmail.trim() || !authPassword.trim()) return;
+    const mode = emailAuthMode;
+    setAuthLoading(mode === "signup" ? "email-signup" : "email-signin");
+    setAuthError(null);
+    setAuthNotice(null);
+    try {
+      if (mode === "signup") {
+        await signUpWithEmail(authEmail.trim(), authPassword);
+        setAuthNotice("Check your email for a confirmation link, then sign in.");
+        setEmailAuthMode("signin");
+      } else {
+        await signInWithEmail(authEmail.trim(), authPassword);
+      }
+    } catch (error: any) {
+      const message =
+        typeof error?.message === "string" && error.message.trim()
+          ? error.message
+          : "Authentication failed. Please try again.";
+      setAuthError(message);
+    } finally {
+      setAuthLoading(null);
+    }
+  }
 
   const applySessionTitles = useCallback((list: ChatSession[]): ChatSession[] => {
     const normalized = normalizeSessionsList(list);
@@ -1262,6 +1385,40 @@ export function Chat({
   useEffect(() => {
     loadOnboardingData().then(setOnboardingData).catch(console.error);
   }, []);
+
+  useEffect(() => {
+    if (isAuthenticated || !isAuthConfigured || useLocalKeys) {
+      setLocalCreditsCents(null);
+      return;
+    }
+
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const balance = await getLocalCreditBalance();
+        if (!cancelled) {
+          setLocalCreditsCents(balance.balance_cents);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setLocalCreditsCents(0);
+        }
+        console.warn("[Nova] Failed to load trial credits:", error);
+      }
+    };
+
+    refresh();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, isAuthConfigured, useLocalKeys]);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    setAuthLoading(null);
+    setAuthError(null);
+    setAuthNotice(null);
+  }, [isAuthenticated]);
 
   // Load initial auth state + refresh on auth changes (e.g. OAuth in Settings)
   const refreshAuthState = () => {
@@ -2120,6 +2277,8 @@ export function Chat({
       return;
     }
 
+    await refreshTrialCredits();
+
     const userMessage: Message = { id: crypto.randomUUID(), role: "user", content: messageContent, sentAt: Date.now() };
     visibleMessagesSessionRef.current = sendSession;
     setMessages(prev => [...prev, userMessage]);
@@ -2204,6 +2363,7 @@ export function Chat({
       setError(e instanceof Error ? e.message : "Send failed");
       setIsLoading(false);
       clearActiveRunTracking();
+      await refreshTrialCredits();
       addDiag(`send failed: ${e instanceof Error ? e.message : "unknown"}`);
       if (failedDraftRestore !== null && sendSession && currentSessionRef.current === sendSession) {
         setDraftsBySession((prev) => ({ ...prev, [sendSession]: failedDraftRestore }));
@@ -2345,115 +2505,258 @@ export function Chat({
     </div>
   );
 
-  const renderNoProvider = () => (
-    <>
-      <div className="h-full flex flex-col items-center justify-center p-6 text-center">
-        <div className="glass-card p-8 max-w-md">
-          <Sparkles className="w-10 h-10 mx-auto mb-4 text-[var(--text-accent)]" />
-          <h2 className="text-xl font-semibold mb-2 text-[var(--text-primary)]">Connect an AI Service</h2>
-          <p className="mb-6 text-[var(--text-secondary)]">Sign in with your account or add an API key.</p>
+  const renderNoProvider = () => {
+    const accountSignInAvailable = isAuthConfigured && !useLocalKeys && !isAuthenticated;
+    const trialCreditsExhausted =
+      accountSignInAvailable &&
+      localCreditsCents !== null &&
+      localCreditsCents <= 0;
+    const ownProviderExpanded =
+      !accountSignInAvailable || showOwnProviderOptions || anthropicCodePending;
 
-          {/* OAuth sign-in buttons */}
-          <div className="space-y-2 mb-4">
-            {/* Anthropic */}
-            {anthropicCodePending ? (
-              <div className="p-3 rounded-lg bg-black/[0.03]">
-                <p className="text-sm font-medium text-[var(--text-primary)] mb-1">Paste the code from your browser</p>
-                <p className="text-xs text-[var(--text-tertiary)] mb-3">After authorizing in your browser, copy the code and paste it below.</p>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={anthropicCodeInput}
-                    onChange={(e) => setAnthropicCodeInput(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") submitAnthropicCode(); }}
-                    placeholder="Paste code here..."
-                    className="flex-1 px-3 py-2 text-sm rounded-lg border border-black/10 bg-white text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-1 focus:ring-[var(--purple-accent)]"
-                    autoFocus
-                  />
-                  <button
-                    onClick={submitAnthropicCode}
-                    disabled={!anthropicCodeInput.trim() || oauthLoading === "anthropic"}
-                    className="px-4 py-2 text-sm font-medium rounded-lg bg-[var(--purple-accent)] text-white hover:opacity-90 disabled:opacity-40 transition-colors"
-                  >
-                    {oauthLoading === "anthropic" ? "..." : "Connect"}
-                  </button>
+    return (
+      <>
+        <div className="h-full flex flex-col items-center justify-center p-6 text-center">
+          <div className={accountSignInAvailable
+            ? "w-full max-w-[420px] bg-white rounded-3xl shadow-xl p-10 border border-gray-100/60"
+            : "glass-card p-8 max-w-md"}
+          >
+            {accountSignInAvailable ? (
+              <div className="text-center mb-8">
+                <div className="w-20 h-20 rounded-[2rem] bg-transparent mx-auto flex items-center justify-center mb-6">
+                  <img src={novaLogo} alt="Nova" className="w-20 h-20 rounded-[2rem] shadow-xl" />
                 </div>
-                <button
-                  onClick={() => { setAnthropicCodePending(false); setAnthropicCodeInput(""); }}
-                  className="mt-2 text-xs text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] transition-colors"
-                >
-                  Cancel
-                </button>
+                <h2 className="text-3xl font-bold text-gray-900 mb-3 tracking-tight">Continue with Nova</h2>
+                <p className="text-sm text-gray-500">
+                  {trialCreditsExhausted
+                    ? "Your free credits are used. Sign in to continue, or use your own provider."
+                    : "Sign in with your Nova account, or use your own provider."}
+                </p>
               </div>
             ) : (
-              <button
-                onClick={() => connectWithOAuth("anthropic")}
-                disabled={oauthLoading !== null}
-                className="w-full flex items-center gap-4 p-3 rounded-lg text-left transition-colors bg-black/[0.03] hover:bg-black/[0.07] disabled:opacity-50"
-              >
-                <div className="w-9 h-9 rounded-md bg-[var(--purple-accent)]/10 flex items-center justify-center font-semibold text-[var(--purple-accent)]">
-                  A
-                </div>
-                <div className="flex-1">
-                  <p className="font-medium text-[var(--text-primary)]">Sign in with Claude</p>
-                  <p className="text-xs text-[var(--text-tertiary)]">Use your existing subscription</p>
-                </div>
-                {oauthLoading === "anthropic" ? (
-                  <Loader2 className="w-4 h-4 animate-spin text-[var(--text-tertiary)]" />
-                ) : (
-                  <ExternalLink className="w-4 h-4 text-[var(--text-tertiary)]" />
-                )}
-              </button>
+              <>
+                <Sparkles className="w-10 h-10 mx-auto mb-4 text-[var(--text-accent)]" />
+                <h2 className="text-xl font-semibold mb-2 text-[var(--text-primary)]">Connect an AI Service</h2>
+                <p className="mb-6 text-[var(--text-secondary)]">Use provider OAuth or add an API key.</p>
+              </>
             )}
 
-            {/* OpenAI */}
+            {accountSignInAvailable ? (
+              <div className="space-y-3 mb-6">
+                {authError ? (
+                  <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 text-center">
+                    {authError}
+                  </div>
+                ) : null}
+                {authNotice ? (
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700 text-center">
+                    {authNotice}
+                  </div>
+                ) : null}
+                <button
+                  onClick={() => handleNovaOAuthSignIn("google")}
+                  disabled={authLoading !== null || oauthLoading !== null}
+                  className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-white hover:bg-gray-50 text-gray-700 font-medium rounded-2xl border border-gray-200 transition-all hover:border-gray-300 active:scale-95 duration-200 disabled:opacity-50"
+                >
+                  <GoogleIcon className="w-5 h-5" />
+                  {authLoading === "google" ? "Opening Google..." : "Continue with Google"}
+                </button>
+                <button
+                  onClick={() => handleNovaOAuthSignIn("discord")}
+                  disabled={authLoading !== null || oauthLoading !== null}
+                  className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-[#5865F2] hover:bg-[#4752C4] text-white font-medium rounded-2xl transition-all shadow-md hover:shadow-lg active:scale-95 duration-200 disabled:opacity-50"
+                >
+                  <DiscordIcon className="w-5 h-5" />
+                  {authLoading === "discord" ? "Opening Discord..." : "Continue with Discord"}
+                </button>
+                <div className="relative py-2">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-gray-100" />
+                  </div>
+                  <div className="relative flex justify-center text-[10px] uppercase tracking-wider">
+                    <span className="bg-white px-2 text-gray-400">or</span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setShowEmailAuth((prev) => !prev);
+                    setAuthError(null);
+                    setAuthNotice(null);
+                  }}
+                  disabled={authLoading !== null || oauthLoading !== null}
+                  className="w-full flex items-center justify-center gap-3 px-4 py-4 bg-gray-50 hover:bg-gray-100 text-gray-900 font-medium rounded-2xl transition-all active:scale-95 duration-200 disabled:opacity-50"
+                >
+                  <Mail className="w-5 h-5 text-gray-500" />
+                  <span>Continue with Email</span>
+                </button>
+                {showEmailAuth ? (
+                  <form onSubmit={handleNovaEmailAuthSubmit} className="space-y-3 rounded-2xl bg-gray-50 p-4 text-left">
+                    <input
+                      type="email"
+                      value={authEmail}
+                      onChange={(event) => setAuthEmail(event.target.value)}
+                      placeholder="name@example.com"
+                      className="w-full px-4 py-3 rounded-xl bg-white border border-gray-200 focus:ring-2 focus:ring-black/5 focus:outline-none text-gray-900 placeholder:text-gray-400 text-sm transition-all"
+                      required
+                    />
+                    <input
+                      type="password"
+                      value={authPassword}
+                      onChange={(event) => setAuthPassword(event.target.value)}
+                      placeholder={emailAuthMode === "signup" ? "Create password" : "Password"}
+                      className="w-full px-4 py-3 rounded-xl bg-white border border-gray-200 focus:ring-2 focus:ring-black/5 focus:outline-none text-gray-900 placeholder:text-gray-400 text-sm transition-all"
+                      required
+                      minLength={emailAuthMode === "signup" ? 8 : undefined}
+                    />
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="submit"
+                        disabled={authLoading !== null}
+                        className="px-4 py-2.5 rounded-xl bg-black hover:bg-gray-800 text-white text-xs font-semibold transition-all disabled:opacity-50"
+                      >
+                        {emailAuthMode === "signup"
+                          ? authLoading === "email-signup"
+                            ? "Creating..."
+                            : "Create account"
+                          : authLoading === "email-signin"
+                            ? "Signing in..."
+                            : "Sign in"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEmailAuthMode((prev) => (prev === "signup" ? "signin" : "signup"));
+                          setAuthError(null);
+                          setAuthNotice(null);
+                        }}
+                        className="text-xs text-gray-500 hover:text-gray-700 transition-colors"
+                      >
+                        {emailAuthMode === "signup"
+                          ? "Have an account? Sign in"
+                          : "Need an account? Sign up"}
+                      </button>
+                    </div>
+                  </form>
+                ) : null}
+              </div>
+            ) : null}
+
             <button
-              onClick={() => connectWithOAuth("openai")}
-              disabled={oauthLoading !== null}
-              className="w-full flex items-center gap-4 p-3 rounded-lg text-left transition-colors bg-black/[0.03] hover:bg-black/[0.07] disabled:opacity-50"
+              onClick={() => setShowOwnProviderOptions((prev) => !prev)}
+              className={accountSignInAvailable
+                ? "w-full mb-2 flex flex-col items-center justify-center gap-0.5 text-[11px] uppercase tracking-[0.16em] text-gray-400 hover:text-gray-600 transition-colors"
+                : "w-full mb-2 flex flex-col items-center justify-center gap-0.5 text-[11px] uppercase tracking-[0.16em] text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] transition-colors"}
             >
-              <div className="w-9 h-9 rounded-md bg-[var(--purple-accent)]/10 flex items-center justify-center font-semibold text-[var(--purple-accent)]">
-                O
-              </div>
-              <div className="flex-1">
-                <p className="font-medium text-[var(--text-primary)]">Sign in with OpenAI</p>
-                <p className="text-xs text-[var(--text-tertiary)]">Use your existing subscription</p>
-              </div>
-              {oauthLoading === "openai" ? (
-                <Loader2 className="w-4 h-4 animate-spin text-[var(--text-tertiary)]" />
+              <span>Use your own provider</span>
+              {ownProviderExpanded ? (
+                <ChevronUp className="w-3.5 h-3.5" />
               ) : (
-                <ExternalLink className="w-4 h-4 text-[var(--text-tertiary)]" />
+                <ChevronDown className="w-3.5 h-3.5" />
               )}
             </button>
-          </div>
 
-          <div className="flex items-center gap-3 my-4">
-            <div className="flex-1 h-px bg-black/10" />
-            <span className="text-xs text-[var(--text-tertiary)] font-medium">or use an API key</span>
-            <div className="flex-1 h-px bg-black/10" />
-          </div>
+            {ownProviderExpanded ? (
+              <>
+                <div className="space-y-2 mb-4">
+                  {anthropicCodePending ? (
+                    <div className="p-3 rounded-lg bg-black/[0.03]">
+                      <p className="text-sm font-medium text-[var(--text-primary)] mb-1">Paste the code from your browser</p>
+                      <p className="text-xs text-[var(--text-tertiary)] mb-3">After authorizing in your browser, copy the code and paste it below.</p>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={anthropicCodeInput}
+                          onChange={(e) => setAnthropicCodeInput(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") submitAnthropicCode(); }}
+                          placeholder="Paste code here..."
+                          className="flex-1 px-3 py-2 text-sm rounded-lg border border-black/10 bg-white text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-1 focus:ring-[var(--purple-accent)]"
+                          autoFocus
+                        />
+                        <button
+                          onClick={submitAnthropicCode}
+                          disabled={!anthropicCodeInput.trim() || oauthLoading === "anthropic"}
+                          className="px-4 py-2 text-sm font-medium rounded-lg bg-[var(--purple-accent)] text-white hover:opacity-90 disabled:opacity-40 transition-colors"
+                        >
+                          {oauthLoading === "anthropic" ? "..." : "Connect"}
+                        </button>
+                      </div>
+                      <button
+                        onClick={() => { setAnthropicCodePending(false); setAnthropicCodeInput(""); }}
+                        className="mt-2 text-xs text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => connectWithOAuth("anthropic")}
+                      disabled={oauthLoading !== null}
+                      className="w-full flex items-center gap-4 p-3 rounded-lg text-left transition-colors bg-black/[0.03] hover:bg-black/[0.07] disabled:opacity-50"
+                    >
+                      <div className="w-9 h-9 rounded-md bg-[var(--purple-accent)]/10 flex items-center justify-center font-semibold text-[var(--purple-accent)]">
+                        A
+                      </div>
+                      <div className="flex-1">
+                        <p className="font-medium text-[var(--text-primary)]">Sign in with Claude</p>
+                        <p className="text-xs text-[var(--text-tertiary)]">Use your existing subscription</p>
+                      </div>
+                      {oauthLoading === "anthropic" ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-[var(--text-tertiary)]" />
+                      ) : (
+                        <ExternalLink className="w-4 h-4 text-[var(--text-tertiary)]" />
+                      )}
+                    </button>
+                  )}
 
-          {/* API key buttons */}
-          <div className="space-y-2">
-            {PROVIDERS.map(p => (
-              <button key={p.id} onClick={() => { setSelectedProvider(p); setShowKeyModal(true); }}
-                className="w-full flex items-center gap-4 p-3 rounded-lg text-left transition-colors hover:bg-black/5">
-                <div className="w-9 h-9 rounded-md bg-black/5 flex items-center justify-center font-semibold text-[var(--text-accent)]">
-                  {p.icon}
+                  <button
+                    onClick={() => connectWithOAuth("openai")}
+                    disabled={oauthLoading !== null}
+                    className="w-full flex items-center gap-4 p-3 rounded-lg text-left transition-colors bg-black/[0.03] hover:bg-black/[0.07] disabled:opacity-50"
+                  >
+                    <div className="w-9 h-9 rounded-md bg-[var(--purple-accent)]/10 flex items-center justify-center font-semibold text-[var(--purple-accent)]">
+                      O
+                    </div>
+                    <div className="flex-1">
+                      <p className="font-medium text-[var(--text-primary)]">Sign in with OpenAI</p>
+                      <p className="text-xs text-[var(--text-tertiary)]">Use your existing subscription</p>
+                    </div>
+                    {oauthLoading === "openai" ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-[var(--text-tertiary)]" />
+                    ) : (
+                      <ExternalLink className="w-4 h-4 text-[var(--text-tertiary)]" />
+                    )}
+                  </button>
                 </div>
-                <div className="flex-1">
-                  <p className="font-medium text-[var(--text-primary)]">{p.name}</p>
+
+                <div className="flex items-center gap-3 my-4">
+                  <div className="flex-1 h-px bg-black/10" />
+                  <span className="text-xs text-[var(--text-tertiary)] font-medium">or use an API key</span>
+                  <div className="flex-1 h-px bg-black/10" />
                 </div>
-                <ExternalLink className="w-4 h-4 text-[var(--text-tertiary)]" />
-              </button>
-            ))}
+
+                <div className="space-y-2">
+                  {PROVIDERS.map(p => (
+                    <button key={p.id} onClick={() => { setSelectedProvider(p); setShowKeyModal(true); }}
+                      className="w-full flex items-center gap-4 p-3 rounded-lg text-left transition-colors hover:bg-black/5">
+                      <div className="w-9 h-9 rounded-md bg-black/5 flex items-center justify-center font-semibold text-[var(--text-accent)]">
+                        {p.icon}
+                      </div>
+                      <div className="flex-1">
+                        <p className="font-medium text-[var(--text-primary)]">{p.name}</p>
+                      </div>
+                      <ExternalLink className="w-4 h-4 text-[var(--text-tertiary)]" />
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs mt-6 text-[var(--text-tertiary)]">Your credentials are stored locally and securely.</p>
+              </>
+            ) : null}
           </div>
-          <p className="text-xs mt-6 text-[var(--text-tertiary)]">Your credentials are stored locally and securely.</p>
         </div>
-      </div>
-      {showKeyModal && selectedProvider && <ApiKeyModal />}
-    </>
-  );
+        {showKeyModal && selectedProvider && <ApiKeyModal />}
+      </>
+    );
+  };
 
   const renderWelcome = () => {
     const userName = onboardingData?.userName || "there";
@@ -2594,10 +2897,14 @@ export function Chat({
   }
 
   if (isConnecting) return renderConnecting();
+  if (localTrialLoading) return renderConnecting();
   if (!connectedProvider && !proxyEnabled) return renderNoProvider();
   const autoStartExpected = proxyEnabled && !gatewayRunning;
   const activeDraft = currentSession ? (draftsBySession[currentSession] || "") : "";
   const showBillingAction = Boolean(error && isBillingIssueMessage(error));
+  const showSignInAction = Boolean(
+    error && isBillingIssueMessage(error) && !isAuthenticated && isAuthConfigured
+  );
 
   // Main Chat UI
   return (
@@ -2685,12 +2992,20 @@ export function Chat({
         <div className="p-2 text-center text-sm bg-red-500/10 text-red-500">
           <div className="flex items-center justify-center gap-3 flex-wrap">
             <span>{error}</span>
+            {showSignInAction && (
+              <button
+                onClick={requestSignIn}
+                className="btn-primary !py-1 !px-3 text-xs"
+              >
+                Sign In
+              </button>
+            )}
             {showBillingAction && onNavigate && (
               <button
                 onClick={() => onNavigate("billing")}
                 className="btn-primary !py-1 !px-3 text-xs"
               >
-                Add Credits
+                {isAuthenticated ? "Add Credits" : "Billing"}
               </button>
             )}
           </div>
