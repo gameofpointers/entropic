@@ -943,23 +943,25 @@ export function Store({
               : "Manage tools and connected services."}
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          {integrationsSyncing && (
-            <div className="flex items-center gap-2 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-[var(--system-blue)]/10 text-[var(--system-blue)]">
-              <Loader2 className="w-3 h-3 animate-spin" />
-              Syncing
+        {activeTab === "skills" && (
+          <div className="flex items-center gap-3">
+            {integrationsSyncing && (
+              <div className="flex items-center gap-2 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-[var(--system-blue)]/10 text-[var(--system-blue)]">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Syncing
+              </div>
+            )}
+            <div className="relative group">
+              <Search className="w-4 h-4 text-[var(--text-tertiary)] absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                value={skillQuery}
+                onChange={(e) => setSkillQuery(e.target.value)}
+                className="w-full sm:w-[260px] pl-9 pr-3 py-2.5 rounded-lg border border-[var(--border-default)] bg-white text-sm focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
+                placeholder="Search skills..."
+              />
             </div>
-          )}
-          <div className="relative group">
-            <Search className="w-4 h-4 text-[var(--text-tertiary)] absolute left-3 top-1/2 -translate-y-1/2" />
-            <input
-              value={skillQuery}
-              onChange={(e) => setSkillQuery(e.target.value)}
-              className="w-full sm:w-[260px] pl-9 pr-3 py-2.5 rounded-lg border border-[var(--border-default)] bg-white text-sm focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
-              placeholder={activeTab === "skills" ? "Search skills..." : "Search plugins..."}
-            />
           </div>
-        </div>
+        )}
       </div>
 
       {gatewayRestarting && (
@@ -971,27 +973,9 @@ export function Store({
       <div className="flex-1 overflow-auto max-w-6xl w-full mx-auto">
         {activeTab === "plugins" ? (
           <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-            {/* Category Filter */}
-            <div className="flex gap-2 py-4 overflow-x-auto no-scrollbar">
-              {CATEGORIES.map((cat) => (
-                <button
-                  key={cat.id}
-                  onClick={() => setCategory(cat.id)}
-                  className={clsx(
-                    "px-4 py-2 rounded-full text-[12px] font-semibold transition-all whitespace-nowrap border",
-                    category === cat.id
-                      ? "bg-[var(--text-primary)] text-white border-[var(--text-primary)]"
-                      : "bg-white text-[var(--text-secondary)] border-[var(--border-default)] hover:bg-[var(--system-gray-6)]"
-                  )}
-                >
-                  {cat.label}
-                </button>
-              ))}
-            </div>
-
             {/* Google Services Section */}
-            {(category === "all" || category === "integrations") && googleIntegrations.length > 0 && (
-              <div className="mb-10">
+            {googleIntegrations.length > 0 && (
+              <div className="mb-6">
                 <h2 className="text-[13px] font-medium uppercase tracking-wide mb-3 px-1 text-[var(--text-secondary)]">
                   Google Workspace
                 </h2>
@@ -1027,57 +1011,11 @@ export function Store({
               </div>
             )}
 
-            {/* All Plugins Section */}
-            <div>
-              <h2 className="text-[13px] font-medium uppercase tracking-wide mb-3 px-1 text-[var(--text-secondary)]">
-                Available Tools
-              </h2>
-              {filteredPlugins.length > 0 ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {filteredPlugins.map((plugin) => (
-                    <div key={plugin.id} className="bg-white rounded-xl p-4 shadow-sm border border-[var(--border-subtle)] flex flex-col h-full">
-                      <div className="flex items-start justify-between mb-4">
-                        {PLUGIN_ICONS[plugin.id] ? (
-                          <div className="w-12 h-12 rounded-xl bg-[var(--system-gray-6)] border border-[var(--border-subtle)] flex items-center justify-center text-[var(--system-blue)]">
-                            {(() => { const Icon = PLUGIN_ICONS[plugin.id]; return <Icon className="w-8 h-8" />; })()}
-                          </div>
-                        ) : null}
-                        {plugin.enabled && (
-                          <span className="px-2.5 py-1 bg-green-50 text-green-600 rounded-full text-[10px] font-semibold uppercase tracking-wide">Active</span>
-                        )}
-                      </div>
-                      <div className="flex-1 mb-6">
-                        <h3 className="font-semibold text-[var(--text-primary)] text-sm mb-1">{plugin.name}</h3>
-                        <p className="text-[11px] text-[var(--text-tertiary)] uppercase tracking-wide mb-2">by {plugin.author}</p>
-                        <p className="text-sm text-[var(--text-secondary)] leading-relaxed line-clamp-3">{plugin.description}</p>
-                      </div>
-                      {plugin.managed ? (
-                        <div className="w-full py-2 rounded-lg bg-[var(--system-gray-6)] text-[11px] font-semibold text-[var(--text-tertiary)] uppercase tracking-wide text-center border border-[var(--border-subtle)]">
-                          System Plugin
-                        </div>
-                      ) : (
-                        <button
-                          onClick={() => (plugin.enabled ? handleDisablePlugin(plugin.id) : handleEnablePlugin(plugin.id))}
-                          disabled={installing === plugin.id}
-                          className={clsx(
-                            "w-full py-2.5 rounded-lg text-xs font-semibold transition-all uppercase tracking-wide",
-                            plugin.enabled
-                              ? "bg-[var(--system-gray-6)] text-[var(--text-secondary)] hover:bg-red-50 hover:text-red-600"
-                              : "bg-[var(--system-blue)] text-white hover:opacity-90"
-                          )}
-                        >
-                          {installing === plugin.id ? "Processing..." : plugin.enabled ? "Uninstall" : "Install Tool"}
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="py-32 text-center">
-                  <h3 className="text-xl font-semibold text-[var(--text-primary)] mb-2">No plugins found</h3>
-                  <p className="text-[var(--text-secondary)]">Try searching for something else or changing categories.</p>
-                </div>
-              )}
+            {/* Coming Soon Message */}
+            <div className="text-center py-8">
+              <p className="text-sm text-[var(--text-secondary)]">
+                More plugins will be added soon.
+              </p>
             </div>
           </div>
         ) : (
