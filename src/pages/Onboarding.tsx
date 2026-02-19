@@ -9,11 +9,11 @@ type Props = {
   onComplete: () => void;
 };
 
-const DEFAULT_AGENT_NAME = "Nova";
+const DEFAULT_AGENT_NAME = "Joulie";
 
-const DEFAULT_SOUL = `# About Nova
+const DEFAULT_SOUL = `# About Joulie
 
-You are Nova, a helpful AI assistant for coding, research, and execution tasks.
+You are Joulie, a helpful AI assistant for coding, research, and execution tasks.
 Be concise, practical, and action-oriented.
 `;
 
@@ -80,7 +80,7 @@ export function Onboarding({ onComplete }: Props) {
       }
 
       await withTimeout(setOnboardingComplete(true), "Marking onboarding complete");
-      window.dispatchEvent(new Event("nova-profile-updated"));
+      window.dispatchEvent(new Event("entropic-profile-updated"));
 
       clientLog("onboarding.complete.success");
       onComplete();
@@ -120,10 +120,10 @@ export function Onboarding({ onComplete }: Props) {
         </div>
 
         <h1 className="text-3xl font-bold text-gray-900 tracking-tight mb-3">
-          Welcome to Nova
+          Welcome to Entropic
         </h1>
         <p className="text-gray-600 mb-8">
-          Nova runs a secure local runtime for tools and coding workflows. We&apos;ll finish setup next.
+          Entropic runs a secure local runtime for tools and coding workflows. We&apos;ll finish setup next.
         </p>
 
         <div className="text-left rounded-2xl bg-gray-50 border border-gray-100 p-4 mb-8">

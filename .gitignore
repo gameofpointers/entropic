@@ -45,5 +45,5 @@ coverage/
 .cache/
 .build/
 
-# Nova local data (contains API keys)
-.nova-data/
+# Entropic local data (contains API keys)
+.entropic-data/

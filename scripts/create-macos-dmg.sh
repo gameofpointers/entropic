@@ -6,9 +6,9 @@ usage() {
 Usage: create-macos-dmg.sh <app_path> <dmg_path> [volume_name] [background_image]
 
 Creates a Finder-friendly macOS DMG with:
-- Nova.app
+- Entropic.app
 - Applications symlink
-- Install Nova.txt instructions
+- Install Entropic.txt instructions
 - Optional Finder layout/background customization
 EOF
 }
@@ -20,7 +20,7 @@ fi
 
 APP_PATH="${1:-}"
 DMG_PATH="${2:-}"
-VOLUME_NAME="${3:-Nova}"
+VOLUME_NAME="${3:-Entropic}"
 BACKGROUND_IMAGE="${4:-}"
 
 if [ -z "$APP_PATH" ] || [ -z "$DMG_PATH" ]; then
@@ -50,7 +50,7 @@ fi
 
 APP_NAME="$(basename "$APP_PATH")"
 STAGING_DIR="$(mktemp -d)"
-RW_DMG="$(mktemp /tmp/nova-dmg-rw.XXXXXX.dmg)"
+RW_DMG="$(mktemp /tmp/entropic-dmg-rw.XXXXXX.dmg)"
 ATTACH_DEV=""
 ATTACH_MOUNT=""
 
@@ -64,11 +64,11 @@ trap cleanup EXIT
 
 ditto "$APP_PATH" "$STAGING_DIR/$APP_NAME"
 ln -s /Applications "$STAGING_DIR/Applications"
-cat > "$STAGING_DIR/Install Nova.txt" <<'EOF'
-1. Drag Nova.app onto Applications.
-2. Open Nova from Applications.
+cat > "$STAGING_DIR/Install Entropic.txt" <<'EOF'
+1. Drag Entropic.app onto Applications.
+2. Open Entropic from Applications.
 
-Note: Run Nova from Applications (not from the mounted DMG) so auto-updates work correctly.
+Note: Run Entropic from Applications (not from the mounted DMG) so auto-updates work correctly.
 EOF
 
 apply_layout=false
@@ -112,7 +112,7 @@ tell application "Finder"
     set position of item "$APP_NAME" of container window to {180, 245}
     set position of item "Applications" of container window to {520, 245}
     try
-      set position of item "Install Nova.txt" of container window to {350, 390}
+      set position of item "Install Entropic.txt" of container window to {350, 390}
     end try
     close
     open

@@ -25,11 +25,11 @@ type SetupErrorDiagnosis = {
 };
 
 const EDUCATIONAL_FACTS = [
-  "Nova runs OpenClaw in an isolated container so generated commands stay sandboxed.",
-  "Colima is a lightweight local VM runtime that Nova uses on macOS for secure container execution.",
+  "Entropic runs OpenClaw in an isolated container so generated commands stay sandboxed.",
+  "Colima is a lightweight local VM runtime that Entropic uses on macOS for secure container execution.",
   "Use Plugins to connect tools like Calendar or Gmail after setup completes.",
   "Local Keys mode lets you use your own provider keys directly from Settings.",
-  "Proxy mode uses Nova credits and keeps model routing and billing centralized.",
+  "Proxy mode uses Entropic credits and keeps model routing and billing centralized.",
   "Tasks and Files are designed for longer-running automation, while Chat is best for quick iterations.",
 ];
 
@@ -59,15 +59,15 @@ function diagnoseSetupError(rawError: string): SetupErrorDiagnosis {
     return {
       title: "Couldn’t Download Sandbox Image Reliably",
       summary:
-        "Nova could not verify the Colima disk image download. This is usually a network/proxy issue, not your data.",
+        "Entropic could not verify the Colima disk image download. This is usually a network/proxy issue, not your data.",
       causes: [
         "Network path modified or corrupted the image download",
         "Temporary CDN/network reliability issue while fetching Colima image",
       ],
       actions: [
-        "Click Try Again. Nova will retry startup automatically.",
+        "Click Try Again. Entropic will retry startup automatically.",
         "If it fails again, retry on a different network (hotspot/home Wi-Fi).",
-        "If your username has spaces and you keep seeing `cd: /Users/...` in logs, update to the latest Nova build.",
+        "If your username has spaces and you keep seeing `cd: /Users/...` in logs, update to the latest Entropic build.",
       ],
       technical,
     };
@@ -77,14 +77,14 @@ function diagnoseSetupError(rawError: string): SetupErrorDiagnosis {
     return {
       title: "Sandbox Startup Hit a Home Path Parsing Error",
       summary:
-        "Nova runtime tools failed while resolving your macOS home path. This is recoverable with the latest runtime fix.",
+        "Entropic runtime tools failed while resolving your macOS home path. This is recoverable with the latest runtime fix.",
       causes: [
         "Bundled Colima/Lima shell step split a whitespace home path",
-        "Older Nova build without runtime HOME isolation fix",
+        "Older Entropic build without runtime HOME isolation fix",
       ],
       actions: [
-        "Update to the latest Nova build and click Try Again.",
-        "If this persists, reset Nova’s isolated runtime using the command shown in technical details.",
+        "Update to the latest Entropic build and click Try Again.",
+        "If this persists, reset Entropic’s isolated runtime using the command shown in technical details.",
       ],
       technical,
     };
@@ -93,7 +93,7 @@ function diagnoseSetupError(rawError: string): SetupErrorDiagnosis {
   return {
     title: "Secure Sandbox Setup Failed",
     summary:
-      "Nova could not complete first-time runtime setup. The error details below can help identify the exact cause.",
+      "Entropic could not complete first-time runtime setup. The error details below can help identify the exact cause.",
     causes: ["Runtime startup returned an unexpected error"],
     actions: ["Click Try Again.", "If it persists, share technical details for diagnosis."],
     technical,
@@ -179,7 +179,7 @@ export function SetupScreen({ onComplete }: Props) {
           <Shield className="w-10 h-10 text-white" />
         </div>
         <h1 className="text-3xl font-semibold text-gray-900 mb-2">
-          Welcome to Nova
+          Welcome to Entropic
         </h1>
         <p className="text-gray-500 max-w-md">
           Your AI assistant with secure sandboxing. Commands run in an isolated
@@ -195,7 +195,7 @@ export function SetupScreen({ onComplete }: Props) {
               First-Time Setup
             </h2>
             <p className="text-gray-500 text-sm mb-6">
-              Nova needs to set up a secure sandbox environment. Everything is
+              Entropic needs to set up a secure sandbox environment. Everything is
               included — no Docker Desktop or other tools required. This only
               needs to happen once.
             </p>
@@ -233,7 +233,7 @@ export function SetupScreen({ onComplete }: Props) {
             <CheckCircle2 className="w-12 h-12 text-green-500 mx-auto mb-4" />
             <p className="text-gray-900 font-medium">Setup Complete!</p>
             <p className="text-gray-500 text-sm mt-1">
-              Launching Nova...
+              Launching Entropic...
             </p>
           </div>
         )}
@@ -303,7 +303,7 @@ export function SetupScreen({ onComplete }: Props) {
 
                   <div className="text-center">
                     <p className="text-xs text-gray-500 mb-3">
-                      Automatic cleanup resets Nova&apos;s isolated Colima runtime (VM/image/cache and container state under Nova&apos;s runtime). It does not touch your macOS home files or Docker Desktop data.
+                      Automatic cleanup resets Entropic&apos;s isolated Colima runtime (VM/image/cache and container state under Entropic&apos;s runtime). It does not touch your macOS home files or Docker Desktop data.
                     </p>
                     <button
                       onClick={() => startSetup(false)}

@@ -11,7 +11,7 @@ export default defineConfig({
     proxy: {
       // Dev-only API proxy to avoid CORS/origin issues when UI runs at http://localhost:5174
       "/api": {
-        target: "https://nova.qu.ai",
+        target: "https://entropic.qu.ai",
         changeOrigin: true,
         secure: true,
       },

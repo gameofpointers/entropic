@@ -216,13 +216,13 @@ export function AuthProvider({ children }: AuthProviderProps) {
         } else if (url.includes("integrations/success")) {
           // Integration OAuth completed successfully
           console.log("Integration connected successfully");
-          window.dispatchEvent(new CustomEvent('nova-integration-updated'));
+          window.dispatchEvent(new CustomEvent('entropic-integration-updated'));
         } else if (url.includes("integrations/error")) {
           // Integration OAuth failed
           const urlObj = new URL(url);
           const error = urlObj.searchParams.get('error') || 'Unknown error';
           console.error("Integration OAuth error:", error);
-          window.dispatchEvent(new CustomEvent('nova-integration-error', { detail: { error } }));
+          window.dispatchEvent(new CustomEvent('entropic-integration-error', { detail: { error } }));
         }
       }
     }
@@ -276,14 +276,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
     // Handle OAuth callback with improved polling for production and dev
     const handleFocus = async () => {
       // Check if there's a pending OAuth callback in sessionStorage
-      const pendingCallback = sessionStorage.getItem('nova_oauth_pending');
+      const pendingCallback = sessionStorage.getItem('entropic_oauth_pending');
       if (pendingCallback) {
         const pendingTime = parseInt(pendingCallback);
         const now = Date.now();
 
         // If OAuth has been pending for more than 30 seconds, clear it
         if (now - pendingTime > 30000) {
-          sessionStorage.removeItem('nova_oauth_pending');
+          sessionStorage.removeItem('entropic_oauth_pending');
           console.log('OAuth timeout - clearing pending state');
           return;
         }
@@ -294,7 +294,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
             // First try to get the current session
             const { data: { session: currentSession } } = await supabase.auth.getSession();
             if (currentSession) {
-              sessionStorage.removeItem('nova_oauth_pending');
+              sessionStorage.removeItem('entropic_oauth_pending');
               setSession(currentSession);
               setUser(currentSession.user);
               console.log('OAuth completed successfully');
@@ -313,14 +313,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
     // Check periodically while OAuth is pending (for both dev and production)
     const checkInterval = setInterval(async () => {
-      const pendingCallback = sessionStorage.getItem('nova_oauth_pending');
+      const pendingCallback = sessionStorage.getItem('entropic_oauth_pending');
       if (pendingCallback && supabase) {
         const pendingTime = parseInt(pendingCallback);
         const now = Date.now();
 
         // Clear if timeout exceeded
         if (now - pendingTime > 30000) {
-          sessionStorage.removeItem('nova_oauth_pending');
+          sessionStorage.removeItem('entropic_oauth_pending');
           clearInterval(checkInterval);
           console.log('OAuth timeout - clearing pending state');
           return;
@@ -330,7 +330,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
           // First try to get the current session
           const { data: { session: currentSession } } = await supabase.auth.getSession();
           if (currentSession) {
-            sessionStorage.removeItem('nova_oauth_pending');
+            sessionStorage.removeItem('entropic_oauth_pending');
             setSession(currentSession);
             setUser(currentSession.user);
             console.log('OAuth completed successfully (via polling)');

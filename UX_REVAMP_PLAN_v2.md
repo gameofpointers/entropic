@@ -1,4 +1,4 @@
-# Nova UX Revamp Plan v2
+# Entropic UX Revamp Plan v2
 ## "Create Your Assistant" - Refined User Experience
 
 ---
@@ -6,7 +6,7 @@
 ## Design Philosophy
 
 **"Your Space, Your Assistant"**
-- Nova is the system/platform, not the assistant itself
+- Entropic is the system/platform, not the assistant itself
 - Users create and name their own AI companion
 - Subtle ambient Three.js backgrounds (not immersive VR-like)
 - Purple accent throughout (#9333EA / #A855F7)
@@ -52,7 +52,7 @@
 
 ### Animation Sequence (6-8 seconds)
 1. **0-2s**: Dark gradient, particles begin subtle drift
-2. **2-4s**: "Nova" text fades in with soft purple glow
+2. **2-4s**: "Entropic" text fades in with soft purple glow
 3. **4-6s**: Tagline appears below
 4. **6-8s**: Fade to first onboarding screen
 
@@ -78,7 +78,7 @@
 
 **Copy:**
 - "Hello."
-- "Welcome to Nova."
+- "Welcome to Entropic."
 - "The system designed to help you create your own AI assistant."
 
 **Interaction:**
@@ -96,7 +96,7 @@
 
 **Copy:**
 - "What would you like to call your assistant?"
-- Input placeholder: "e.g., Atlas, Nova, Companion..."
+- Input placeholder: "e.g., Atlas, Entropic, Companion..."
 - Helper: "This is how you'll address your AI. You can change this anytime."
 
 **Interaction:**
@@ -336,7 +336,7 @@ The existing layout stays largely the same:
 #### 1. Sidebar
 **Current structure preserved, visual polish:**
 
-- **Logo area**: "Nova" text in purple gradient
+- **Logo area**: "Entropic" text in purple gradient
 - **New Chat**: Purple glow button, "+" icon
 - **Chat history**: Glass chips with purple left border on active
 - **Bottom nav**: Settings, etc. as subtle icons
@@ -463,12 +463,12 @@ The existing layout stays largely the same:
 
 **Tone:** Warm, empowering, simple
 **Style:** Lowercase, conversational, user-centric
-**Assistant-focused:** "Your assistant" not "Nova"
+**Assistant-focused:** "Your assistant" not "Entropic"
 
 ### Examples:
 
 **Good:**
-- "welcome to nova"
+- "welcome to entropic"
 - "what will you call your assistant?"
 - "your assistant runs on your computer"
 - "meet atlas" (using their chosen name)
@@ -476,7 +476,7 @@ The existing layout stays largely the same:
 - "what can atlas help you with?"
 
 **Bad:**
-- "Welcome to Nova"
+- "Welcome to Entropic"
 - "Configure your AI agent"
 - "Local container deployment"
 - "Docker initialization"
@@ -488,7 +488,7 @@ The existing layout stays largely the same:
 
 ### New User Journey:
 1. Boot → Loading with ambient particles
-2. Welcome → "Welcome to Nova, create your assistant"
+2. Welcome → "Welcome to Entropic, create your assistant"
 3. Name → User names their assistant
 4. Interests → Select 2-5 focus areas
 5. Personality → Choose interaction style
@@ -498,7 +498,7 @@ The existing layout stays largely the same:
 9. Main app → Chat with named assistant
 
 ### Key Differences from Current:
-- Assistant is user-named, not "Nova"
+- Assistant is user-named, not "Entropic"
 - Cloud option available
 - Colima specifically mentioned for macOS
 - Setup is visual progress, not technical logs

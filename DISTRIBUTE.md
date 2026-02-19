@@ -1,6 +1,6 @@
-# Distributing Nova for macOS
+# Distributing Entropic for macOS
 
-This guide covers signing, notarizing, and distributing the Nova app for macOS.
+This guide covers signing, notarizing, and distributing the Entropic app for macOS.
 
 ## Prerequisites
 
@@ -12,11 +12,11 @@ This guide covers signing, notarizing, and distributing the Nova app for macOS.
 
 ```bash
 # From the project root on a Mac
-cd ~/nova-build
+cd ~/entropic-build
 pnpm tauri build
 ```
 
-The app will be at: `src-tauri/target/release/bundle/macos/Nova.app`
+The app will be at: `src-tauri/target/release/bundle/macos/Entropic.app`
 
 ## 2. Sign + Notarize (Scripted)
 
@@ -40,7 +40,7 @@ APP_PASSWORD="app-specific-password"
 ./scripts/sign-notarize-macos.sh
 ```
 
-The DMG will be created at `~/Nova.dmg` unless overridden via env vars.
+The DMG will be created at `~/Entropic.dmg` unless overridden via env vars.
 
 ## 3. Sign All Binaries (Manual)
 
@@ -50,53 +50,53 @@ security find-identity -v -p codesigning | grep "Developer ID"
 ```
 
 ```bash
-cd ~/nova-build/src-tauri/target/release/bundle/macos
+cd ~/entropic-build/src-tauri/target/release/bundle/macos
 
 # Set your certificate
 CERT="Developer ID Application: YOUR NAME (TEAMID)"
 
 # Sign bundled binaries first (inside-out signing)
 codesign --force --options runtime --timestamp --sign "$CERT" \
-  Nova.app/Contents/Resources/resources/bin/docker
+  Entropic.app/Contents/Resources/resources/bin/docker
 
 codesign --force --options runtime --timestamp --sign "$CERT" \
-  Nova.app/Contents/Resources/resources/bin/colima
+  Entropic.app/Contents/Resources/resources/bin/colima
 
 codesign --force --options runtime --timestamp --sign "$CERT" \
-  Nova.app/Contents/Resources/resources/bin/limactl
+  Entropic.app/Contents/Resources/resources/bin/limactl
 
 # Sign the main app with entitlements (required for Virtualization.framework)
 # The entitlements.plist is in src-tauri/ directory
 codesign --force --options runtime --timestamp --sign "$CERT" \
   --entitlements ../../src-tauri/entitlements.plist \
-  --deep Nova.app
+  --deep Entropic.app
 
 # Verify signature
-codesign --verify --verbose Nova.app
+codesign --verify --verbose Entropic.app
 ```
 
 ## 4. Create DMG
 
 ```bash
 ./scripts/create-macos-dmg.sh \
-  src-tauri/target/release/bundle/macos/Nova.app \
-  ~/Nova.dmg \
-  "Nova" \
+  src-tauri/target/release/bundle/macos/Entropic.app \
+  ~/Entropic.dmg \
+  "Entropic" \
   src-tauri/icons/dmg-background.png
-codesign --force --timestamp --sign "$CERT" ~/Nova.dmg
+codesign --force --timestamp --sign "$CERT" ~/Entropic.dmg
 ```
 
 `create-macos-dmg.sh` creates a Finder-friendly installer layout:
-- `Nova.app`
+- `Entropic.app`
 - `Applications` shortcut
-- `Install Nova.txt`
+- `Install Entropic.txt`
 - fixed icon placement and optional background image
 
 ## 5. Notarize
 
 Submit to Apple for notarization:
 ```bash
-xcrun notarytool submit ~/Nova.dmg \
+xcrun notarytool submit ~/Entropic.dmg \
   --apple-id "your-apple-id@email.com" \
   --team-id "TEAMID" \
   --password "your-app-specific-password" \
@@ -105,33 +105,33 @@ xcrun notarytool submit ~/Nova.dmg \
 
 This usually takes 2-10 minutes. On success, staple the ticket:
 ```bash
-xcrun stapler staple ~/Nova.dmg
+xcrun stapler staple ~/Entropic.dmg
 ```
 
 ## 6. Verify
 
 ```bash
-spctl --assess --type open --context context:primary-signature --verbose ~/Nova.dmg
+spctl --assess --type open --context context:primary-signature --verbose ~/Entropic.dmg
 ```
 
 ## Auto Updates (GitHub Releases + Silent Install)
 
-Nova uses the Tauri updater to deliver silent updates for DMG installs. The DMG is only the installer — updates are applied from signed updater artifacts (`.app.tar.gz` + `.sig`) hosted in a public releases repo.
+Entropic uses the Tauri updater to deliver silent updates for DMG installs. The DMG is only the installer — updates are applied from signed updater artifacts (`.app.tar.gz` + `.sig`) hosted in a public releases repo.
 
 ### 1. Create a Public Releases Repo
 
-Keep the code repo private and publish only release artifacts in a public repo (example: `nova-releases`).
+Keep the code repo private and publish only release artifacts in a public repo (example: `entropic-releases`).
 
 ### 2. Generate Updater Signing Keys
 
 On a secure machine:
 ```bash
-pnpm tauri signer generate -- -w ~/.tauri/nova-updater.key
+pnpm tauri signer generate -- -w ~/.tauri/entropic-updater.key
 ```
 
 This writes:
-- `~/.tauri/nova-updater.key` (private key — keep secret)
-- `~/.tauri/nova-updater.key.pub` (public key — commit to config)
+- `~/.tauri/entropic-updater.key` (private key — keep secret)
+- `~/.tauri/entropic-updater.key.pub` (public key — commit to config)
 
 ### 3. Configure Tauri Updater
 
@@ -143,7 +143,7 @@ Edit `src-tauri/tauri.conf.json`:
     "updater": {
       "pubkey": "REPLACE_WITH_UPDATER_PUBLIC_KEY",
       "endpoints": [
-        "https://github.com/ORG/nova-releases/releases/latest/download/latest.json"
+        "https://github.com/ORG/entropic-releases/releases/latest/download/latest.json"
       ]
     }
   }
@@ -154,7 +154,7 @@ Edit `src-tauri/tauri.conf.json`:
 
 The updater artifacts are signed at build time. Provide the private key in env:
 ```bash
-export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/nova-updater.key)"
+export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/entropic-updater.key)"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" # set if you used one
 pnpm tauri build
 ```
@@ -162,15 +162,15 @@ pnpm tauri build
 Artifacts will be in:
 ```
 src-tauri/target/release/bundle/macos/
-  Nova.app.tar.gz
-  Nova.app.tar.gz.sig
+  Entropic.app.tar.gz
+  Entropic.app.tar.gz.sig
 ```
 
 ### 5. Publish Release + latest.json
 
 Create a GitHub release in the public repo and upload:
-- `Nova.app.tar.gz`
-- `Nova.app.tar.gz.sig`
+- `Entropic.app.tar.gz`
+- `Entropic.app.tar.gz.sig`
 - `latest.json`
 
 `latest.json` must point to the tarball URL. Example:
@@ -181,11 +181,11 @@ Create a GitHub release in the public repo and upload:
   "pub_date": "2026-02-08T00:00:00Z",
   "platforms": {
     "darwin-x86_64": {
-      "url": "https://github.com/ORG/nova-releases/releases/download/v0.1.1/Nova.app.tar.gz",
+      "url": "https://github.com/ORG/entropic-releases/releases/download/v0.1.1/Entropic.app.tar.gz",
       "signature": "BASE64_SIGNATURE"
     },
     "darwin-aarch64": {
-      "url": "https://github.com/ORG/nova-releases/releases/download/v0.1.1/Nova.app.tar.gz",
+      "url": "https://github.com/ORG/entropic-releases/releases/download/v0.1.1/Entropic.app.tar.gz",
       "signature": "BASE64_SIGNATURE"
     }
   }
@@ -194,7 +194,7 @@ Create a GitHub release in the public repo and upload:
 
 ### 6. Silent Auto-Update Behavior
 
-Nova checks for updates on app start in production, silently downloads + installs, then immediately relaunches. Dev builds skip the updater.
+Entropic checks for updates on app start in production, silently downloads + installs, then immediately relaunches. Dev builds skip the updater.
 
 If you want to delay relaunch or add UI prompts, change the update flow in `src/App.tsx`.
 
@@ -211,7 +211,7 @@ xcrun notarytool log <submission-id> \
 ### "App is damaged" error
 Users downloading unsigned/non-notarized apps can run:
 ```bash
-xattr -cr /path/to/Nova.app
+xattr -cr /path/to/Entropic.app
 ```
 
 ### List signing certificates
@@ -229,7 +229,7 @@ security find-identity -v -p codesigning
 |------|---------|
 | Find certificate | `security find-identity -v -p codesigning \| grep "Developer ID"` |
 | Sign binary | `codesign --force --options runtime --timestamp --sign "$CERT" <file>` |
-| Verify signature | `codesign --verify --verbose Nova.app` |
-| Create DMG | `./scripts/create-macos-dmg.sh src-tauri/target/release/bundle/macos/Nova.app Nova.dmg` |
-| Notarize | `xcrun notarytool submit Nova.dmg --apple-id ... --team-id ... --password ... --wait` |
-| Staple | `xcrun stapler staple Nova.dmg` |
+| Verify signature | `codesign --verify --verbose Entropic.app` |
+| Create DMG | `./scripts/create-macos-dmg.sh src-tauri/target/release/bundle/macos/Entropic.app Entropic.dmg` |
+| Notarize | `xcrun notarytool submit Entropic.dmg --apple-id ... --team-id ... --password ... --wait` |
+| Staple | `xcrun stapler staple Entropic.dmg` |

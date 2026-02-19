@@ -23,24 +23,24 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Checkout Nova
+      - name: Checkout Entropic
         uses: actions/checkout@v4
         with:
-          path: nova
+          path: entropic
 
       - name: Checkout OpenClaw
         uses: actions/checkout@v4
         with:
           repository: dominant-strategies/openclaw
-          token: ${{ secrets.NOVA_READ_PAT }}
+          token: ${{ secrets.ENTROPIC_READ_PAT }}
           path: openclaw
 
-      - name: Checkout Nova skills
+      - name: Checkout Entropic skills
         uses: actions/checkout@v4
         with:
-          repository: dominant-strategies/nova-skills
-          token: ${{ secrets.NOVA_READ_PAT }}
-          path: nova-skills
+          repository: dominant-strategies/entropic-skills
+          token: ${{ secrets.ENTROPIC_READ_PAT }}
+          path: entropic-skills
 
       - uses: actions/setup-node@v4
         with:
@@ -62,38 +62,38 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build OpenClaw runtime image (linux/arm64)
-        working-directory: nova
+        working-directory: entropic
         env:
           OPENCLAW_SOURCE: ${{ github.workspace }}/openclaw
-          NOVA_SKILLS_SOURCE: ${{ github.workspace }}/nova-skills
+          ENTROPIC_SKILLS_SOURCE: ${{ github.workspace }}/entropic-skills
           DOCKER_DEFAULT_PLATFORM: linux/arm64
         run: ./scripts/build-openclaw-runtime.sh
 
       - name: Bundle runtime image tar
-        working-directory: nova
+        working-directory: entropic
         run: ./scripts/bundle-runtime-image.sh
 
       - name: Build skill scanner image (linux/arm64)
-        working-directory: nova
+        working-directory: entropic
         env:
           DOCKER_DEFAULT_PLATFORM: linux/arm64
         run: ./scripts/build-skill-scanner.sh
 
       - name: Bundle skill scanner image tar
-        working-directory: nova
-        run: IMAGE=nova-skill-scanner:latest OUTPUT=src-tauri/resources/nova-skill-scanner.tar.gz ./scripts/bundle-runtime-image.sh
+        working-directory: entropic
+        run: IMAGE=entropic-skill-scanner:latest OUTPUT=src-tauri/resources/entropic-skill-scanner.tar.gz ./scripts/bundle-runtime-image.sh
 
       - name: Upload runtime image tar
         uses: actions/upload-artifact@v4
         with:
           name: openclaw-runtime-arm64
-          path: nova/src-tauri/resources/openclaw-runtime.tar.gz
+          path: entropic/src-tauri/resources/openclaw-runtime.tar.gz
 
       - name: Upload skill scanner image tar
         uses: actions/upload-artifact@v4
         with:
           name: skill-scanner-arm64
-          path: nova/src-tauri/resources/nova-skill-scanner.tar.gz
+          path: entropic/src-tauri/resources/entropic-skill-scanner.tar.gz
 
   # ──────────────────────────────────────────────
   # macOS (Apple Silicon)
@@ -185,9 +185,9 @@ jobs:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_API_URL: ${{ secrets.VITE_API_URL }}
-          VITE_AUTH_REDIRECT_URL: "nova://auth/callback"
-          NOVA_GOOGLE_CLIENT_ID: ${{ secrets.NOVA_GOOGLE_CLIENT_ID }}
-          NOVA_GOOGLE_CLIENT_SECRET: ${{ secrets.NOVA_GOOGLE_CLIENT_SECRET }}
+          VITE_AUTH_REDIRECT_URL: "entropic://auth/callback"
+          ENTROPIC_GOOGLE_CLIENT_ID: ${{ secrets.ENTROPIC_GOOGLE_CLIENT_ID }}
+          ENTROPIC_GOOGLE_CLIENT_SECRET: ${{ secrets.ENTROPIC_GOOGLE_CLIENT_SECRET }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY_SHA1 }}
@@ -197,7 +197,7 @@ jobs:
         env:
           CERT: ${{ env.APPLE_SIGNING_IDENTITY_SHA1 }}
         run: |
-          APP_PATH="src-tauri/target/release/bundle/macos/Nova.app"
+          APP_PATH="src-tauri/target/release/bundle/macos/Entropic.app"
           ENTITLEMENTS="src-tauri/entitlements.plist"
 
           # docker only needs basic signature (no special entitlements)
@@ -221,17 +221,17 @@ jobs:
 
       - name: Create and sign DMG
         run: |
-          APP_PATH="src-tauri/target/release/bundle/macos/Nova.app"
-          DMG_NAME="Nova-${{ steps.version.outputs.tag }}-mac-arm64.dmg"
+          APP_PATH="src-tauri/target/release/bundle/macos/Entropic.app"
+          DMG_NAME="Entropic-${{ steps.version.outputs.tag }}-mac-arm64.dmg"
 
-          # Detach any mounted "Nova" volumes to avoid "Resource busy"
-          for vol in /Volumes/Nova*; do
+          # Detach any mounted "Entropic" volumes to avoid "Resource busy"
+          for vol in /Volumes/Entropic*; do
             [ -d "$vol" ] && hdiutil detach "$vol" -force 2>/dev/null || true
           done
 
           # Remove stale DMG from previous run
           rm -f "$DMG_NAME"
-          ./scripts/create-macos-dmg.sh "$APP_PATH" "$DMG_NAME" "Nova" "src-tauri/icons/dmg-background.png"
+          ./scripts/create-macos-dmg.sh "$APP_PATH" "$DMG_NAME" "Entropic" "src-tauri/icons/dmg-background.png"
           codesign --force --timestamp --sign "${{ env.APPLE_SIGNING_IDENTITY_SHA1 }}" "$DMG_NAME"
           echo "dmg_name=$DMG_NAME" >> "$GITHUB_ENV"
 
@@ -252,13 +252,13 @@ jobs:
         id: updater
         run: |
           BUNDLE_DIR="src-tauri/target/release/bundle/macos"
-          UPDATER_TAR="$BUNDLE_DIR/Nova.app.tar.gz"
-          UPDATER_SIG="$BUNDLE_DIR/Nova.app.tar.gz.sig"
+          UPDATER_TAR="$BUNDLE_DIR/Entropic.app.tar.gz"
+          UPDATER_SIG="$BUNDLE_DIR/Entropic.app.tar.gz.sig"
 
           if [ -f "$UPDATER_SIG" ]; then
             echo "sig=$(cat "$UPDATER_SIG")" >> "$GITHUB_OUTPUT"
             echo "has_updater=true" >> "$GITHUB_OUTPUT"
-            cp "$UPDATER_TAR" "Nova-${{ steps.version.outputs.tag }}-mac-arm64-updater.tar.gz"
+            cp "$UPDATER_TAR" "Entropic-${{ steps.version.outputs.tag }}-mac-arm64-updater.tar.gz"
           else
             echo "has_updater=false" >> "$GITHUB_OUTPUT"
             echo "WARNING: No updater signature found. Set TAURI_SIGNING_PRIVATE_KEY to enable auto-updates."
@@ -267,10 +267,10 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nova-mac-arm64
+          name: entropic-mac-arm64
           path: |
             ${{ env.dmg_name }}
-            Nova-${{ steps.version.outputs.tag }}-mac-arm64-updater.tar.gz
+            Entropic-${{ steps.version.outputs.tag }}-mac-arm64-updater.tar.gz
 
       - name: Save updater metadata
         run: |
@@ -278,7 +278,7 @@ jobs:
           cat > updater-mac.json << METAEOF
           {
             "platform": "darwin-aarch64",
-            "url": "https://github.com/dominant-strategies/nova-releases/releases/download/${VERSION}/Nova-${VERSION}-mac-arm64-updater.tar.gz",
+            "url": "https://github.com/dominant-strategies/entropic-releases/releases/download/${VERSION}/Entropic-${VERSION}-mac-arm64-updater.tar.gz",
             "signature": "${{ steps.updater.outputs.sig }}",
             "has_updater": "${{ steps.updater.outputs.has_updater }}"
           }
@@ -298,7 +298,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
-      group: nova-release-publish-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
+      group: entropic-release-publish-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
       cancel-in-progress: false
 
     steps:
@@ -326,7 +326,7 @@ jobs:
           VERSION="${{ steps.version.outputs.tag }}"
           SEMVER="${VERSION#v}"
           PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          REPO="dominant-strategies/nova-releases"
+          REPO="dominant-strategies/entropic-releases"
           REPO_URL="https://github.com/${REPO}/releases/download/${VERSION}"
           LATEST_PATH="artifacts/latest.json"
 
@@ -355,11 +355,11 @@ jobs:
               data = {}
 
           data["version"] = os.environ["SEMVER"]
-          data["notes"] = f"Nova {os.environ['VERSION']}"
+          data["notes"] = f"Entropic {os.environ['VERSION']}"
           data["pub_date"] = os.environ["PUB_DATE"]
           platforms = data.get("platforms") or {}
           platforms["darwin-aarch64"] = {
-              "url": f"{os.environ['REPO_URL']}/Nova-{os.environ['VERSION']}-mac-arm64-updater.tar.gz",
+              "url": f"{os.environ['REPO_URL']}/Entropic-{os.environ['VERSION']}-mac-arm64-updater.tar.gz",
               "signature": os.environ.get("MAC_SIG", "")
           }
           data["platforms"] = platforms
@@ -373,10 +373,10 @@ jobs:
           GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.tag }}"
-          REPO="dominant-strategies/nova-releases"
+          REPO="dominant-strategies/entropic-releases"
 
           FILES=()
-          for f in artifacts/nova-mac-arm64/*; do
+          for f in artifacts/entropic-mac-arm64/*; do
             [ -f "$f" ] && FILES+=("$f")
           done
           [ -f artifacts/updater-mac/updater-mac.json ] && FILES+=("artifacts/updater-mac/updater-mac.json")
@@ -387,7 +387,7 @@ jobs:
           else
             if ! gh release create "$VERSION" "${FILES[@]}" \
               --repo "$REPO" \
-              --title "Nova $VERSION" \
+              --title "Entropic $VERSION" \
               --notes "macOS assets uploaded by Release macOS workflow."; then
               gh release upload "$VERSION" "${FILES[@]}" --repo "$REPO" --clobber
             fi

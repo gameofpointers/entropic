@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Build Nova release with all bundled dependencies
+# Build Entropic release with all bundled dependencies
 #
 # Usage:
 #   ./build-release.sh                           # Build for current platform
@@ -59,9 +59,9 @@ if [ -n "$TARGET" ]; then
             ;;
     esac
     export TARGET_OS TARGET_ARCH
-    echo "=== Nova Release Build (cross-compile for $TARGET) ==="
+    echo "=== Entropic Release Build (cross-compile for $TARGET) ==="
 else
-    echo "=== Nova Release Build ==="
+    echo "=== Entropic Release Build ==="
 fi
 echo ""
 

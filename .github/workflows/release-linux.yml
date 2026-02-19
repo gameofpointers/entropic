@@ -29,15 +29,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: dominant-strategies/openclaw
-          token: ${{ secrets.NOVA_READ_PAT }}
+          token: ${{ secrets.ENTROPIC_READ_PAT }}
           path: openclaw
 
-      - name: Checkout Nova skills
+      - name: Checkout Entropic skills
         uses: actions/checkout@v4
         with:
-          repository: dominant-strategies/nova-skills
-          token: ${{ secrets.NOVA_READ_PAT }}
-          path: nova-skills
+          repository: dominant-strategies/entropic-skills
+          token: ${{ secrets.ENTROPIC_READ_PAT }}
+          path: entropic-skills
 
       - name: Determine version
         id: version
@@ -96,7 +96,7 @@ jobs:
       - name: Build OpenClaw runtime image (linux/amd64)
         env:
           OPENCLAW_SOURCE: ${{ github.workspace }}/openclaw
-          NOVA_SKILLS_SOURCE: ${{ github.workspace }}/nova-skills
+          ENTROPIC_SKILLS_SOURCE: ${{ github.workspace }}/entropic-skills
         run: ./scripts/build-openclaw-runtime.sh
 
       - name: Bundle runtime image tar
@@ -106,15 +106,15 @@ jobs:
         run: ./scripts/build-skill-scanner.sh
 
       - name: Bundle skill scanner image tar
-        run: IMAGE=nova-skill-scanner:latest OUTPUT=src-tauri/resources/nova-skill-scanner.tar.gz ./scripts/bundle-runtime-image.sh
+        run: IMAGE=entropic-skill-scanner:latest OUTPUT=src-tauri/resources/entropic-skill-scanner.tar.gz ./scripts/bundle-runtime-image.sh
 
       - name: Reclaim disk after runtime bundle
         run: |
           docker image rm openclaw-runtime:latest || true
-          docker image rm nova-skill-scanner:latest || true
+          docker image rm entropic-skill-scanner:latest || true
           docker builder prune -af || true
           docker system prune -af --volumes || true
-          rm -rf openclaw/node_modules openclaw nova-skills || true
+          rm -rf openclaw/node_modules openclaw entropic-skills || true
           pnpm store prune || true
           echo "Disk usage after runtime cleanup:"
           df -h
@@ -127,9 +127,9 @@ jobs:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_API_URL: ${{ secrets.VITE_API_URL }}
-          VITE_AUTH_REDIRECT_URL: "nova://auth/callback"
-          NOVA_GOOGLE_CLIENT_ID: ${{ secrets.NOVA_GOOGLE_CLIENT_ID }}
-          NOVA_GOOGLE_CLIENT_SECRET: ${{ secrets.NOVA_GOOGLE_CLIENT_SECRET }}
+          VITE_AUTH_REDIRECT_URL: "entropic://auth/callback"
+          ENTROPIC_GOOGLE_CLIENT_ID: ${{ secrets.ENTROPIC_GOOGLE_CLIENT_ID }}
+          ENTROPIC_GOOGLE_CLIENT_SECRET: ${{ secrets.ENTROPIC_GOOGLE_CLIENT_SECRET }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm tauri build --bundles deb,appimage
@@ -141,7 +141,7 @@ jobs:
           BUNDLE_DIR="src-tauri/target/release/bundle"
           shopt -s nullglob
 
-          DEB_NAME="Nova-${VERSION}-linux-x86_64.deb"
+          DEB_NAME="Entropic-${VERSION}-linux-x86_64.deb"
           DEB_FILES=("$BUNDLE_DIR/deb/"*.deb)
           if [ "${#DEB_FILES[@]}" -eq 0 ]; then
             echo "No .deb bundle found in $BUNDLE_DIR/deb"
@@ -150,7 +150,7 @@ jobs:
           cp "${DEB_FILES[0]}" "$DEB_NAME"
           echo "deb_name=$DEB_NAME" >> "$GITHUB_OUTPUT"
 
-          APPIMAGE_NAME="Nova-${VERSION}-linux-x86_64.AppImage"
+          APPIMAGE_NAME="Entropic-${VERSION}-linux-x86_64.AppImage"
           APPIMAGE_FILES=("$BUNDLE_DIR/appimage/"*.AppImage)
           if [ "${#APPIMAGE_FILES[@]}" -eq 0 ]; then
             echo "No .AppImage bundle found in $BUNDLE_DIR/appimage"
@@ -167,17 +167,17 @@ jobs:
           fi
           echo "appimage_sig=$APPIMAGE_SIG" >> "$GITHUB_OUTPUT"
 
-          TAR_NAME="Nova-${VERSION}-linux-x86_64.tar.gz"
-          mkdir -p "nova-${VERSION}"
-          cp "src-tauri/target/release/nova" "nova-${VERSION}/"
-          cp -r "src-tauri/resources" "nova-${VERSION}/" 2>/dev/null || true
-          tar czf "$TAR_NAME" "nova-${VERSION}"
+          TAR_NAME="Entropic-${VERSION}-linux-x86_64.tar.gz"
+          mkdir -p "entropic-${VERSION}"
+          cp "src-tauri/target/release/entropic" "entropic-${VERSION}/"
+          cp -r "src-tauri/resources" "entropic-${VERSION}/" 2>/dev/null || true
+          tar czf "$TAR_NAME" "entropic-${VERSION}"
           echo "tar_name=$TAR_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nova-linux-x86_64
+          name: entropic-linux-x86_64
           path: |
             ${{ steps.artifacts.outputs.deb_name }}
             ${{ steps.artifacts.outputs.appimage_name }}
@@ -189,7 +189,7 @@ jobs:
           cat > updater-linux.json << METAEOF
           {
             "platform": "linux-x86_64",
-            "url": "https://github.com/dominant-strategies/nova-releases/releases/download/${VERSION}/Nova-${VERSION}-linux-x86_64.AppImage",
+            "url": "https://github.com/dominant-strategies/entropic-releases/releases/download/${VERSION}/Entropic-${VERSION}-linux-x86_64.AppImage",
             "signature": "${{ steps.artifacts.outputs.appimage_sig }}"
           }
           METAEOF
@@ -208,7 +208,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
-      group: nova-release-publish-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
+      group: entropic-release-publish-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
       cancel-in-progress: false
 
     steps:
@@ -236,7 +236,7 @@ jobs:
           VERSION="${{ steps.version.outputs.tag }}"
           SEMVER="${VERSION#v}"
           PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          REPO="dominant-strategies/nova-releases"
+          REPO="dominant-strategies/entropic-releases"
           REPO_URL="https://github.com/${REPO}/releases/download/${VERSION}"
           LATEST_PATH="artifacts/latest.json"
 
@@ -265,11 +265,11 @@ jobs:
               data = {}
 
           data["version"] = os.environ["SEMVER"]
-          data["notes"] = f"Nova {os.environ['VERSION']}"
+          data["notes"] = f"Entropic {os.environ['VERSION']}"
           data["pub_date"] = os.environ["PUB_DATE"]
           platforms = data.get("platforms") or {}
           platforms["linux-x86_64"] = {
-              "url": f"{os.environ['REPO_URL']}/Nova-{os.environ['VERSION']}-linux-x86_64.AppImage",
+              "url": f"{os.environ['REPO_URL']}/Entropic-{os.environ['VERSION']}-linux-x86_64.AppImage",
               "signature": os.environ.get("LINUX_SIG", "")
           }
           data["platforms"] = platforms
@@ -283,10 +283,10 @@ jobs:
           GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.tag }}"
-          REPO="dominant-strategies/nova-releases"
+          REPO="dominant-strategies/entropic-releases"
 
           FILES=()
-          for f in artifacts/nova-linux-x86_64/*; do
+          for f in artifacts/entropic-linux-x86_64/*; do
             [ -f "$f" ] && FILES+=("$f")
           done
           [ -f artifacts/updater-linux/updater-linux.json ] && FILES+=("artifacts/updater-linux/updater-linux.json")
@@ -297,7 +297,7 @@ jobs:
           else
             if ! gh release create "$VERSION" "${FILES[@]}" \
               --repo "$REPO" \
-              --title "Nova $VERSION" \
+              --title "Entropic $VERSION" \
               --notes "Linux assets uploaded by Release Linux workflow."; then
               gh release upload "$VERSION" "${FILES[@]}" --repo "$REPO" --clobber
             fi

@@ -20,8 +20,8 @@ if [ -f "$ENV_FILE" ]; then
   set +a
 fi
 
-APP_PATH="${APP_PATH:-$PROJECT_ROOT/src-tauri/target/release/bundle/macos/Nova.app}"
-DMG_PATH="${DMG_PATH:-$HOME/Nova.dmg}"
+APP_PATH="${APP_PATH:-$PROJECT_ROOT/src-tauri/target/release/bundle/macos/Entropic.app}"
+DMG_PATH="${DMG_PATH:-$HOME/Entropic.dmg}"
 ENTITLEMENTS_PATH="${ENTITLEMENTS_PATH:-$PROJECT_ROOT/src-tauri/entitlements.plist}"
 
 # Prefer GitHub Actions secret names, keep legacy names as fallback.
@@ -40,7 +40,7 @@ if [ -z "$APPLE_SIGNING_IDENTITY" ] || [ -z "$APPLE_ID" ] || [ -z "$APPLE_TEAM_I
 fi
 
 if [ ! -d "$APP_PATH" ]; then
-  echo "Nova.app not found at: $APP_PATH"
+  echo "Entropic.app not found at: $APP_PATH"
   exit 1
 fi
 
@@ -118,7 +118,7 @@ codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
   "${CODESIGN_KEYCHAIN_ARGS[@]}" \
   "$APP_PATH/Contents/Resources/resources/bin/limactl"
 
-echo "Signing Nova.app..."
+echo "Signing Entropic.app..."
 codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
   "${CODESIGN_KEYCHAIN_ARGS[@]}" \
   --entitlements "$ENTITLEMENTS_PATH" \
@@ -126,7 +126,7 @@ codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" \
 
 echo "Creating DMG..."
 DMG_BACKGROUND_IMAGE="${DMG_BACKGROUND_IMAGE:-$PROJECT_ROOT/src-tauri/icons/dmg-background.png}"
-"$PROJECT_ROOT/scripts/create-macos-dmg.sh" "$APP_PATH" "$DMG_PATH" "Nova" "$DMG_BACKGROUND_IMAGE"
+"$PROJECT_ROOT/scripts/create-macos-dmg.sh" "$APP_PATH" "$DMG_PATH" "Entropic" "$DMG_BACKGROUND_IMAGE"
 
 echo "Signing DMG..."
 codesign --force --timestamp --sign "$SIGN_IDENTITY" \

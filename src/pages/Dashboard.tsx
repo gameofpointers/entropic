@@ -41,12 +41,12 @@ const DEFAULT_PROXY_MODEL = "openai/gpt-5.2";
 const DEFAULT_LOCAL_MODEL = "anthropic/claude-opus-4-6:thinking";
 const GATEWAY_FAILURE_THRESHOLD = 3;
 const SANDBOX_STARTUP_FACTS = [
-  "Secure Execution: Nova runs all shell commands in an isolated sandbox to protect your local system.",
+  "Secure Execution: Entropic runs all shell commands in an isolated sandbox to protect your local system.",
   "Custom Providers: Add your own API keys in Settings for direct access to the latest models.",
-  "Deep Context: Stage logs or documentation in 'Files' so Nova can analyze them with full technical detail.",
+  "Deep Context: Stage logs or documentation in 'Files' so Entropic can analyze them with full technical detail.",
   "Autonomous Tasks: Use 'Tasks' for complex coding goals that require sustained, multi-step agent work.",
-  "Codebase Awareness: Ask Nova to 'read the repo' to generate precise implementation roadmaps.",
-  "Seamless Integrations: Connect GitHub, Slack, or Linear via Plugins to extend Nova's capabilities.",
+  "Codebase Awareness: Ask Entropic to 'read the repo' to generate precise implementation roadmaps.",
+  "Seamless Integrations: Connect GitHub, Slack, or Linear via Plugins to extend Entropic's capabilities.",
   "One-click Workflow: Quickly initialize projects or deploy environments with a single command.",
 ];
 
@@ -94,7 +94,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
   function requestSignIn() {
     window.dispatchEvent(
-      new CustomEvent("nova-require-signin", {
+      new CustomEvent("entropic-require-signin", {
         detail: { source: "credits" },
       })
     );
@@ -103,7 +103,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   function buildOutOfCreditsStartupError() {
     if (isAuthenticated) {
       return {
-        message: "You’re out of credits. Add credits to continue using Nova in proxy mode.",
+        message: "You’re out of credits. Add credits to continue using Entropic in proxy mode.",
         actions: [{ label: "Add Credits", onClick: () => setCurrentPage("billing") }],
       };
     }
@@ -122,7 +122,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       const balance = await getLocalCreditBalance();
       setLocalCreditBalanceCents(balance.balance_cents);
     } catch (error) {
-      console.warn("[Nova] Failed to load local credits:", error);
+      console.warn("[Entropic] Failed to load local credits:", error);
       setLocalCreditBalanceCents(0);
     }
   }
@@ -131,7 +131,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   useEffect(() => {
     async function loadModel() {
       try {
-        const store = await TauriStore.load("nova-settings.json");
+        const store = await TauriStore.load("entropic-settings.json");
         const storedUseLocal = await store.get("useLocalKeys") as boolean | null;
         if (typeof storedUseLocal === "boolean") setUseLocalKeys(storedUseLocal);
         const isLocal = storedUseLocal === true;
@@ -159,7 +159,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           setExperimentalDesktop(savedExperimentalDesktop);
         }
       } catch (error) {
-        console.error("[Nova] Failed to load model preference:", error);
+        console.error("[Entropic] Failed to load model preference:", error);
       } finally {
         setPrefsLoaded(true);
       }
@@ -182,10 +182,10 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         refreshLocalCredits();
       }
     };
-    window.addEventListener("nova-local-credits-changed", onLocalCreditsChanged as EventListener);
+    window.addEventListener("entropic-local-credits-changed", onLocalCreditsChanged as EventListener);
     return () => {
       window.removeEventListener(
-        "nova-local-credits-changed",
+        "entropic-local-credits-changed",
         onLocalCreditsChanged as EventListener
       );
     };
@@ -245,7 +245,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         await syncPendingIntegrationImports();
         didWork = true;
       } catch (err) {
-        console.warn("[Nova] Failed to sync integration tokens:", err);
+        console.warn("[Entropic] Failed to sync integration tokens:", err);
       }
       try {
         const stillPending = await hasPendingIntegrationImports();
@@ -367,11 +367,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   async function persistExperimentalDesktop(value: boolean) {
     setExperimentalDesktop(value);
     try {
-      const store = await TauriStore.load("nova-settings.json");
+      const store = await TauriStore.load("entropic-settings.json");
       await store.set("experimentalDesktop", value);
       await store.save();
     } catch (error) {
-      console.error("[Nova] Failed to save experimentalDesktop:", error);
+      console.error("[Entropic] Failed to save experimentalDesktop:", error);
     }
   }
 
@@ -386,7 +386,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     stopFirst?: boolean;
     allowRetry?: boolean;
   }): Promise<boolean> {
-    console.log("[Nova] startGatewayProxyFlow called with:", {
+    console.log("[Entropic] startGatewayProxyFlow called with:", {
       model,
       image,
       stopFirst,
@@ -398,7 +398,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     });
 
     if (!isAuthConfigured || useLocalKeys) {
-      console.log("[Nova] Skipping proxy flow - proxy mode disabled");
+      console.log("[Entropic] Skipping proxy flow - proxy mode disabled");
       return false;
     }
 
@@ -410,7 +410,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           anonymousBalanceCents = localBalance.balance_cents;
           setLocalCreditBalanceCents(localBalance.balance_cents);
         } catch (error) {
-          console.warn("[Nova] Failed to read anonymous balance:", error);
+          console.warn("[Entropic] Failed to read anonymous balance:", error);
           anonymousBalanceCents = 0;
         }
       }
@@ -422,7 +422,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
 
     if (startGatewayInFlightRef.current) {
-      console.log("[Nova] Waiting for in-flight gateway start attempt to finish");
+      console.log("[Entropic] Waiting for in-flight gateway start attempt to finish");
       while (startGatewayInFlightRef.current) {
         await new Promise((r) => setTimeout(r, 120));
       }
@@ -441,7 +441,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         try {
           await invoke("stop_gateway");
         } catch (error) {
-          console.error("[Nova] Failed to stop gateway:", error);
+          console.error("[Entropic] Failed to stop gateway:", error);
         }
       }
 
@@ -461,35 +461,35 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           }
         }
       } catch (error) {
-        console.warn("[Nova] Balance check failed:", error);
+        console.warn("[Entropic] Balance check failed:", error);
       }
 
       setGatewayStartupStage("token");
-      console.log("[Nova] Creating gateway token...");
+      console.log("[Entropic] Creating gateway token...");
       const { token } = await createGatewayToken({
         allowAnonymous: !isAuthenticated,
       });
       gatewayTokenRef.current = token;
-      console.log("[Nova] Gateway token created successfully");
+      console.log("[Entropic] Gateway token created successfully");
 
       const proxyUrl = getProxyUrl();
       const proxyModel = normalizeProxyModel(model);
       const proxyImageModel = normalizeProxyModel(image);
-      console.log("[Nova] Proxy configuration:", {
+      console.log("[Entropic] Proxy configuration:", {
         proxyUrl,
         proxyModel,
         proxyImageModel
       });
 
       setGatewayStartupStage("launch");
-      console.log("[Nova] Invoking start_gateway_with_proxy...");
+      console.log("[Entropic] Invoking start_gateway_with_proxy...");
       await invoke("start_gateway_with_proxy", {
         gatewayToken: token,
         proxyUrl,
         model: proxyModel,
         imageModel: proxyImageModel,
       });
-      console.log("[Nova] start_gateway_with_proxy completed");
+      console.log("[Entropic] start_gateway_with_proxy completed");
 
       setGatewayStartupStage("health");
       if (startGatewayAttemptRef.current !== attemptId) {
@@ -531,7 +531,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       if (startGatewayAttemptRef.current !== attemptId) {
         return false;
       }
-      console.error("[Nova] Proxy start failed:", error);
+      console.error("[Entropic] Proxy start failed:", error);
 
       const isApiError = error instanceof ApiRequestError;
       const status = isApiError ? error.status : undefined;
@@ -568,7 +568,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       if (isNetwork) {
         setStartupError({
           message:
-            "Can’t reach the Nova backend from the app (network/API error). Check backend availability and local proxy settings.",
+            "Can’t reach the Entropic backend from the app (network/API error). Check backend availability and local proxy settings.",
           actions: [
             { label: "Retry", onClick: () => startGatewayProxyFlow({ model, image, stopFirst, allowRetry: false }) },
           ],
@@ -607,7 +607,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         isAuthConfigured &&
         !useLocalKeys &&
         (isAuthenticated || (localCreditBalanceCents ?? 0) > 0);
-      console.log("[Nova] Auto-start check:", {
+      console.log("[Entropic] Auto-start check:", {
         isAuthConfigured,
         isAuthenticated,
         localCreditBalanceCents,
@@ -626,7 +626,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
       // Check if gateway is already running
       const alreadyRunning = await getGatewayStatusCached({ force: true });
-      console.log("[Nova] Auto-start: alreadyRunning =", alreadyRunning, "proxyEnabled =", proxyEnabled, "useLocalKeys =", useLocalKeys);
+      console.log("[Entropic] Auto-start: alreadyRunning =", alreadyRunning, "proxyEnabled =", proxyEnabled, "useLocalKeys =", useLocalKeys);
 
       if (alreadyRunning) {
         autoStartAttemptedRef.current = true;
@@ -638,7 +638,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
         if (proxyEnabled) {
           // Proxy mode — refresh token/config so stale gateway tokens don't persist across app launches.
-          console.log("[Nova] Auto-start: existing container found, refreshing proxy config...");
+          console.log("[Entropic] Auto-start: existing container found, refreshing proxy config...");
           setGatewayRunning(true);
           setIsTogglingGateway(true);
           try {
@@ -649,26 +649,26 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
               allowRetry: true,
             });
           } catch (error) {
-            console.error("[Nova] Proxy refresh for running gateway failed:", error);
+            console.error("[Entropic] Proxy refresh for running gateway failed:", error);
           } finally {
             setIsTogglingGateway(false);
           }
         } else if (useLocalKeys) {
           // Local-keys mode but a (likely stale proxy) container is running — stop and restart with correct config.
-          console.log("[Nova] Auto-start: existing container found but we're in local-keys mode — restarting with local keys...");
+          console.log("[Entropic] Auto-start: existing container found but we're in local-keys mode — restarting with local keys...");
           setShowGatewayStartup(true);
           setGatewayStartupStage("launch");
           setIsTogglingGateway(true);
           try {
             await invoke("stop_gateway");
-            console.log("[Nova] Auto-start: stopped stale container, starting with local keys...");
+            console.log("[Entropic] Auto-start: stopped stale container, starting with local keys...");
             await invoke("start_gateway", { model: selectedModel });
             setGatewayStartupStage("health");
             await new Promise((r) => setTimeout(r, 2000));
             await checkGateway();
-            console.log("[Nova] Auto-start: local-keys restart completed");
+            console.log("[Entropic] Auto-start: local-keys restart completed");
           } catch (error) {
-            console.error("[Nova] Auto-start: local-keys restart failed:", error);
+            console.error("[Entropic] Auto-start: local-keys restart failed:", error);
           } finally {
             setIsTogglingGateway(false);
             setShowGatewayStartup(false);
@@ -683,7 +683,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
       if (proxyEnabled) {
         // Auto-start in proxy mode
-        console.log("[Nova] Auto-starting gateway in proxy mode...");
+        console.log("[Entropic] Auto-starting gateway in proxy mode...");
         setIsTogglingGateway(true);
         try {
           const result = await startGatewayProxyFlow({
@@ -692,15 +692,15 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             stopFirst: false,
             allowRetry: true,
           });
-          console.log("[Nova] Auto-start proxy result:", result);
+          console.log("[Entropic] Auto-start proxy result:", result);
         } catch (error) {
-          console.error("[Nova] Auto-start proxy error:", error);
+          console.error("[Entropic] Auto-start proxy error:", error);
         } finally {
           setIsTogglingGateway(false);
         }
       } else if (useLocalKeys) {
         // Auto-start in local-keys mode
-        console.log("[Nova] Auto-starting gateway in local-keys mode (no existing container)...");
+        console.log("[Entropic] Auto-starting gateway in local-keys mode (no existing container)...");
         setShowGatewayStartup(true);
         setGatewayStartupStage("launch");
         setIsTogglingGateway(true);
@@ -709,9 +709,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           setGatewayStartupStage("health");
           await new Promise((r) => setTimeout(r, 2000));
           await checkGateway();
-          console.log("[Nova] Auto-start (local keys) completed");
+          console.log("[Entropic] Auto-start (local keys) completed");
         } catch (error) {
-          console.error("[Nova] Auto-start (local keys) error:", error);
+          console.error("[Entropic] Auto-start (local keys) error:", error);
         } finally {
           setIsTogglingGateway(false);
           setShowGatewayStartup(false);
@@ -779,7 +779,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       if (running) {
         gatewayHealthFailureStreakRef.current = 0;
         setGatewayRunning(true);
-        console.log("[Nova] Gateway health check: healthy");
+        console.log("[Entropic] Gateway health check: healthy");
         setGatewayStartupStage("idle");
         setShowGatewayStartup(false);
         clearGatewayRetry();
@@ -790,21 +790,21 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       const failureStreak = gatewayHealthFailureStreakRef.current;
       if (gatewayRunning && failureStreak < GATEWAY_FAILURE_THRESHOLD) {
         console.warn(
-          `[Nova] Gateway health transient miss (${failureStreak}/${GATEWAY_FAILURE_THRESHOLD}); keeping running state`
+          `[Entropic] Gateway health transient miss (${failureStreak}/${GATEWAY_FAILURE_THRESHOLD}); keeping running state`
         );
         return true;
       }
 
       setGatewayRunning(false);
-      console.log("[Nova] Gateway health check: not responding");
+      console.log("[Entropic] Gateway health check: not responding");
       return false;
     } catch (error) {
-      console.error("[Nova] Gateway check failed:", error);
+      console.error("[Entropic] Gateway check failed:", error);
       gatewayHealthFailureStreakRef.current += 1;
       const failureStreak = gatewayHealthFailureStreakRef.current;
       if (gatewayRunning && failureStreak < GATEWAY_FAILURE_THRESHOLD) {
         console.warn(
-          `[Nova] Gateway status check error treated as transient (${failureStreak}/${GATEWAY_FAILURE_THRESHOLD})`
+          `[Entropic] Gateway status check error treated as transient (${failureStreak}/${GATEWAY_FAILURE_THRESHOLD})`
         );
         return true;
       }
@@ -818,13 +818,13 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     setStartupError(null);
     try {
       if (gatewayRunning) {
-        console.log("[Nova] Stopping gateway...");
+        console.log("[Entropic] Stopping gateway...");
         await invoke("stop_gateway");
-        console.log("[Nova] Gateway stopped successfully");
+        console.log("[Entropic] Gateway stopped successfully");
         gatewayHealthFailureStreakRef.current = 0;
         setGatewayRunning(false);
       } else {
-        console.log("[Nova] Starting gateway...");
+        console.log("[Entropic] Starting gateway...");
         gatewayHealthFailureStreakRef.current = 0;
         setGatewayRunning(false);
         const proxyEnabled =
@@ -841,7 +841,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             allowRetry: false,
           });
           if (!started) {
-            console.error("[Nova] Proxy mode failed; not falling back to local mode.");
+            console.error("[Entropic] Proxy mode failed; not falling back to local mode.");
             return;
           }
         } else if (isAuthConfigured && !useLocalKeys) {
@@ -854,12 +854,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           await invoke("start_gateway", { model: selectedModel });
         }
 
-        console.log("[Nova] Gateway started successfully");
+        console.log("[Entropic] Gateway started successfully");
       }
       await new Promise((r) => setTimeout(r, 2000));
       await checkGateway();
     } catch (error) {
-      console.error("[Nova] Failed to toggle gateway:", error);
+      console.error("[Entropic] Failed to toggle gateway:", error);
       setStartupError({ message: extractGatewayStartError(error) });
     } finally {
       setIsTogglingGateway(false);
@@ -895,7 +895,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       await checkGateway();
       return started;
     } catch (error) {
-      console.error("[Nova] Proxy auth recovery failed:", error);
+      console.error("[Entropic] Proxy auth recovery failed:", error);
       return false;
     } finally {
       setIsTogglingGateway(false);
@@ -923,11 +923,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
     // Save preference
     try {
-      const store = await TauriStore.load("nova-settings.json");
+      const store = await TauriStore.load("entropic-settings.json");
       await store.set("selectedModel", newModel);
       await store.save();
     } catch (error) {
-      console.error("[Nova] Failed to save model preference:", error);
+      console.error("[Entropic] Failed to save model preference:", error);
     }
 
     if (!gatewayRunning) return;
@@ -948,7 +948,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           allowRetry: true,
         });
       } catch (error) {
-        console.error("[Nova] Failed to restart gateway with new model:", error);
+        console.error("[Entropic] Failed to restart gateway with new model:", error);
       } finally {
         setIsTogglingGateway(false);
       }
@@ -957,7 +957,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       const newProvider = newModel.split("/")[0];
       if (oldProvider !== newProvider) {
         // Provider switch — full container restart needed (different API keys/env vars)
-        console.log("[Nova] Provider switch in local-keys mode, restarting gateway with:", newModel);
+        console.log("[Entropic] Provider switch in local-keys mode, restarting gateway with:", newModel);
         setShowGatewayStartup(true);
         setGatewayStartupStage("launch");
         setIsTogglingGateway(true);
@@ -967,18 +967,18 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           await new Promise((r) => setTimeout(r, 2000));
           await checkGateway();
         } catch (error) {
-          console.error("[Nova] Failed to restart gateway with new model:", error);
+          console.error("[Entropic] Failed to restart gateway with new model:", error);
         } finally {
           setIsTogglingGateway(false);
           setShowGatewayStartup(false);
         }
       } else {
         // Same provider — hot-swap model in config (no container restart)
-        console.log("[Nova] Same-provider model change, hot-swapping to:", newModel);
+        console.log("[Entropic] Same-provider model change, hot-swapping to:", newModel);
         try {
           await invoke("update_gateway_model", { model: newModel });
         } catch (error) {
-          console.error("[Nova] Failed to hot-swap model:", error);
+          console.error("[Entropic] Failed to hot-swap model:", error);
         }
       }
     }
@@ -1091,12 +1091,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
               }
 
               try {
-                const store = await TauriStore.load("nova-settings.json");
+                const store = await TauriStore.load("entropic-settings.json");
                 await store.set("useLocalKeys", value);
                 await store.set("selectedModel", newModel);
                 await store.save();
               } catch (error) {
-                console.error("[Nova] Failed to save useLocalKeys:", error);
+                console.error("[Entropic] Failed to save useLocalKeys:", error);
               }
 
               // Stop existing container — the auto-start effect will restart
@@ -1107,7 +1107,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
                 try {
                   await invoke("stop_gateway");
                 } catch (error) {
-                  console.error("[Nova] Failed to stop gateway:", error);
+                  console.error("[Entropic] Failed to stop gateway:", error);
                 }
                 setGatewayRunning(false);
               }
@@ -1119,21 +1119,21 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             onCodeModelChange={async (value) => {
               setCodeModel(value);
               try {
-                const store = await TauriStore.load("nova-settings.json");
+                const store = await TauriStore.load("entropic-settings.json");
                 await store.set("codeModel", value);
                 await store.save();
               } catch (error) {
-                console.error("[Nova] Failed to save codeModel:", error);
+                console.error("[Entropic] Failed to save codeModel:", error);
               }
             }}
             onImageModelChange={async (value) => {
               setImageModel(value);
               try {
-                const store = await TauriStore.load("nova-settings.json");
+                const store = await TauriStore.load("entropic-settings.json");
                 await store.set("imageModel", value);
                 await store.save();
               } catch (error) {
-                console.error("[Nova] Failed to save imageModel:", error);
+                console.error("[Entropic] Failed to save imageModel:", error);
               }
 
               if (
@@ -1151,7 +1151,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
                     allowRetry: true,
                   });
                 } catch (error) {
-                  console.error("[Nova] Failed to restart gateway with new image model:", error);
+                  console.error("[Entropic] Failed to restart gateway with new image model:", error);
                 }
               }
             }}
@@ -1223,7 +1223,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
                 <p className="text-xs text-[var(--text-secondary)] mt-1 leading-relaxed">
                   {gatewayRetryIn
                     ? `Retrying in ${gatewayRetryIn}s. We’ll keep trying until the environment is ready.`
-                    : "Nova is initializing an isolated environment to safely run tools and plugins."}
+                    : "Entropic is initializing an isolated environment to safely run tools and plugins."}
                 </p>
               </div>
             </div>

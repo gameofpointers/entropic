@@ -1319,6 +1319,41 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
+name = "entropic"
+version = "0.1.1"
+dependencies = [
+ "base64 0.22.1",
+ "cocoa",
+ "dirs 5.0.1",
+ "futures-util",
+ "libc",
+ "objc",
+ "qrcode",
+ "rand 0.8.5",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-deep-link",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "tauri-plugin-os",
+ "tauri-plugin-process",
+ "tauri-plugin-shell",
+ "tauri-plugin-single-instance",
+ "tauri-plugin-store",
+ "tauri-plugin-stronghold",
+ "tauri-plugin-updater",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+ "which",
+]
+
+[[package]]
 name = "enumflags2"
 version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2951,41 +2986,6 @@ name = "nodrop"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72ef4a56884ca558e5ddb05a1d1e7e1bfd9a68d9ed024c21704cc98872dae1bb"
-
-[[package]]
-name = "nova"
-version = "0.1.1"
-dependencies = [
- "base64 0.22.1",
- "cocoa",
- "dirs 5.0.1",
- "futures-util",
- "libc",
- "objc",
- "qrcode",
- "rand 0.8.5",
- "reqwest 0.11.27",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-deep-link",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "tauri-plugin-os",
- "tauri-plugin-process",
- "tauri-plugin-shell",
- "tauri-plugin-single-instance",
- "tauri-plugin-store",
- "tauri-plugin-stronghold",
- "tauri-plugin-updater",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite",
- "url",
- "which",
-]
 
 [[package]]
 name = "num-conv"

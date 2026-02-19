@@ -1,4 +1,4 @@
-# Nova Development Guide
+# Entropic Development Guide
 
 ## System Requirements
 
@@ -32,9 +32,9 @@
    sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
    ```
 
-2. **Create nova user for isolated X11 access:**
+2. **Create entropic user for isolated X11 access:**
    ```bash
-   sudo useradd -u 1337 -M -s /bin/false novauser
+   sudo useradd -u 1337 -M -s /bin/false entropicuser
    ```
 
 3. **Docker must be installed and running**
@@ -55,12 +55,12 @@
 
 ## OpenClaw Setup (Required)
 
-Nova requires the OpenClaw runtime image. This is built from the separate `openclaw` repository.
+Entropic requires the OpenClaw runtime image. This is built from the separate `openclaw` repository.
 
 ### 1. Clone and build OpenClaw
 
 ```bash
-# Clone openclaw repo (sibling to Nova)
+# Clone openclaw repo (sibling to Entropic)
 cd ~/agent
 git clone https://github.com/dominant-strategies/openclaw openclaw
 cd openclaw
@@ -73,7 +73,7 @@ pnpm build
 ### 2. Build the runtime image
 
 ```bash
-cd ~/agent/Nova
+cd ~/agent/Entropic
 ./scripts/build-openclaw-runtime.sh
 ```
 
@@ -87,15 +87,15 @@ This creates the `openclaw-runtime:latest` Docker image containing:
 OPENCLAW_SOURCE=/path/to/openclaw ./scripts/build-openclaw-runtime.sh
 ```
 
-**Optional Nova skills (external plugins):**
+**Optional Entropic skills (external plugins):**
 ```bash
 # Sibling repo (recommended)
-mkdir -p ../nova-skills
+mkdir -p ../entropic-skills
 
 # Or customize
-NOVA_SKILLS_SOURCE=/path/to/nova-skills ./scripts/build-openclaw-runtime.sh
+ENTROPIC_SKILLS_SOURCE=/path/to/entropic-skills ./scripts/build-openclaw-runtime.sh
 ```
-Plugins in the sibling `../nova-skills` repo with `openclaw.plugin.json` will be bundled into the runtime image.
+Plugins in the sibling `../entropic-skills` repo with `openclaw.plugin.json` will be bundled into the runtime image.
 
 ### 3. Verify the image
 
@@ -107,14 +107,14 @@ docker images openclaw-runtime:latest
 
 ## Development Workflow
 
-### 1. Allow X11 access for Nova container
+### 1. Allow X11 access for Entropic container
 ```bash
-xhost +si:localuser:novauser
+xhost +si:localuser:entropicuser
 ```
 
 ### 2. Start the dev container
 ```bash
-cd /home/alan/agent/Nova
+cd /home/alan/agent/Entropic
 ./dev.sh
 ```
 
@@ -134,15 +134,15 @@ pnpm tauri dev
 - Compiles Rust (~2-3 min first time, fast after)
 - Opens native window on your desktop
 
-**Run isolated dev OAuth build (nova-dev://):**
+**Run isolated dev OAuth build (entropic-dev://):**
 ```bash
 pnpm tauri:dev
 ```
 This uses `src-tauri/tauri.conf.dev.json` and a dev-only deep link scheme
-(`nova-dev://`) plus a separate auth store (`nova-auth-dev.json`).
+(`entropic-dev://`) plus a separate auth store (`entropic-auth-dev.json`).
 
 #### macOS dev OAuth (localhost callback)
-On macOS, `tauri dev` is **not** a bundle, so URL-scheme callbacks (`nova-dev://`)
+On macOS, `tauri dev` is **not** a bundle, so URL-scheme callbacks (`entropic-dev://`)
 do not reliably return to the running dev process. For dev sign-in, we use a
 localhost callback instead:
 
@@ -151,46 +151,46 @@ http://127.0.0.1:27100/auth/callback
 ```
 
 This keeps the OAuth flow in the same dev process and avoids the extra app launch.
-It is **dev-only**; bundled dev/prod builds still use `nova://` / `nova-dev://`.
+It is **dev-only**; bundled dev/prod builds still use `entropic://` / `entropic-dev://`.
 
 **Supabase Redirect URLs (dev + prod)**
-- Production: `nova://auth/callback`
-- Dev (scheme): `nova-dev://auth/callback`
+- Production: `entropic://auth/callback`
+- Dev (scheme): `entropic-dev://auth/callback`
 - Dev (localhost): `http://127.0.0.1:27100/auth/callback`
 
 **Overrides**
 - `VITE_AUTH_USE_LOCALHOST=1` → force localhost OAuth on any OS
 - `VITE_AUTH_FORCE_DEEPLINK=1` → force deep-link OAuth even in dev
-- `NOVA_AUTH_LOCALHOST_PORT=27100` → override the localhost OAuth port (dev-only)
+- `ENTROPIC_AUTH_LOCALHOST_PORT=27100` → override the localhost OAuth port (dev-only)
 
-**Linux host networking (required for local nova-web API)**
+**Linux host networking (required for local entropic-web API)**
 ```bash
 ```
-Use this when running `pnpm tauri dev` on the host so OpenClaw can reach the local `nova-web` server.
+Use this when running `pnpm tauri dev` on the host so OpenClaw can reach the local `entropic-web` server.
 
-**Linux dev deep links (nova-dev://)**
+**Linux dev deep links (entropic-dev://)**
 ```bash
 ./scripts/register-dev-protocol.sh
 ```
-Run this on the host (outside the dev container) after the first successful `pnpm tauri:dev` so the debug binary exists. This registers `nova-dev://` so OAuth callbacks open the dev app.
+Run this on the host (outside the dev container) after the first successful `pnpm tauri:dev` so the debug binary exists. This registers `entropic-dev://` so OAuth callbacks open the dev app.
 
-**Nova skills mount (dev, optional)**
+**Entropic skills mount (dev, optional)**
 If you want to mount local plugins without rebuilding the image:
 ```bash
-export NOVA_SKILLS_PATH=/path/to/nova-skills
+export ENTROPIC_SKILLS_PATH=/path/to/entropic-skills
 pnpm tauri:dev
 ```
-This mounts to `/data/nova-skills` and enables any plugin found under it.
+This mounts to `/data/entropic-skills` and enables any plugin found under it.
 
 **Supabase OAuth Redirect URLs (dev + prod)**
-- Add `nova://auth/callback` for production.
-- Add `nova-dev://auth/callback` for dev isolation.
+- Add `entropic://auth/callback` for production.
+- Add `entropic-dev://auth/callback` for dev isolation.
 
 **Dev-only env overrides**
 ```bash
 # .env.development (checked in)
-VITE_AUTH_REDIRECT_URL="nova-dev://auth/callback"
-VITE_AUTH_STORE_NAME="nova-auth-dev.json"
+VITE_AUTH_REDIRECT_URL="entropic-dev://auth/callback"
+VITE_AUTH_STORE_NAME="entropic-auth-dev.json"
 ```
 
 **Or run React UI only (faster, no Rust):**
@@ -205,7 +205,7 @@ Then open http://localhost:5174 in your browser.
 
 If you change the Dockerfile in dev.sh:
 ```bash
-docker rmi nova-dev:latest
+docker rmi entropic-dev:latest
 ./dev.sh
 ```
 
@@ -214,14 +214,14 @@ docker rmi nova-dev:latest
 ## Security Notes
 
 - **Dev container** (`dev.sh`) runs as your user for file access
-- **OpenClaw agent containers** run as UID 1337 (`novauser`) for isolation
-- Only the Nova dev container has X11 display access
+- **OpenClaw agent containers** run as UID 1337 (`entropicuser`) for isolation
+- Only the Entropic dev container has X11 display access
 - Agent containers cannot access your display or home directory
 - Project files are mounted read-write at `/app`
 
 ### Revoke X11 access after dev session
 ```bash
-xhost -si:localuser:novauser
+xhost -si:localuser:entropicuser
 ```
 
 ---
@@ -229,7 +229,7 @@ xhost -si:localuser:novauser
 ## Project Structure
 
 ```
-Nova/
+Entropic/
 ├── src/                    # React frontend
 │   ├── App.tsx            # Main app, routing
 │   ├── pages/
@@ -280,7 +280,7 @@ Output: `src-tauri/target/release/bundle/`
 ### "Failed to initialize GTK"
 X11 access not granted. Run on host:
 ```bash
-xhost +si:localuser:novauser
+xhost +si:localuser:entropicuser
 ```
 
 ### "Port 5174 already in use"
@@ -310,7 +310,7 @@ WEBKIT_DISABLE_COMPOSITING_MODE=1 pnpm tauri dev
 ```
 
 ### OAuth callback doesn't open app (Linux)
-The `nova://` protocol handler isn't registered. Run on host (not in dev container):
+The `entropic://` protocol handler isn't registered. Run on host (not in dev container):
 ```bash
 ./scripts/register-dev-protocol.sh
 ```

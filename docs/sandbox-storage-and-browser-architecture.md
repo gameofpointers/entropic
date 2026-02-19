@@ -1,4 +1,4 @@
-# Nova Sandbox Storage And Browser Architecture
+# Entropic Sandbox Storage And Browser Architecture
 
 ## Storage Classes
 

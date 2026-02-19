@@ -3,24 +3,24 @@ set -e
 
 echo "🧹 Cleaning up for fresh end-user experience test..."
 
-NOVA_COLIMA_HOME="${NOVA_COLIMA_HOME:-$HOME/.nova/colima-dev}"
-LEGACY_COLIMA_HOME="$HOME/.nova/colima"
-NOVA_RUNTIME_HOME="${NOVA_RUNTIME_HOME:-$HOME}"
+ENTROPIC_COLIMA_HOME="${ENTROPIC_COLIMA_HOME:-$HOME/.entropic/colima-dev}"
+LEGACY_COLIMA_HOME="$HOME/.entropic/colima"
+ENTROPIC_RUNTIME_HOME="${ENTROPIC_RUNTIME_HOME:-$HOME}"
 USER_UID="$(id -u)"
 TMP_BASE="${TMPDIR:-/tmp}"
 TMP_BASE="${TMP_BASE%/}"
 if [[ -z "$TMP_BASE" ]]; then
     TMP_BASE="/tmp"
 fi
-FALLBACK_COLIMA_HOME_SHARED="/Users/Shared/nova/colima-${USER_UID}"
-FALLBACK_COLIMA_HOME_TMP="${TMP_BASE}/nova-colima-${USER_UID}"
-FALLBACK_RUNTIME_HOME_SHARED="/Users/Shared/nova/home-${USER_UID}"
-FALLBACK_RUNTIME_HOME_TMP="${TMP_BASE}/nova-home-${USER_UID}"
-LEGACY_FALLBACK_COLIMA_HOME_TMP="/tmp/nova-colima-${USER_UID}"
-LEGACY_FALLBACK_RUNTIME_HOME_TMP="/tmp/nova-home-${USER_UID}"
+FALLBACK_COLIMA_HOME_SHARED="/Users/Shared/entropic/colima-${USER_UID}"
+FALLBACK_COLIMA_HOME_TMP="${TMP_BASE}/entropic-colima-${USER_UID}"
+FALLBACK_RUNTIME_HOME_SHARED="/Users/Shared/entropic/home-${USER_UID}"
+FALLBACK_RUNTIME_HOME_TMP="${TMP_BASE}/entropic-home-${USER_UID}"
+LEGACY_FALLBACK_COLIMA_HOME_TMP="/tmp/entropic-colima-${USER_UID}"
+LEGACY_FALLBACK_RUNTIME_HOME_TMP="/tmp/entropic-home-${USER_UID}"
 echo ""
 
-is_safe_nova_runtime_home_for_cleanup() {
+is_safe_entropic_runtime_home_for_cleanup() {
     local target="$1"
     if [[ -z "$target" ]]; then
         return 1
@@ -29,7 +29,7 @@ is_safe_nova_runtime_home_for_cleanup() {
         "/"|"/Users"|"/tmp"|"$HOME")
             return 1
             ;;
-        "$FALLBACK_RUNTIME_HOME_SHARED"|"$FALLBACK_RUNTIME_HOME_TMP"|"$LEGACY_FALLBACK_RUNTIME_HOME_TMP"|"$HOME/.nova/"*|"/Users/Shared/nova/"*|"${TMP_BASE}/nova-home-"*|"${TMP_BASE}/nova-"*|"/tmp/nova-home-"*|"/tmp/nova-"*)
+        "$FALLBACK_RUNTIME_HOME_SHARED"|"$FALLBACK_RUNTIME_HOME_TMP"|"$LEGACY_FALLBACK_RUNTIME_HOME_TMP"|"$HOME/.entropic/"*|"/Users/Shared/entropic/"*|"${TMP_BASE}/entropic-home-"*|"${TMP_BASE}/entropic-"*|"/tmp/entropic-home-"*|"/tmp/entropic-"*)
             return 0
             ;;
         *)
@@ -39,23 +39,23 @@ is_safe_nova_runtime_home_for_cleanup() {
 }
 
 # ============================================
-# 1. KILL RUNNING NOVA PROCESSES & UNMOUNT DMGS
+# 1. KILL RUNNING ENTROPIC PROCESSES & UNMOUNT DMGS
 # ============================================
 
-echo "🛑 Stopping all Nova processes..."
+echo "🛑 Stopping all Entropic processes..."
 
-# Kill all Nova app instances
-echo "  → Killing Nova processes..."
-pkill -9 -i nova 2>/dev/null || true
+# Kill all Entropic app instances
+echo "  → Killing Entropic processes..."
+pkill -9 -i entropic 2>/dev/null || true
 
 # Kill Colima and Lima processes
 echo "  → Killing Colima/Lima processes..."
 pkill -9 limactl 2>/dev/null || true
 pkill -9 colima 2>/dev/null || true
 
-# Unmount any mounted Nova DMGs
-echo "  → Unmounting Nova DMGs..."
-for dmg in "/Volumes/Nova"*; do
+# Unmount any mounted Entropic DMGs
+echo "  → Unmounting Entropic DMGs..."
+for dmg in "/Volumes/Entropic"*; do
     if [ -d "$dmg" ]; then
         hdiutil detach "$dmg" -force 2>/dev/null || true
     fi
@@ -64,14 +64,14 @@ done
 echo "✅ All processes stopped and DMGs unmounted"
 
 # ============================================
-# 2. CLEAN NOVA'S ISOLATED RUNTIME
+# 2. CLEAN ENTROPIC'S ISOLATED RUNTIME
 # ============================================
 
-echo "🗑️  Cleaning Nova's isolated runtime..."
+echo "🗑️  Cleaning Entropic's isolated runtime..."
 
-# Nova uses NOVA_COLIMA_HOME as isolated home - just delete it
-echo "  → Removing $NOVA_COLIMA_HOME..."
-rm -rf "$NOVA_COLIMA_HOME"
+# Entropic uses ENTROPIC_COLIMA_HOME as isolated home - just delete it
+echo "  → Removing $ENTROPIC_COLIMA_HOME..."
+rm -rf "$ENTROPIC_COLIMA_HOME"
 
 # Backward-compatible cleanup for legacy paths
 echo "  → Removing legacy $LEGACY_COLIMA_HOME..."
@@ -88,12 +88,12 @@ if [[ "$LEGACY_FALLBACK_COLIMA_HOME_TMP" != "$FALLBACK_COLIMA_HOME_TMP" ]]; then
 fi
 
 # Cleanup fallback runtime HOME locations used by bundled Colima/Lima commands
-if [[ "$NOVA_RUNTIME_HOME" != "$HOME" ]]; then
-    if is_safe_nova_runtime_home_for_cleanup "$NOVA_RUNTIME_HOME"; then
-        echo "  → Removing NOVA_RUNTIME_HOME override $NOVA_RUNTIME_HOME..."
-        rm -rf "$NOVA_RUNTIME_HOME"
+if [[ "$ENTROPIC_RUNTIME_HOME" != "$HOME" ]]; then
+    if is_safe_entropic_runtime_home_for_cleanup "$ENTROPIC_RUNTIME_HOME"; then
+        echo "  → Removing ENTROPIC_RUNTIME_HOME override $ENTROPIC_RUNTIME_HOME..."
+        rm -rf "$ENTROPIC_RUNTIME_HOME"
     else
-        echo "  ⚠️  Skipping unsafe NOVA_RUNTIME_HOME cleanup target: $NOVA_RUNTIME_HOME"
+        echo "  ⚠️  Skipping unsafe ENTROPIC_RUNTIME_HOME cleanup target: $ENTROPIC_RUNTIME_HOME"
     fi
 fi
 echo "  → Removing fallback $FALLBACK_RUNTIME_HOME_SHARED..."
@@ -105,7 +105,7 @@ if [[ "$LEGACY_FALLBACK_RUNTIME_HOME_TMP" != "$FALLBACK_RUNTIME_HOME_TMP" ]]; th
     rm -rf "$LEGACY_FALLBACK_RUNTIME_HOME_TMP"
 fi
 
-echo "✅ Nova runtime cleaned"
+echo "✅ Entropic runtime cleaned"
 
 # ============================================
 # 3. CLEAN GLOBAL COLIMA (optional)
@@ -140,12 +140,12 @@ docker context use desktop-linux 2>/dev/null || docker context use default 2>/de
 
 # Check if Docker is accessible
 if docker info &> /dev/null; then
-    # Stop and remove nova containers
-    echo "  → Stopping Nova containers..."
-    NOVA_CONTAINERS=$(docker ps -aq --filter "name=nova" 2>/dev/null)
-    if [ -n "$NOVA_CONTAINERS" ]; then
-        echo "$NOVA_CONTAINERS" | xargs docker stop 2>/dev/null || true
-        echo "$NOVA_CONTAINERS" | xargs docker rm -f 2>/dev/null || true
+    # Stop and remove entropic containers
+    echo "  → Stopping Entropic containers..."
+    ENTROPIC_CONTAINERS=$(docker ps -aq --filter "name=entropic" 2>/dev/null)
+    if [ -n "$ENTROPIC_CONTAINERS" ]; then
+        echo "$ENTROPIC_CONTAINERS" | xargs docker stop 2>/dev/null || true
+        echo "$ENTROPIC_CONTAINERS" | xargs docker rm -f 2>/dev/null || true
     fi
     
     OPENCLAW_CONTAINERS=$(docker ps -aq --filter "name=openclaw" 2>/dev/null)
@@ -153,23 +153,23 @@ if docker info &> /dev/null; then
         echo "$OPENCLAW_CONTAINERS" | xargs docker rm -f 2>/dev/null || true
     fi
     
-    # Remove nova images (but keep openclaw-runtime:latest for bundling)
-    echo "  → Removing Nova images (keeping openclaw-runtime for bundling)..."
-    NOVA_IMAGES=$(docker images -q "nova-*" 2>/dev/null)
-    if [ -n "$NOVA_IMAGES" ]; then
-        echo "$NOVA_IMAGES" | xargs docker rmi -f 2>/dev/null || true
+    # Remove entropic images (but keep openclaw-runtime:latest for bundling)
+    echo "  → Removing Entropic images (keeping openclaw-runtime for bundling)..."
+    ENTROPIC_IMAGES=$(docker images -q "entropic-*" 2>/dev/null)
+    if [ -n "$ENTROPIC_IMAGES" ]; then
+        echo "$ENTROPIC_IMAGES" | xargs docker rmi -f 2>/dev/null || true
     fi
     
-    # Remove nova volumes
-    echo "  → Removing Nova volumes..."
-    NOVA_VOLUMES=$(docker volume ls -q --filter "name=nova" 2>/dev/null)
-    if [ -n "$NOVA_VOLUMES" ]; then
-        echo "$NOVA_VOLUMES" | xargs docker volume rm 2>/dev/null || true
+    # Remove entropic volumes
+    echo "  → Removing Entropic volumes..."
+    ENTROPIC_VOLUMES=$(docker volume ls -q --filter "name=entropic" 2>/dev/null)
+    if [ -n "$ENTROPIC_VOLUMES" ]; then
+        echo "$ENTROPIC_VOLUMES" | xargs docker volume rm 2>/dev/null || true
     fi
     
-    # Remove nova networks
-    echo "  → Removing Nova networks..."
-    docker network rm nova-net 2>/dev/null || true
+    # Remove entropic networks
+    echo "  → Removing Entropic networks..."
+    docker network rm entropic-net 2>/dev/null || true
     
     echo "✅ Docker resources cleaned"
 else
@@ -215,7 +215,7 @@ echo "🗑️  Removing old bundled resources..."
 rm -rf src-tauri/resources/bin/*
 rm -rf src-tauri/resources/share/*
 rm -f src-tauri/resources/openclaw-runtime.tar.gz
-rm -f src-tauri/resources/nova-skill-scanner.tar.gz
+rm -f src-tauri/resources/entropic-skill-scanner.tar.gz
 
 # ============================================
 # 7. CLEAN APP LOGS
@@ -223,7 +223,7 @@ rm -f src-tauri/resources/nova-skill-scanner.tar.gz
 
 echo ""
 echo "📝 Cleaning runtime logs..."
-rm -f ~/nova-runtime.log
+rm -f ~/entropic-runtime.log
 
 # ============================================
 # DONE
@@ -233,7 +233,7 @@ echo ""
 echo "✅ Complete cleanup done!"
 echo ""
 echo "📊 Current state:"
-echo "  • ${NOVA_COLIMA_HOME}: $([ -d "$NOVA_COLIMA_HOME" ] && echo "EXISTS" || echo "REMOVED ✓")"
+echo "  • ${ENTROPIC_COLIMA_HOME}: $([ -d "$ENTROPIC_COLIMA_HOME" ] && echo "EXISTS" || echo "REMOVED ✓")"
 echo "  • ${LEGACY_COLIMA_HOME}: $([ -d "$LEGACY_COLIMA_HOME" ] && echo "EXISTS" || echo "REMOVED ✓")"
 echo "  • ${FALLBACK_COLIMA_HOME_SHARED}: $([ -d "$FALLBACK_COLIMA_HOME_SHARED" ] && echo "EXISTS" || echo "REMOVED ✓")"
 echo "  • ${FALLBACK_COLIMA_HOME_TMP}: $([ -d "$FALLBACK_COLIMA_HOME_TMP" ] && echo "EXISTS" || echo "REMOVED ✓")"

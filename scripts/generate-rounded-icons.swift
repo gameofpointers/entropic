@@ -94,7 +94,7 @@ func runCommand(_ command: String, _ args: [String]) throws {
 }
 
 let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-let source = root.appendingPathComponent("src/assets/nova-logo.png")
+let source = root.appendingPathComponent("src/assets/entropic-logo.png")
 
 do {
     let baseImage = try loadImage(from: source)
@@ -112,7 +112,7 @@ do {
     }
 
     let iconsetDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-        .appendingPathComponent("nova-rounded-\(UUID().uuidString).iconset", isDirectory: true)
+        .appendingPathComponent("entropic-rounded-\(UUID().uuidString).iconset", isDirectory: true)
     try FileManager.default.createDirectory(at: iconsetDir, withIntermediateDirectories: true)
 
     let iconsetEntries: [(Int, String)] = [

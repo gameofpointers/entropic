@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🏗️  Building Nova for end-user testing..."
+echo "🏗️  Building Entropic for end-user testing..."
 echo ""
 
 USER_UID="$(id -u)"
@@ -10,10 +10,10 @@ TMP_BASE="${TMP_BASE%/}"
 if [[ -z "$TMP_BASE" ]]; then
     TMP_BASE="/tmp"
 fi
-FALLBACK_COLIMA_HOME_SHARED="/Users/Shared/nova/colima-${USER_UID}"
-FALLBACK_COLIMA_HOME_TMP="${TMP_BASE}/nova-colima-${USER_UID}"
-FALLBACK_RUNTIME_HOME_SHARED="/Users/Shared/nova/home-${USER_UID}"
-FALLBACK_RUNTIME_HOME_TMP="${TMP_BASE}/nova-home-${USER_UID}"
+FALLBACK_COLIMA_HOME_SHARED="/Users/Shared/entropic/colima-${USER_UID}"
+FALLBACK_COLIMA_HOME_TMP="${TMP_BASE}/entropic-colima-${USER_UID}"
+FALLBACK_RUNTIME_HOME_SHARED="/Users/Shared/entropic/home-${USER_UID}"
+FALLBACK_RUNTIME_HOME_TMP="${TMP_BASE}/entropic-home-${USER_UID}"
 
 # Change to project root (parent of scripts directory)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -208,8 +208,8 @@ echo "🔍 Building Skill Scanner image..."
 echo "✅ Skill scanner image built"
 
 # Check image exists
-if ! docker image inspect nova-skill-scanner:latest > /dev/null 2>&1; then
-    echo "❌ ERROR: nova-skill-scanner:latest image not found after build"
+if ! docker image inspect entropic-skill-scanner:latest > /dev/null 2>&1; then
+    echo "❌ ERROR: entropic-skill-scanner:latest image not found after build"
     exit 1
 fi
 
@@ -229,7 +229,7 @@ echo ""
 # Run build script, ignore signing errors (exit code 1 from signing)
 "$PROJECT_ROOT/scripts/build-cross-platform.sh" || {
     # Check if the app was actually built despite the signing error
-    if [ ! -d "src-tauri/target/release/bundle/macos/Nova.app" ]; then
+    if [ ! -d "src-tauri/target/release/bundle/macos/Entropic.app" ]; then
         echo ""
         echo "❌ Build failed - app bundle not created"
         exit 1
@@ -247,8 +247,8 @@ echo ""
 # we can copy it into the app bundle.
 echo ""
 echo "📦 Exporting Skill Scanner image..."
-IMAGE=nova-skill-scanner:latest \
-OUTPUT="$PROJECT_ROOT/src-tauri/resources/nova-skill-scanner.tar.gz" \
+IMAGE=entropic-skill-scanner:latest \
+OUTPUT="$PROJECT_ROOT/src-tauri/resources/entropic-skill-scanner.tar.gz" \
     "$PROJECT_ROOT/scripts/bundle-runtime-image.sh"
 echo "✅ Skill scanner image exported"
 
@@ -259,7 +259,7 @@ echo "✅ Skill scanner image exported"
 echo ""
 echo "📦 Copying runtime images into app bundle..."
 
-APP_RESOURCES="src-tauri/target/release/bundle/macos/Nova.app/Contents/Resources"
+APP_RESOURCES="src-tauri/target/release/bundle/macos/Entropic.app/Contents/Resources"
 
 if [ -f "src-tauri/resources/openclaw-runtime.tar.gz" ]; then
     cp "src-tauri/resources/openclaw-runtime.tar.gz" "$APP_RESOURCES/"
@@ -269,11 +269,11 @@ else
     exit 1
 fi
 
-if [ -f "src-tauri/resources/nova-skill-scanner.tar.gz" ]; then
-    cp "src-tauri/resources/nova-skill-scanner.tar.gz" "$APP_RESOURCES/"
+if [ -f "src-tauri/resources/entropic-skill-scanner.tar.gz" ]; then
+    cp "src-tauri/resources/entropic-skill-scanner.tar.gz" "$APP_RESOURCES/"
     echo "✅ Skill scanner image copied into app"
 else
-    echo "❌ ERROR: Skill scanner image not found at src-tauri/resources/nova-skill-scanner.tar.gz"
+    echo "❌ ERROR: Skill scanner image not found at src-tauri/resources/entropic-skill-scanner.tar.gz"
     exit 1
 fi
 
@@ -285,8 +285,8 @@ echo ""
 echo "✅ Build complete!"
 echo ""
 echo "📦 Bundled app location:"
-if [ -d "src-tauri/target/release/bundle/macos/Nova.app" ]; then
-    APP_PATH="src-tauri/target/release/bundle/macos/Nova.app"
+if [ -d "src-tauri/target/release/bundle/macos/Entropic.app" ]; then
+    APP_PATH="src-tauri/target/release/bundle/macos/Entropic.app"
     echo "   $APP_PATH"
     du -sh "$APP_PATH"
 else
@@ -301,15 +301,15 @@ echo "   Colima:  $(ls -lh src-tauri/resources/bin/colima 2>/dev/null | awk '{pr
 echo "   Lima:    $(ls -lh src-tauri/resources/bin/limactl 2>/dev/null | awk '{print $5}' || echo 'missing')"
 echo "   Docker:  $(ls -lh src-tauri/resources/bin/docker 2>/dev/null | awk '{print $5}' || echo 'missing')"
 echo "   Runtime: $(ls -lh "$APP_RESOURCES/openclaw-runtime.tar.gz" 2>/dev/null | awk '{print $5}' || echo 'missing')"
-echo "   Scanner: $(ls -lh "$APP_RESOURCES/nova-skill-scanner.tar.gz" 2>/dev/null | awk '{print $5}' || echo 'missing')"
+echo "   Scanner: $(ls -lh "$APP_RESOURCES/entropic-skill-scanner.tar.gz" 2>/dev/null | awk '{print $5}' || echo 'missing')"
 
 echo ""
 echo "🎯 To test as end user:"
 echo ""
 echo "   1. STOP Docker Desktop (or colima stop)"
 echo ""
-echo "   2. Clean Nova's isolated runtime locations:"
-echo "      rm -rf ~/.nova/colima ~/.nova/colima-dev"
+echo "   2. Clean Entropic's isolated runtime locations:"
+echo "      rm -rf ~/.entropic/colima ~/.entropic/colima-dev"
 echo "      rm -rf ${FALLBACK_COLIMA_HOME_SHARED} ${FALLBACK_COLIMA_HOME_TMP}"
 echo "      rm -rf ${FALLBACK_RUNTIME_HOME_SHARED} ${FALLBACK_RUNTIME_HOME_TMP}"
 echo ""
@@ -318,9 +318,9 @@ echo "      pkill -f colima || true"
 echo "      pkill -f lima || true"
 echo ""
 echo "   4. Launch the app:"
-echo "      open src-tauri/target/release/bundle/macos/Nova.app"
+echo "      open src-tauri/target/release/bundle/macos/Entropic.app"
 echo ""
 echo "   5. Monitor startup logs (in another terminal):"
-echo "      tail -f ~/nova-runtime.log"
+echo "      tail -f ~/entropic-runtime.log"
 echo ""
 echo "The app will start its own isolated Colima and load the bundled runtime!"

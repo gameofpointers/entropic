@@ -110,7 +110,7 @@ export function ChannelSetupModal({ channel, isOpen, onClose, onSetupComplete }:
           <div className="py-8 text-center">
             <Loader2 className="w-7 h-7 animate-spin mx-auto mb-3 text-[var(--text-primary)]" />
             <p className="text-sm font-medium text-[var(--text-primary)]">Checking connection…</p>
-            <p className="text-xs text-[var(--text-tertiary)] mt-1">Hang tight while Nova verifies your channel.</p>
+            <p className="text-xs text-[var(--text-tertiary)] mt-1">Hang tight while Entropic verifies your channel.</p>
           </div>
         ) : error ? (
           <div className="py-6 text-center">
@@ -181,7 +181,7 @@ export function ChannelSetupModal({ channel, isOpen, onClose, onSetupComplete }:
               <ol className="text-sm text-[var(--text-secondary)] space-y-2">
                 <li>1. Download BlueBubbles on your Mac</li>
                 <li>2. Sign in with your Apple ID</li>
-                <li>3. Connect it to your Nova instance</li>
+                <li>3. Connect it to your Entropic instance</li>
               </ol>
             </div>
             <a

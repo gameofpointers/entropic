@@ -108,7 +108,7 @@ export class GatewayClient {
     if (typeof window === "undefined") {
       return false;
     }
-    if (window.localStorage?.getItem("NOVA_GATEWAY_DEBUG") === "1") {
+    if (window.localStorage?.getItem("ENTROPIC_GATEWAY_DEBUG") === "1") {
       return true;
     }
     if (import.meta.env.DEV) {
@@ -251,7 +251,7 @@ export class GatewayClient {
             maxProtocol: 3,
             client: {
               id: "webchat-ui", // Must be a known client ID
-              displayName: "Nova Desktop",
+              displayName: "Entropic Desktop",
               version: "0.1.0",
               platform: "desktop",
               mode: "ui", // Must be: webchat, cli, ui, backend, node, probe, test

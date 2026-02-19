@@ -9,7 +9,7 @@ Reduce perceived latency and total time for tool-heavy chats (calendar/email/X) 
 - Replacing OpenRouter.
 
 ## Scope
-Nova (desktop UI + local gateway config) and nova-web (API proxy).
+Entropic (desktop UI + local gateway config) and entropic-web (API proxy).
 
 ---
 
@@ -25,7 +25,7 @@ Introduce **tiered routing** and **timing telemetry**:
 3. **Image Model** (separate)
    - Dedicated image model (already supported).
 
-Nova decides the model *before* calling the gateway (no OpenClaw core changes), using a simple classifier.
+Entropic decides the model *before* calling the gateway (no OpenClaw core changes), using a simple classifier.
 
 ---
 
@@ -52,16 +52,16 @@ If fast model returns:
 
 ---
 
-## Telemetry (Nova + nova-web)
+## Telemetry (Entropic + entropic-web)
 
-### Client Logs (Nova)
+### Client Logs (Entropic)
 Log per run:
 - `send_ack`
 - `first_delta`
 - `tool_payload` (when tool results detected)
 - `final`
 
-### Server Logs (nova-web)
+### Server Logs (entropic-web)
 Log per request:
 - `auth` time
 - `upstream_headers`
@@ -86,19 +86,19 @@ Add a **Model Routing** section:
 - Optional: “Balanced”, “Reasoning”
 
 ### Chat
-No new toggle in chat. OpenClaw decides based on Nova routing.
+No new toggle in chat. OpenClaw decides based on Entropic routing.
 
 ---
 
 ## Implementation Plan
 
-### Nova
+### Entropic
 1. Add simple heuristic in chat send path.
 2. Select model before `chat.send`.
 3. Add fallback retry if fast model fails.
 
-### nova-web
-1. Timing logs already added (use `NOVA_LOG_TIMINGS=1` in prod).
+### entropic-web
+1. Timing logs already added (use `ENTROPIC_LOG_TIMINGS=1` in prod).
 2. Optional: add `x-request-id` propagation to client.
 
 ---

@@ -12,7 +12,7 @@ const CREDIT_AMOUNTS = [
 ];
 const BALANCE_POLL_INTERVAL_MS = 10000;
 const BALANCE_POLL_DURATION_MS = 5 * 60 * 1000;
-const USAGE_CACHE_KEY = "nova_usage_cache_v1";
+const USAGE_CACHE_KEY = "entropic_usage_cache_v1";
 const USAGE_CACHE_TTL_MS = 5 * 60 * 1000;
 
 function BillingGroup({ title, children }: { title?: string, children: React.ReactNode }) {

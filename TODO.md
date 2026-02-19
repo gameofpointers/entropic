@@ -1,4 +1,4 @@
-# Nova TODO
+# Entropic TODO
 
 ## Product
 - [ ] Ship with QMD (https://github.com/tobi/qmd) bundled and enabled

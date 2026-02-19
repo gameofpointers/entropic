@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Mail, Eye, EyeOff, ChevronLeft, ArrowRight } from "lucide-react";
-import novaLogo from "../assets/nova-logo.png";
+import entropicLogo from "../assets/entropic-logo.png";
 import {
   signInWithGoogle,
   signInWithDiscord,
@@ -54,7 +54,7 @@ export function SignIn({ onSignInStarted, onSkipAuth }: Props) {
       onSignInStarted?.();
 
       setTimeout(() => {
-        if (sessionStorage.getItem('nova_oauth_pending')) {
+        if (sessionStorage.getItem('entropic_oauth_pending')) {
           setError("Sign in is taking longer than expected. If the browser window didn't open, please try again.");
           setIsLoading(false);
         }
@@ -113,7 +113,7 @@ export function SignIn({ onSignInStarted, onSkipAuth }: Props) {
         <div className={cardClasses}>
           <div className="text-center mb-8">
             <div className="w-16 h-16 rounded-2xl bg-transparent mx-auto flex items-center justify-center mb-6">
-              <img src={novaLogo} alt="Nova" className="w-16 h-16 rounded-2xl shadow-lg" />
+              <img src={entropicLogo} alt="Entropic" className="w-16 h-16 rounded-2xl shadow-lg" />
             </div>
             <h1 className="text-2xl font-bold text-gray-900 mb-2">
               Developer Mode
@@ -126,7 +126,7 @@ export function SignIn({ onSignInStarted, onSkipAuth }: Props) {
           <div className="space-y-6">
             <div className="p-4 rounded-2xl bg-amber-50 border border-amber-100 text-amber-900 text-sm">
               <span className="font-semibold block mb-1">Advanced Setup</span>
-              Bypasses Nova billing. You'll need to configure your own API keys in Settings.
+              Bypasses Entropic billing. You'll need to configure your own API keys in Settings.
             </div>
 
             <button
@@ -250,12 +250,12 @@ export function SignIn({ onSignInStarted, onSkipAuth }: Props) {
             onClick={handleLogoClick}
             className="w-20 h-20 rounded-[2rem] bg-transparent mx-auto flex items-center justify-center mb-8
                      cursor-default focus:outline-none transition-transform hover:scale-105 active:scale-95 duration-300"
-            aria-label="Nova logo"
+            aria-label="Entropic logo"
           >
-            <img src={novaLogo} alt="Nova" className="w-20 h-20 rounded-[2rem] shadow-xl" />
+            <img src={entropicLogo} alt="Entropic" className="w-20 h-20 rounded-[2rem] shadow-xl" />
           </button>
           <h1 className="text-3xl font-bold text-gray-900 mb-3 tracking-tight">
-            Nova
+            Entropic
           </h1>
           <p className="text-gray-500 font-medium">
             Your personal AI workspace

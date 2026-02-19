@@ -18,7 +18,7 @@ import {
   Pin,
   Trash2,
 } from "lucide-react";
-import novaLogo from "../assets/nova-logo.png";
+import entropicLogo from "../assets/entropic-logo.png";
 import type { ChatSession } from "../pages/Chat";
 import clsx from "clsx";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -92,7 +92,7 @@ export function Layout({
   onNewChat,
   onChatSessionAction,
 }: Props) {
-  const [profile, setProfile] = useState<AgentProfile>({ name: "Nova" });
+  const [profile, setProfile] = useState<AgentProfile>({ name: "Joulie" });
   const [isMacOS, setIsMacOS] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showAllChatSessions, setShowAllChatSessions] = useState(false);
@@ -109,10 +109,10 @@ export function Layout({
     };
     refresh();
     const handler = () => refresh();
-    window.addEventListener("nova-profile-updated", handler);
+    window.addEventListener("entropic-profile-updated", handler);
     return () => {
       cancelled = true;
-      window.removeEventListener("nova-profile-updated", handler);
+      window.removeEventListener("entropic-profile-updated", handler);
     };
   }, []);
 
@@ -139,7 +139,7 @@ export function Layout({
 
   useEffect(() => {
     try {
-      const saved = localStorage.getItem("nova.sidebarCollapsed");
+      const saved = localStorage.getItem("entropic.sidebarCollapsed");
       if (saved === "1") {
         setSidebarCollapsed(true);
       }
@@ -152,7 +152,7 @@ export function Layout({
     setSidebarCollapsed((prev) => {
       const next = !prev;
       try {
-        localStorage.setItem("nova.sidebarCollapsed", next ? "1" : "0");
+        localStorage.setItem("entropic.sidebarCollapsed", next ? "1" : "0");
       } catch {
         // ignore storage failures
       }
@@ -211,9 +211,9 @@ export function Layout({
               onMouseDown={startDrag}
               className="h-full flex items-center gap-3 flex-1 min-w-0"
             >
-              <img src={novaLogo} alt="Nova" className="w-8 h-8 rounded-lg shadow-md pointer-events-none" />
+              <img src={entropicLogo} alt="Entropic" className="w-8 h-8 rounded-lg shadow-md pointer-events-none" />
               <div className="font-semibold text-lg tracking-tight text-[var(--text-primary)] pointer-events-none">
-                Nova
+                Entropic
               </div>
             </div>
             <button

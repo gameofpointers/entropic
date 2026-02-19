@@ -14,8 +14,8 @@ const STARTUP_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 fn startup_error_log_path() -> std::path::PathBuf {
     dirs::home_dir()
-        .map(|home| home.join("nova-runtime.log"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/nova-runtime.log"))
+        .map(|home| home.join("entropic-runtime.log"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/entropic-runtime.log"))
 }
 
 fn append_startup_log(message: &str) {
@@ -80,7 +80,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             let urls: Vec<String> = args
                 .into_iter()
-                .filter(|arg| arg.starts_with("nova://") || arg.starts_with("nova-dev://"))
+                .filter(|arg| arg.starts_with("entropic://") || arg.starts_with("entropic-dev://"))
                 .collect();
 
             if urls.is_empty() {
@@ -113,6 +113,12 @@ pub fn run() {
                 .plugin(tauri_plugin_stronghold::Builder::with_argon2(&salt_path).build())
                 .map_err(|e| format!("Failed to init stronghold: {}", e))?;
 
+            if let Err(err) = commands::migrate_legacy_nova_data_on_startup(&app.handle()) {
+                let msg = format!("legacy migration failed: {}", err);
+                append_startup_log(&msg);
+                eprintln!("[Entropic] {}", msg);
+            }
+
             let state = commands::init_state(&app.handle());
             app.manage(state);
             Ok(())
@@ -123,6 +129,8 @@ pub fn run() {
             commands::start_runtime,
             commands::stop_runtime,
             commands::cleanup_app_data,
+            commands::migrate_legacy_nova_data,
+            commands::migrate_legacy_nova_install,
             commands::ensure_runtime,
             commands::start_gateway,
             commands::start_gateway_with_proxy,
@@ -183,7 +191,7 @@ pub fn run() {
         .unwrap_or_else(|error| {
             let msg = format!("error while building tauri application: {error}");
             append_startup_log(&msg);
-            eprintln!("[Nova] Startup build failed: {error}");
+            eprintln!("[Entropic] Startup build failed: {error}");
             process::exit(1);
         })
         .run(|app_handle, event| match event {
@@ -197,7 +205,7 @@ pub fn run() {
                 #[cfg(target_os = "macos")]
                 {
                     println!(
-                        "[Nova] Window close requested — hiding window (containers stay running)"
+                        "[Entropic] Window close requested — hiding window (containers stay running)"
                     );
                     if let Some(window) = app_handle.get_webview_window(&label) {
                         let _ = window.hide();
@@ -208,12 +216,12 @@ pub fn run() {
                 // On other platforms, closing window exits the app
                 #[cfg(not(target_os = "macos"))]
                 {
-                    println!("[Nova] Window close requested — preserving containers...");
+                    println!("[Entropic] Window close requested — preserving containers...");
                     commands::cleanup_on_exit();
                 }
             }
             RunEvent::Exit => {
-                println!("[Nova] App exiting — preserving containers...");
+                println!("[Entropic] App exiting — preserving containers...");
                 commands::cleanup_on_exit();
             }
             _ => {}

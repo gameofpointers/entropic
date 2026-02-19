@@ -1,4 +1,4 @@
-# Nova Improvements Roadmap
+# Entropic Improvements Roadmap
 
 ## Security Improvements
 
@@ -10,7 +10,7 @@
 
 ### Medium Priority
 - [ ] **Sandbox containers**: Complete two-layer model where OpenClaw spawns isolated containers for untrusted actions
-- [ ] **Network isolation**: Create dedicated Docker network for Nova containers
+- [ ] **Network isolation**: Create dedicated Docker network for Entropic containers
 - [ ] **Resource limits**: Add `--memory`, `--cpus` limits to containers
 - [ ] **Seccomp profile**: Custom seccomp profile for minimal syscall surface
 

@@ -247,7 +247,7 @@ export function Files({
   onImageModelChange,
 }: Props) {
   const { balance, isAuthenticated, isAuthConfigured } = useAuth();
-  const [agentName, setAgentName] = useState("Nova");
+  const [agentName, setAgentName] = useState("Joulie");
 
   // Wallpaper
   const [wallpaperId, setWallpaperId] = useState(DEFAULT_WALLPAPER_ID);
@@ -412,7 +412,7 @@ export function Files({
     loadOnboardingData().then((d) => {
       if (d?.agentName) setAgentName(d.agentName);
     });
-    Store.load("nova-settings.json").then(async (s) => {
+    Store.load("entropic-settings.json").then(async (s) => {
       const wp = (await s.get("desktopWallpaper")) as string | null;
       if (wp) setWallpaperId(wp);
       const cwp = (await s.get("desktopCustomWallpaper")) as string | null;
@@ -435,7 +435,7 @@ export function Files({
     setWallpaperId(id);
     if (custom !== undefined) setCustomWallpaper(custom);
     try {
-      const store = await Store.load("nova-settings.json");
+      const store = await Store.load("entropic-settings.json");
       await store.set("desktopWallpaper", id);
       if (custom !== undefined) {
         if (custom) await store.set("desktopCustomWallpaper", custom);

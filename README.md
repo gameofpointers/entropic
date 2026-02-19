@@ -1,6 +1,6 @@
-# Nova
+# Entropic
 
-Nova is a Tauri desktop app that runs OpenClaw in a hardened local container to provide a secure, "normie-friendly" AI assistant.
+Entropic is a Tauri desktop app that runs OpenClaw in a hardened local container to provide a secure, "normie-friendly" AI assistant.
 
 ## Quick Start
 
@@ -13,7 +13,7 @@ Nova is a Tauri desktop app that runs OpenClaw in a hardened local container to 
 
 ### 1. Build OpenClaw
 
-Nova requires the OpenClaw runtime. Clone and build it first:
+Entropic requires the OpenClaw runtime. Clone and build it first:
 
 ```bash
 # Clone openclaw as a sibling directory
@@ -21,7 +21,7 @@ git clone https://github.com/dominant-strategies/openclaw ../openclaw
 cd ../openclaw
 pnpm install
 pnpm build
-cd ../Nova
+cd ../Entropic
 ```
 
 ### 2. Build the runtime image
@@ -32,14 +32,14 @@ cd ../Nova
 
 This creates the `openclaw-runtime:latest` Docker image.
 
-**Optional: bundle Nova skills**
+**Optional: bundle Entropic skills**
 ```bash
 # Sibling repo (recommended)
-NOVA_SKILLS_SOURCE=../nova-skills ./scripts/build-openclaw-runtime.sh
+ENTROPIC_SKILLS_SOURCE=../entropic-skills ./scripts/build-openclaw-runtime.sh
 ```
-Plugins under `nova-skills` with `openclaw.plugin.json` are bundled into the image.
+Plugins under `entropic-skills` with `openclaw.plugin.json` are bundled into the image.
 
-### 3. Run Nova
+### 3. Run Entropic
 
 ```bash
 pnpm install
@@ -49,16 +49,16 @@ pnpm tauri dev
 ### Dev Runtime Helpers (macOS/Linux)
 
 ```bash
-pnpm dev:runtime:start   # Ensure Docker/Colima are ready for Nova runtime
+pnpm dev:runtime:start   # Ensure Docker/Colima are ready for Entropic runtime
 pnpm dev:runtime:up      # Run start and launch `pnpm tauri:dev`
-pnpm dev:runtime:status  # Check Colima + nova-openclaw state
-pnpm dev:runtime:stop    # Stop nova-openclaw + scanner (not image/volume)
-pnpm dev:runtime:prune   # Remove nova-openclaw / nova-skill-scanner + nova-net
-pnpm dev:runtime:logs    # Tail nova-openclaw logs
+pnpm dev:runtime:status  # Check Colima + entropic-openclaw state
+pnpm dev:runtime:stop    # Stop entropic-openclaw + scanner (not image/volume)
+pnpm dev:runtime:prune   # Remove entropic-openclaw / entropic-skill-scanner + entropic-net
+pnpm dev:runtime:logs    # Tail entropic-openclaw logs
 ```
 
 Dev mode now uses an isolated Colima home by default:
-`~/.nova/colima-dev`. It does not share that with production/default Colima (`~/.colima`) unless you intentionally override it:
+`~/.entropic/colima-dev`. It does not share that with production/default Colima (`~/.colima`) unless you intentionally override it:
 
 ```bash
 pnpm dev:runtime:up
@@ -67,41 +67,41 @@ pnpm dev:runtime:up
 To use a custom dev path intentionally:
 
 ```bash
-NOVA_COLIMA_HOME=$HOME/.nova/colima-dev-pilot pnpm dev:runtime:up
+ENTROPIC_COLIMA_HOME=$HOME/.entropic/colima-dev-pilot pnpm dev:runtime:up
 ```
 
 For containerized local dev, the app now keeps runtime containers up on app exit; this makes iterative starts faster and avoids full warm-up when restarting the app frequently.
 
-**Isolated dev OAuth (nova-dev://)**
+**Isolated dev OAuth (entropic-dev://)**
 ```bash
 pnpm tauri:dev
-pnpm dev:protocol   # Linux only, registers nova-dev:// handler
+pnpm dev:protocol   # Linux only, registers entropic-dev:// handler
 ```
-Add `nova-dev://auth/callback` to Supabase Auth → Additional Redirect URLs.
+Add `entropic-dev://auth/callback` to Supabase Auth → Additional Redirect URLs.
 
 ## Platform-Specific Setup
 
 ### macOS
 
-No additional setup needed. Nova bundles Colima for Docker support.
+No additional setup needed. Entropic bundles Colima for Docker support.
 
 ### Linux
 
 Create an isolated user for container security:
 ```bash
-sudo useradd -u 1337 -M -s /bin/false novauser
+sudo useradd -u 1337 -M -s /bin/false entropicuser
 ```
 
 For X11 display access (dev container):
 ```bash
-xhost +si:localuser:novauser
+xhost +si:localuser:entropicuser
 ./dev.sh
 ```
 
 ## Project Structure
 
 ```
-Nova/
+Entropic/
 ├── src/                    # React frontend
 ├── src-tauri/              # Rust backend (Tauri)
 ├── openclaw-runtime/       # Docker image for OpenClaw
@@ -117,33 +117,33 @@ Nova/
 
 ## Data Storage
 
-Nova stores data in `~/.local/share/ai.openclaw.nova/`:
+Entropic stores data in `~/.local/share/ai.openclaw.entropic/`:
 
 | File | Purpose |
 |------|---------|
-| `nova-auth.json` | OAuth session and tokens |
-| `nova-profile.json` | User profile settings |
+| `entropic-auth.json` | OAuth session and tokens |
+| `entropic-profile.json` | User profile settings |
 | `localstorage/` | Web storage data |
 
 Dev builds use a separate identifier and auth store:
-- `~/.local/share/ai.openclaw.nova.dev/`
-- `nova-auth-dev.json`
+- `~/.local/share/ai.openclaw.entropic.dev/`
+- `entropic-auth-dev.json`
 
 To reset OAuth:
 ```bash
-rm ~/.local/share/ai.openclaw.nova/nova-auth.json
+rm ~/.local/share/ai.openclaw.entropic/entropic-auth.json
 ```
 
 To fully reset all data:
 ```bash
-rm -rf ~/.local/share/ai.openclaw.nova/
+rm -rf ~/.local/share/ai.openclaw.entropic/
 ```
 
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
-| GTK init error | Run `xhost +si:localuser:novauser` on host |
+| GTK init error | Run `xhost +si:localuser:entropicuser` on host |
 | Port 5174 in use | `pkill -f vite` |
 | Docker access denied | Check `/var/run/docker.sock` permissions |
 | OpenClaw image not found | Run `./scripts/build-openclaw-runtime.sh` |

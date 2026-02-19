@@ -185,7 +185,7 @@ const PLUGIN_ICONS: Record<string, ComponentType<{ className?: string }>> = {
   discord: DiscordLogo,
   telegram: TelegramLogo,
   slack: SlackLogo,
-  "nova-x": XLogo,
+  "entropic-x": XLogo,
   "memory-lancedb": MemoryLogo,
   "memory-core": MemoryLogo,
 };
@@ -193,10 +193,10 @@ const PLUGIN_ICONS: Record<string, ComponentType<{ className?: string }>> = {
 const META: Record<string, Partial<Plugin>> = {
   "memory-lancedb": { name: "Long-Term Memory", description: "OpenAI-powered long-term recall (optional add-on).", category: "memory" },
   "memory-core": { name: "QMD Memory (Default)", description: "Fast local hybrid memory search over notes and sessions.", category: "memory" },
-  discord: { name: "Discord", description: "Connect Nova to Discord servers and DMs with a bot token and OAuth invite.", category: "integrations" },
+  discord: { name: "Discord", description: "Connect Entropic to Discord servers and DMs with a bot token and OAuth invite.", category: "integrations" },
   telegram: { name: "Telegram", description: "Run your agent as a Telegram bot.", category: "integrations" },
-  slack: { name: "Slack", description: "Connect Nova to Slack workspaces.", category: "integrations" },
-  "nova-x": { name: "Nova X Skill", description: "Search public posts and fetch profile/thread context from X." },
+  slack: { name: "Slack", description: "Connect Entropic to Slack workspaces.", category: "integrations" },
+  "entropic-x": { name: "Entropic X Skill", description: "Search public posts and fetch profile/thread context from X." },
 };
 
 const GOOGLE_INTEGRATIONS: Omit<GoogleIntegration, "connected" | "email">[] = [
@@ -221,7 +221,7 @@ const INTEGRATION_NAMES: Record<IntegrationProvider, string> = {
 };
 
 const SYNC_REQUIRED = new Set<IntegrationProvider>(["google_calendar", "google_email"]);
-const NOVA_X_SKILL_ID = "nova-x";
+const ENTROPIC_X_SKILL_ID = "entropic-x";
 const MESSAGING_PLUGIN_IDS = new Set([
   "discord",
   "telegram",
@@ -344,11 +344,11 @@ export function Store({
     const handleIntegrationUpdate = () => {
       refreshIntegrations();
     };
-    window.addEventListener("nova-integration-updated", handleIntegrationUpdate);
-    window.addEventListener("nova-integration-error", handleIntegrationUpdate);
+    window.addEventListener("entropic-integration-updated", handleIntegrationUpdate);
+    window.addEventListener("entropic-integration-error", handleIntegrationUpdate);
     return () => {
-      window.removeEventListener("nova-integration-updated", handleIntegrationUpdate);
-      window.removeEventListener("nova-integration-error", handleIntegrationUpdate);
+      window.removeEventListener("entropic-integration-updated", handleIntegrationUpdate);
+      window.removeEventListener("entropic-integration-error", handleIntegrationUpdate);
     };
   }, []);
 
@@ -751,10 +751,10 @@ export function Store({
     }
   }
 
-  const pluginsSansNovaX = useMemo(() => plugins.filter((p) => p.id !== NOVA_X_SKILL_ID), [plugins]);
+  const pluginsSansEntropicX = useMemo(() => plugins.filter((p) => p.id !== ENTROPIC_X_SKILL_ID), [plugins]);
   const visiblePlugins = useMemo(
-    () => pluginsSansNovaX.filter((p) => !MESSAGING_PLUGIN_IDS.has(p.id) && !HIDDEN_PLUGIN_IDS.has(p.id)),
-    [pluginsSansNovaX]
+    () => pluginsSansEntropicX.filter((p) => !MESSAGING_PLUGIN_IDS.has(p.id) && !HIDDEN_PLUGIN_IDS.has(p.id)),
+    [pluginsSansEntropicX]
   );
 
   const filteredPlugins = useMemo(
@@ -780,13 +780,13 @@ export function Store({
   const installedSkillCards = useMemo(() => {
     const cards: SkillCard[] = [
       {
-        id: NOVA_X_SKILL_ID,
+        id: ENTROPIC_X_SKILL_ID,
         name: "X Research",
-        description: "Default Nova skill for searching posts, reading profiles, and pulling thread context.",
-        sourceLabel: "Nova Default",
+        description: "Default Entropic skill for searching posts, reading profiles, and pulling thread context.",
+        sourceLabel: "Entropic Default",
         tags: ["x", "search", "default"],
         integrationProvider: "x",
-        pluginId: NOVA_X_SKILL_ID,
+        pluginId: ENTROPIC_X_SKILL_ID,
         connected: xConnected,
         managed: true,
       },
@@ -1275,8 +1275,8 @@ export function Store({
               <h2 className="text-xl font-bold text-gray-900 mb-2">Setting up {setupProvider}</h2>
               <p className="text-sm text-gray-500 font-medium leading-relaxed mb-8">
                 {setupStage === "authorizing"
-                  ? "Finish authorization in your browser. We'll update Nova as soon as it's complete."
-                  : "Syncing your credentials with Nova..."}
+                  ? "Finish authorization in your browser. We'll update Entropic as soon as it's complete."
+                  : "Syncing your credentials with Entropic..."}
               </p>
               <button
                 className="w-full py-3 bg-gray-100 text-gray-900 rounded-2xl text-[14px] font-bold hover:bg-gray-200 transition-colors"

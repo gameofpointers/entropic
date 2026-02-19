@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Build Nova on a remote macOS machine via SSH
+# Build Entropic on a remote macOS machine via SSH
 #
 # Usage:
 #   ./scripts/build-remote-mac.sh <user@host>
@@ -13,7 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 REMOTE_HOST="${1:-${REMOTE_MAC_HOST:-}}"
-REMOTE_DIR="~/nova-build"
+REMOTE_DIR="~/entropic-build"
 
 if [ -z "$REMOTE_HOST" ]; then
     echo "ERROR: Remote host not specified."
@@ -141,4 +141,4 @@ echo "macOS artifacts:"
 ls -la "$PROJECT_ROOT/dist-macos/"
 echo ""
 echo "To create a DMG manually, run:"
-echo "  ./scripts/create-macos-dmg.sh dist-macos/Nova.app dist-macos/Nova.dmg"
+echo "  ./scripts/create-macos-dmg.sh dist-macos/Entropic.app dist-macos/Entropic.dmg"

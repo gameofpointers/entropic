@@ -1,4 +1,4 @@
-# Nova/OpenClaw Dev Status — 2026-02-09
+# Entropic/OpenClaw Dev Status — 2026-02-09
 
 ## Summary
 - Stabilized scheduled tasks (cron) and run history display.
@@ -16,7 +16,7 @@
 
 2) **Cron run history**
 - OpenClaw `cron.runs` returns `{ entries: [...] }` with fields: `ts`, `runAtMs`, `durationMs`, `summary`, `status`.
-- Nova now maps `entries` into a unified `CronRunLogEntry` and displays:
+- Entropic now maps `entries` into a unified `CronRunLogEntry` and displays:
   - time (no more “Invalid Date”)
   - duration (from `durationMs`)
   - status (ok/error/skipped)
@@ -30,12 +30,12 @@
 4) **Chat navigation**
 - Sidebar shows recent chat sessions and a dedicated “New Chat” entry.
 
-## Commits (Nova)
+## Commits (Entropic)
 - `5d45426` Fix scheduled task payload defaults
 - `3b679ef` Improve task run history details
 - `45f4ea2` Throttle auth refresh to prevent 429s
 
-## Files Touched (Nova)
+## Files Touched (Entropic)
 - `src/pages/Tasks.tsx` (cron payload guard-rails, history display improvements)
 - `src/lib/gateway.ts` (cron history parsing; supports `entries`)
 - `src/lib/auth.ts` (refresh throttling + dedupe)

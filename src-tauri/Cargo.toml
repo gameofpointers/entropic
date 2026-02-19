@@ -1,12 +1,12 @@
 [package]
-name = "nova"
+name = "entropic"
 version = "0.1.1"
 description = "OpenClaw Desktop - AI assistant with secure sandboxing"
 authors = ["OpenClaw Team"]
 edition = "2021"
 
 [lib]
-name = "nova_lib"
+name = "entropic_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]

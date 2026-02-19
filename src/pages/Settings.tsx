@@ -100,7 +100,7 @@ export function Settings({
   const { isAuthenticated, isAuthConfigured } = useAuth();
   const proxyEnabled = isAuthConfigured && isAuthenticated && !useLocalKeys;
   const [apiKeys, setApiKeys] = useState({ anthropic: "", openai: "", google: "" });
-  const [profile, setProfile] = useState<AgentProfile>({ name: "Nova" });
+  const [profile, setProfile] = useState<AgentProfile>({ name: "Joulie" });
   const [saving, setSaving] = useState(false);
   const [memorySessionIndexing, setMemorySessionIndexing] = useState(false);
   const [memoryEnabled, setMemoryEnabled] = useState(true);
@@ -117,6 +117,8 @@ export function Settings({
   const [anthropicCodePending, setAnthropicCodePending] = useState(false);
   const [anthropicCodeInput, setAnthropicCodeInput] = useState("");
   const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [legacyMigrationLoading, setLegacyMigrationLoading] = useState(false);
+  const [legacyUpgradeLoading, setLegacyUpgradeLoading] = useState(false);
 
   // Wallpaper state
   const [wallpaperId, setWallpaperId] = useState(DEFAULT_WALLPAPER_ID);
@@ -132,7 +134,7 @@ export function Settings({
       setMemorySessionIndexing(Boolean(state.memory_sessions_enabled));
       setMemoryEnabled(state.memory_enabled ?? true);
     }).catch(() => {});
-    Store.load("nova-settings.json").then(async (store) => {
+    Store.load("entropic-settings.json").then(async (store) => {
       const wp = (await store.get("desktopWallpaper")) as string | null;
       if (wp) setWallpaperId(wp);
       const cwp = (await store.get("desktopCustomWallpaper")) as string | null;
@@ -152,7 +154,7 @@ export function Settings({
     setWallpaperId(id);
     if (custom !== undefined) setCustomWallpaper(custom);
     try {
-      const store = await Store.load("nova-settings.json");
+      const store = await Store.load("entropic-settings.json");
       await store.set("desktopWallpaper", id);
       if (custom !== undefined) {
         if (custom) await store.set("desktopCustomWallpaper", custom);
@@ -212,9 +214,9 @@ export function Settings({
         await new Promise(r => setTimeout(r, 200));
       }
       if (!isTogglingGateway) onGatewayToggle();
-      window.dispatchEvent(new Event("nova-auth-changed"));
+      window.dispatchEvent(new Event("entropic-auth-changed"));
     } catch (e) {
-      console.error(`[Nova] OAuth login failed for ${provider}:`, e);
+      console.error(`[Entropic] OAuth login failed for ${provider}:`, e);
       setOauthError(typeof e === "string" ? e : `OAuth login failed for ${provider}`);
     } finally {
       setOauthLoading(null);
@@ -241,9 +243,9 @@ export function Settings({
         await new Promise(r => setTimeout(r, 200));
       }
       if (!isTogglingGateway) onGatewayToggle();
-      window.dispatchEvent(new Event("nova-auth-changed"));
+      window.dispatchEvent(new Event("entropic-auth-changed"));
     } catch (e) {
-      console.error("[Nova] Anthropic OAuth code exchange failed:", e);
+      console.error("[Entropic] Anthropic OAuth code exchange failed:", e);
       setOauthError(typeof e === "string" ? e : "Failed to exchange authorization code");
     } finally {
       setOauthLoading(null);
@@ -262,7 +264,7 @@ export function Settings({
       const state = await invoke<{ providers: Array<{ id: string; has_key: boolean; last4?: string | null }> }>("get_auth_state");
       setAuthState(state);
     } catch (e) {
-      console.error(`[Nova] OAuth disconnect failed for ${provider}:`, e);
+      console.error(`[Entropic] OAuth disconnect failed for ${provider}:`, e);
     }
   }
 
@@ -275,7 +277,7 @@ export function Settings({
       await invoke("set_memory_session_indexing", { enabled: nextEnabled });
     } catch (error) {
       setMemorySessionIndexing(previous);
-      console.error("[Nova] Failed to update memory session indexing:", error);
+      console.error("[Entropic] Failed to update memory session indexing:", error);
       setMemorySessionIndexingError("Could not update conversation memory indexing. Please try again.");
     } finally {
       setSaving(false);
@@ -311,7 +313,7 @@ export function Settings({
                   setProfile((p) => {
                     const next = { ...p, avatarDataUrl };
                     saveProfile(next)
-                      .then(() => window.dispatchEvent(new Event("nova-profile-updated")))
+                      .then(() => window.dispatchEvent(new Event("entropic-profile-updated")))
                       .catch(() => {});
                     return next;
                   });
@@ -331,7 +333,7 @@ export function Settings({
                   const newName = e.target.value;
                   setProfile(p => ({ ...p, name: newName }));
                   saveProfile({ ...profile, name: newName }).catch(() => {});
-                  window.dispatchEvent(new Event("nova-profile-updated"));
+                  window.dispatchEvent(new Event("entropic-profile-updated"));
                 }}
                 className="w-full bg-transparent text-xl font-bold text-[var(--text-primary)] focus:outline-none border-b border-transparent focus:border-[var(--system-blue)] transition-colors placeholder:text-[var(--text-tertiary)]"
                 placeholder="Name your agent"
@@ -697,6 +699,72 @@ export function Settings({
       <SettingsGroup title="Data Management">
         <div className="p-4 space-y-4">
           <div className="flex items-start gap-3">
+            <div className="w-7 h-7 rounded-md bg-amber-50 text-amber-600 flex items-center justify-center flex-shrink-0">
+              <AlertTriangle className="w-4 h-4" />
+            </div>
+            <div className="flex-1">
+              <div className="text-[14px] font-medium text-[var(--text-primary)] mb-1">Import Legacy Nova Data</div>
+              <div className="text-[12px] text-[var(--text-secondary)] mb-3">
+                Imports auth/session/profile/settings files from a previous Nova install into this Entropic app data directory.
+              </div>
+              <button
+                onClick={async () => {
+                  setLegacyMigrationLoading(true);
+                  try {
+                    const result = await invoke<string>("migrate_legacy_nova_data");
+                    alert("Legacy migration complete.\n\n" + result);
+                  } catch (err) {
+                    alert("Legacy migration failed: " + (err instanceof Error ? err.message : String(err)));
+                  } finally {
+                    setLegacyMigrationLoading(false);
+                  }
+                }}
+                disabled={legacyMigrationLoading}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {legacyMigrationLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                {legacyMigrationLoading ? "Importing..." : "Import Nova Data"}
+              </button>
+
+              <button
+                onClick={async () => {
+                  const confirmed = await ask(
+                    "Import data from Nova, then fully reset runtime VMs/containers/volumes to fix Colima or Docker drift? Runtime workspace data may be removed, but imported auth/settings are kept.",
+                    {
+                      title: "Import + Runtime Reset",
+                      kind: "warning",
+                      okLabel: "Import and Reset",
+                      cancelLabel: "Cancel",
+                    }
+                  );
+                  if (!confirmed) return;
+                  setLegacyUpgradeLoading(true);
+                  try {
+                    const result = await invoke<string>("migrate_legacy_nova_install", {
+                      cleanupRuntime: true,
+                    });
+                    alert("Legacy upgrade migration completed.\n\n" + result);
+                  } catch (err) {
+                    alert(
+                      "Legacy upgrade migration failed: " +
+                        (err instanceof Error ? err.message : String(err))
+                    );
+                  } finally {
+                    setLegacyUpgradeLoading(false);
+                  }
+                }}
+                disabled={legacyUpgradeLoading}
+                className="mt-2 px-4 py-2 bg-gray-700 hover:bg-gray-800 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {legacyUpgradeLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                {legacyUpgradeLoading
+                  ? "Importing + Resetting..."
+                  : "Import + Runtime Reset"}
+              </button>
+            </div>
+          </div>
+
+          <div className="flex items-start gap-3">
             <div className="w-7 h-7 rounded-md bg-red-50 text-red-600 flex items-center justify-center flex-shrink-0">
               <Trash2 className="w-4 h-4" />
             </div>
@@ -749,9 +817,9 @@ export function Settings({
                 <LogOut className="w-4 h-4" />
               </div>
               <div className="flex-1">
-                <div className="text-[14px] font-medium text-[var(--text-primary)] mb-1">Uninstall Nova</div>
+                <div className="text-[14px] font-medium text-[var(--text-primary)] mb-1">Uninstall Entropic</div>
                 <div className="text-[12px] text-[var(--text-secondary)] mb-3">
-                  Clean up all data and quit the app. After this, you can move Nova to trash.
+                  Clean up all data and quit the app. After this, you can move Entropic to trash.
                 </div>
                 <div className="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg mb-3">
                   <AlertTriangle className="w-4 h-4 text-blue-600 flex-shrink-0" />
@@ -762,8 +830,8 @@ export function Settings({
                 <button
                   onClick={async () => {
                     console.log("[Settings] Cleanup and Quit clicked");
-                    const confirmed = await ask("Are you sure you want to completely uninstall Nova?\n\nThis will delete all data including settings and quit the app. You can then move Nova.app to trash.\n\nThis action cannot be undone.", {
-                      title: "Uninstall Nova",
+                    const confirmed = await ask("Are you sure you want to completely uninstall Entropic?\n\nThis will delete all data including settings and quit the app. You can then move Entropic.app to trash.\n\nThis action cannot be undone.", {
+                      title: "Uninstall Entropic",
                       kind: "warning",
                       okLabel: "Uninstall",
                       cancelLabel: "Cancel"
@@ -786,7 +854,7 @@ export function Settings({
                       await store.clear();
                       await store.save();
 
-                      alert("Uninstall cleanup completed!\n\n" + result + "\n\nThe app will now quit. You can move Nova to trash.");
+                      alert("Uninstall cleanup completed!\n\n" + result + "\n\nThe app will now quit. You can move Entropic to trash.");
 
                       // Quit the app
                       console.log("[Settings] Quitting app...");

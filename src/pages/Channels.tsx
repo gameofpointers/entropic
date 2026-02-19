@@ -184,7 +184,7 @@ export function Channels() {
               <div className="flex items-center justify-between mb-4">
                 <div>
                   <h3 className="text-lg font-bold">Telegram Bot</h3>
-                  <p className="text-sm text-[var(--text-secondary)]">Connect your Telegram bot to enable messaging with Nova.</p>
+                  <p className="text-sm text-[var(--text-secondary)]">Connect your Telegram bot to enable messaging with Joulie.</p>
                 </div>
                 <div className="flex items-center gap-3">
                   <SetupStateBadge enabled={telegramEnabled} ready={telegramReady} />

@@ -1,6 +1,6 @@
-# Nova Cleanup Guide
+# Entropic Cleanup Guide
 
-This guide explains how to clean up Nova's runtime and data when uninstalling or resetting the application.
+This guide explains how to clean up Entropic's runtime and data when uninstalling or resetting the application.
 
 ## Option 1: In-App Cleanup (Recommended)
 
@@ -15,11 +15,11 @@ Use this if you want to start fresh but keep your settings:
 - **Preserves your auth settings and API keys**
 
 ### Cleanup and Quit (For Uninstalling)
-Use this before moving Nova to trash:
+Use this before moving Entropic to trash:
 1. Click **"Cleanup and Quit"**
 2. Confirm the cleanup
 3. Wait for the app to quit automatically
-4. Move Nova.app to trash
+4. Move Entropic.app to trash
 
 This will:
 - Stop the runtime
@@ -33,15 +33,15 @@ This will:
 If the app won't start or you've already moved it to trash:
 
 ```bash
-cd /path/to/nova
-./scripts/cleanup-nova.sh
+cd /path/to/entropic
+./scripts/cleanup-entropic.sh
 ```
 
 This script will remove:
-- `~/.nova/` - Colima VMs and runtime state
+- `~/.entropic/` - Colima VMs and runtime state
 - Docker containers and volumes
-- Docker contexts for Nova
-- App cache in `~/Library/Application Support/ai.openclaw.nova/`
+- Docker contexts for Entropic
+- App cache in `~/Library/Application Support/ai.openclaw.entropic/`
 
 Your settings (auth.json) will be preserved.
 
@@ -51,31 +51,31 @@ If you want to completely remove everything including settings:
 
 ```bash
 # Stop Colima VMs
-colima delete -f -p nova-vz
-colima delete -f -p nova-qemu
+colima delete -f -p entropic-vz
+colima delete -f -p entropic-qemu
 
 # Remove runtime directory
-rm -rf ~/.nova
+rm -rf ~/.entropic
 
 # Remove app data (including settings)
-rm -rf ~/Library/Application\ Support/ai.openclaw.nova
+rm -rf ~/Library/Application\ Support/ai.openclaw.entropic
 
 # Clean Docker contexts (optional)
-docker context rm colima-nova-vz 2>/dev/null || true
-docker context rm colima-nova-qemu 2>/dev/null || true
+docker context rm colima-entropic-vz 2>/dev/null || true
+docker context rm colima-entropic-qemu 2>/dev/null || true
 ```
 
 ## What Gets Cleaned
 
 ### Always Removed:
-- Colima VMs (`nova-vz`, `nova-qemu`)
+- Colima VMs (`entropic-vz`, `entropic-qemu`)
 - Docker containers and volumes
 - Docker images
-- Runtime state in `~/.nova/`
+- Runtime state in `~/.entropic/`
 - App cache and logs
 
 ### Preserved (unless manually deleted):
-- Auth settings (`~/Library/Application Support/ai.openclaw.nova/auth.json`)
+- Auth settings (`~/Library/Application Support/ai.openclaw.entropic/auth.json`)
 - Your API keys
 - Onboarding progress
 - Profile settings
@@ -92,15 +92,15 @@ Once cleanup is complete:
 
 **"Permission denied" when running script:**
 ```bash
-chmod +x scripts/cleanup-nova.sh
-./scripts/cleanup-nova.sh
+chmod +x scripts/cleanup-entropic.sh
+./scripts/cleanup-entropic.sh
 ```
 
 **Colima VMs won't delete:**
 ```bash
 # Force delete with limactl
-limactl delete colima-nova-vz --force
-limactl delete colima-nova-qemu --force
+limactl delete colima-entropic-vz --force
+limactl delete colima-entropic-qemu --force
 ```
 
 **Docker containers still running:**
@@ -114,4 +114,4 @@ docker rm $(docker ps -aq)
 
 If you encounter issues with cleanup, please:
 1. Check the logs in Settings → Diagnostics
-2. Open an issue at: https://github.com/dominant-strategies/nova/issues
+2. Open an issue at: https://github.com/dominant-strategies/entropic/issues

@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 const RAW_API_URL = (import.meta as any).env?.VITE_API_URL || "";
 const API_URL = RAW_API_URL || ((import.meta as any).env?.DEV ? "/api" : "");
 
-const FINGERPRINT_HEADER = "X-Nova-Device-Fingerprint";
+const FINGERPRINT_HEADER = "X-Entropic-Device-Fingerprint";
 const FINGERPRINT_PATTERN = /^[a-f0-9]{64}$/i;
 
 type ModelPricing = {

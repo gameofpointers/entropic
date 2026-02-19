@@ -1,4 +1,4 @@
-# Nova Development Setup
+# Entropic Development Setup
 
 ## Prerequisites
 
@@ -24,9 +24,9 @@ pnpm tauri dev
 **Dev OAuth isolation (recommended for local dev):**
 ```bash
 pnpm tauri:dev
-pnpm dev:protocol   # Linux only, registers nova-dev:// handler
+pnpm dev:protocol   # Linux only, registers entropic-dev:// handler
 ```
-Add `nova-dev://auth/callback` to Supabase Auth → Additional Redirect URLs.
+Add `entropic-dev://auth/callback` to Supabase Auth → Additional Redirect URLs.
 
 ## Architecture Overview
 
@@ -34,7 +34,7 @@ Add `nova-dev://auth/callback` to Supabase Auth → Additional Redirect URLs.
 ┌─────────────────────────────────────────────────────────────┐
 │  Host Machine                                               │
 │  ┌────────────────────┐    ┌─────────────────────────────┐  │
-│  │  nova-dev          │    │  nova-openclaw              │  │
+│  │  entropic-dev          │    │  entropic-openclaw              │  │
 │  │  (dev container)   │    │  (runtime container)        │  │
 │  │                    │    │                             │  │
 │  │  - Tauri app       │───▶│  - OpenClaw gateway         │  │
@@ -42,12 +42,12 @@ Add `nova-dev://auth/callback` to Supabase Auth → Additional Redirect URLs.
 │  │  - Rust backend    │    │  - Hardened (no caps, etc)  │  │
 │  └────────────────────┘    └─────────────────────────────┘  │
 │           │                            │                    │
-│           └────────── nova-net ────────┘                    │
+│           └────────── entropic-net ────────┘                    │
 │                    (Docker network)                         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Dev Container (nova-dev)
+## Dev Container (entropic-dev)
 
 The dev container provides a consistent build environment with:
 - Node.js 22
@@ -63,11 +63,11 @@ The dev container provides a consistent build environment with:
 pnpm install        # Install JS dependencies
 pnpm dev            # React frontend only (http://localhost:5174)
 pnpm tauri dev      # Full Tauri app with Rust backend
-pnpm tauri:dev      # Dev config (nova-dev:// scheme + isolated auth store)
+pnpm tauri:dev      # Dev config (entropic-dev:// scheme + isolated auth store)
 pnpm tauri build    # Build release binary
 ```
 
-## OpenClaw Runtime Container (nova-openclaw)
+## OpenClaw Runtime Container (entropic-openclaw)
 
 The runtime container runs OpenClaw gateway in a hardened environment.
 
@@ -81,12 +81,12 @@ The runtime container runs OpenClaw gateway in a hardened environment.
 This script:
 1. Copies OpenClaw dist from `~/agent/openclaw/dist`
 2. Copies templates from `~/agent/openclaw/docs/reference/templates`
-3. Bundles any plugins found in the sibling `../nova-skills` repo (if present)
+3. Bundles any plugins found in the sibling `../entropic-skills` repo (if present)
 4. Builds Docker image `openclaw-runtime:latest`
 
 **Optional: custom skills path**
 ```bash
-NOVA_SKILLS_SOURCE=/path/to/nova-skills ./scripts/build-openclaw-runtime.sh
+ENTROPIC_SKILLS_SOURCE=/path/to/entropic-skills ./scripts/build-openclaw-runtime.sh
 ```
 
 ### Container Security
@@ -97,7 +97,7 @@ The container runs with:
 - `--security-opt no-new-privileges` - Can't escalate
 - `--user 1000:1000` - Non-root
 - `--tmpfs /home/node/.openclaw` - Writable area in memory only
-- Network isolated to `nova-net`
+- Network isolated to `entropic-net`
 
 ### API Keys
 
@@ -119,7 +119,7 @@ API keys flow:
 ./scripts/build-openclaw-runtime.sh
 
 # Remove old container (picks up new image)
-sg docker -c "docker rm -f nova-openclaw"
+sg docker -c "docker rm -f entropic-openclaw"
 
 # Restart Tauri app
 pnpm tauri dev
@@ -128,15 +128,15 @@ pnpm tauri dev
 ### Dev Runtime Helpers
 
 ```bash
-pnpm dev:runtime:status   # Check Colima, Docker socket, nova-openclaw state
+pnpm dev:runtime:status   # Check Colima, Docker socket, entropic-openclaw state
 pnpm dev:runtime:start    # Ensure Colima runtime is started (if installed), verify Docker
 pnpm dev:runtime:up       # Run start and launch `pnpm tauri:dev`
-pnpm dev:runtime:stop     # Stop nova-openclaw + scanner without removing volumes
-pnpm dev:runtime:prune    # Remove nova-openclaw, nova-skill-scanner, nova-net
-pnpm dev:runtime:logs     # Tail nova-openclaw logs
+pnpm dev:runtime:stop     # Stop entropic-openclaw + scanner without removing volumes
+pnpm dev:runtime:prune    # Remove entropic-openclaw, entropic-skill-scanner, entropic-net
+pnpm dev:runtime:logs     # Tail entropic-openclaw logs
 ```
 
-By default, dev helpers use `~/.nova/colima-dev` (`NOVA_COLIMA_HOME`) to isolate
+By default, dev helpers use `~/.entropic/colima-dev` (`ENTROPIC_COLIMA_HOME`) to isolate
 development runtime state from production/other Colima installs. You can start dev
 without setting it manually:
 
@@ -147,19 +147,19 @@ pnpm dev:runtime:up
 Override this intentionally if you need a different location:
 
 ```bash
-NOVA_COLIMA_HOME=$HOME/.nova/colima-dev-pilot pnpm dev:runtime:up
+ENTROPIC_COLIMA_HOME=$HOME/.entropic/colima-dev-pilot pnpm dev:runtime:up
 ```
 
 ### Check Container Logs
 
 ```bash
-sg docker -c "docker logs nova-openclaw"
+sg docker -c "docker logs entropic-openclaw"
 ```
 
 ### Check Container Status
 
 ```bash
-sg docker -c "docker ps -a | grep nova"
+sg docker -c "docker ps -a | grep entropic"
 ```
 
 ### Verify Entrypoint
@@ -172,17 +172,17 @@ sg docker -c "docker inspect openclaw-runtime:latest --format '{{.Config.Entrypo
 ### Check Auth File in Container
 
 ```bash
-sg docker -c "docker exec nova-openclaw cat /home/node/.openclaw/agents/main/agent/auth-profiles.json"
+sg docker -c "docker exec entropic-openclaw cat /home/node/.openclaw/agents/main/agent/auth-profiles.json"
 ```
 
 ### Reset Everything
 
 ```bash
 # Remove container
-sg docker -c "docker rm -f nova-openclaw"
+sg docker -c "docker rm -f entropic-openclaw"
 
 # Remove volume (chat history)
-sg docker -c "docker volume rm nova-openclaw-data"
+sg docker -c "docker volume rm entropic-openclaw-data"
 
 # Remove image (forces rebuild)
 sg docker -c "docker rmi openclaw-runtime:latest"
@@ -200,14 +200,14 @@ sg docker -c "docker rmi openclaw-runtime:latest"
    ```
 3. Remove old container and restart:
    ```bash
-   sg docker -c "docker rm -f nova-openclaw"
+   sg docker -c "docker rm -f entropic-openclaw"
    ```
 
 ### "EACCES: permission denied, mkdir..."
 
 The entrypoint.sh should create all needed directories. If you see this:
 1. Rebuild the image: `./scripts/build-openclaw-runtime.sh`
-2. Remove old container: `sg docker -c "docker rm -f nova-openclaw"`
+2. Remove old container: `sg docker -c "docker rm -f entropic-openclaw"`
 
 ### Model Using Wrong Provider
 
@@ -222,15 +222,15 @@ If wrong model is used, the container may have cached old env vars. Remove and r
 
 1. Check if container is running:
    ```bash
-   sg docker -c "docker ps | grep nova-openclaw"
+   sg docker -c "docker ps | grep entropic-openclaw"
    ```
 2. Check logs:
    ```bash
-   sg docker -c "docker logs nova-openclaw"
+   sg docker -c "docker logs entropic-openclaw"
    ```
 3. Verify network:
    ```bash
-   sg docker -c "docker network inspect nova-net"
+   sg docker -c "docker network inspect entropic-net"
    ```
 
 ## File Locations

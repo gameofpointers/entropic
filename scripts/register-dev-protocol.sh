@@ -18,10 +18,10 @@ if ! command -v xdg-mime >/dev/null 2>&1; then
 fi
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DESKTOP_FILE="$HOME/.local/share/applications/nova-dev.desktop"
-BIN="$PROJECT_ROOT/src-tauri/target/debug/nova"
+DESKTOP_FILE="$HOME/.local/share/applications/entropic-dev.desktop"
+BIN="$PROJECT_ROOT/src-tauri/target/debug/entropic"
 ICON="$PROJECT_ROOT/src-tauri/icons/128x128.png"
-SCHEME="nova-dev"
+SCHEME="entropic-dev"
 
 if [[ ! -x "$BIN" ]]; then
   echo "Expected debug binary at $BIN."
@@ -33,8 +33,8 @@ mkdir -p "$(dirname "$DESKTOP_FILE")"
 
 cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
-Name=Nova (Dev)
-Comment=Nova dev deep link handler
+Name=Entropic (Dev)
+Comment=Entropic dev deep link handler
 Exec=$BIN %u
 Icon=$ICON
 Type=Application
@@ -44,7 +44,7 @@ MimeType=x-scheme-handler/$SCHEME;
 NoDisplay=true
 EOF
 
-xdg-mime default nova-dev.desktop x-scheme-handler/$SCHEME
+xdg-mime default entropic-dev.desktop x-scheme-handler/$SCHEME
 update-desktop-database ~/.local/share/applications >/dev/null 2>&1 || true
 
 echo "Registered $SCHEME:// handler for dev."

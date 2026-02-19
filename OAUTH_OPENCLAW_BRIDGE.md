@@ -1,25 +1,25 @@
-# OAuth Bridge Context (Nova ↔ OpenClaw)
+# OAuth Bridge Context (Entropic ↔ OpenClaw)
 
 Date: 2026-02-08
 
 ## Goal
-User wants **Nova UI OAuth** (Supabase) to connect skills and then **push tokens locally into OpenClaw**, so day‑to‑day Gmail/Calendar/etc actions do **not** depend on the backend. Agentic flows should still be executed by OpenClaw.
+User wants **Entropic UI OAuth** (Supabase) to connect skills and then **push tokens locally into OpenClaw**, so day‑to‑day Gmail/Calendar/etc actions do **not** depend on the backend. Agentic flows should still be executed by OpenClaw.
 
 ## Key Clarifications
-- Supabase OAuth tokens live in Supabase (`user_integrations`) and are fetched via `integrations-token` edge function; Nova uses them to call Gmail/Calendar APIs.
+- Supabase OAuth tokens live in Supabase (`user_integrations`) and are fetched via `integrations-token` edge function; Entropic uses them to call Gmail/Calendar APIs.
 - OpenClaw does **not** read Supabase tokens and does not have Gmail send/read as a built‑in tool (OpenClaw Gmail docs cover Pub/Sub watch for inbound events).
 - Plugins are the right mechanism to add new tools like `gmail.send`, `calendar.list`, `slack.post`, etc.
 
 ## Desired UX
-- User clicks **Connect Gmail/Calendar/Slack/Figma** in Nova UI.
+- User clicks **Connect Gmail/Calendar/Slack/Figma** in Entropic UI.
 - Browser OAuth completes.
-- Nova **exports tokens** and **pushes them into local OpenClaw**.
+- Entropic **exports tokens** and **pushes them into local OpenClaw**.
 - OpenClaw tools use local tokens to call provider APIs directly (no backend dependency after connect).
 
 ## Proposed Architecture (Token Push)
 1. Supabase Edge Function: `integrations-token-export`
    - Authenticated; returns encrypted token bundle for a provider.
-2. Nova Desktop:
+2. Entropic Desktop:
    - Fetch OpenClaw `integrations.pubkey`.
    - Call `integrations-token-export` with nonce + device_id.
    - Call OpenClaw `integrations.import` to store tokens locally.

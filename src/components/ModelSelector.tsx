@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, type CSSProperties } from "react";
 import { ChevronDown, Zap, Star, Brain, Sparkles } from "lucide-react";
 import { Model } from "../lib/auth";
 
-// Proxy-mode models (routed through Nova backend)
+// Proxy-mode models (routed through Entropic backend)
 const PROXY_MODELS: Model[] = [
   { id: "openrouter/free", name: "OpenRouter Free (Router)", provider: "OpenRouter", tier: "fast" },
   { id: "anthropic/claude-opus-4.5", name: "Claude Opus 4.5", provider: "Anthropic", tier: "premium" },

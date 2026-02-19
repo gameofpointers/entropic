@@ -13,10 +13,10 @@ import {
   listIntegrationIndexCache,
 } from "./vault";
 
-const INTEGRATION_STORE = "nova-integrations.json";
+const INTEGRATION_STORE = "entropic-integrations.json";
 const INTEGRATIONS_REDIRECT_URL =
   (import.meta as any).env?.VITE_INTEGRATIONS_REDIRECT_URL ||
-  "nova://integrations/success";
+  "entropic://integrations/success";
 
 const OPENCLAW_SYNC_PROVIDERS = new Set<IntegrationProvider>([
   "google_calendar",
@@ -185,7 +185,7 @@ export async function connectIntegration(provider: IntegrationProvider): Promise
   await saveIntegrationSecret(provider, record);
   integrationsCache = null;
   integrationsCachedIndex = null;
-  window.dispatchEvent(new Event("nova-integration-updated"));
+  window.dispatchEvent(new Event("entropic-integration-updated"));
   // Sync in the background so the UI can update immediately.
   syncIntegrationToGateway(provider).catch((err) => {
     console.warn(`Failed to sync ${provider} after connect:`, err);
@@ -197,13 +197,13 @@ export async function disconnectIntegration(provider: IntegrationProvider): Prom
     await apiRequest("/x/oauth/disconnect", { method: "POST" });
     integrationsCache = null;
     integrationsCachedIndex = null;
-    window.dispatchEvent(new Event("nova-integration-updated"));
+    window.dispatchEvent(new Event("entropic-integration-updated"));
     return;
   }
   await removeIntegrationSecret(provider);
   integrationsCache = null;
   integrationsCachedIndex = null;
-  window.dispatchEvent(new Event("nova-integration-updated"));
+  window.dispatchEvent(new Event("entropic-integration-updated"));
 }
 
 async function getXIntegrationStatus(): Promise<Integration | null> {

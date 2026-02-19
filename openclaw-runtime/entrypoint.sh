@@ -53,7 +53,7 @@ mkdir -p /home/node/.openclaw/cron
 mkdir -p /home/node/.openclaw/logs
 mkdir -p /home/node/.openclaw/.cache
 
-# Durable Nova storage classes (backed by /data volume).
+# Durable Entropic storage classes (backed by /data volume).
 mkdir -p /data/workspace
 mkdir -p /data/skills
 mkdir -p /data/skill-manifests
@@ -105,10 +105,10 @@ if [ -d /home/node/.bun/install/global/node_modules/tsx ]; then
 fi
 
 # Runtime environment for durable user assets and tool/browser caches.
-export NOVA_WORKSPACE_PATH="${NOVA_WORKSPACE_PATH:-/data/workspace}"
-export NOVA_SKILLS_PATH="${NOVA_SKILLS_PATH:-/data/skills}"
-export NOVA_SKILL_MANIFESTS_PATH="${NOVA_SKILL_MANIFESTS_PATH:-/data/skill-manifests}"
-export NOVA_BROWSER_PROFILE="${NOVA_BROWSER_PROFILE:-/data/browser/profile}"
+export ENTROPIC_WORKSPACE_PATH="${ENTROPIC_WORKSPACE_PATH:-/data/workspace}"
+export ENTROPIC_SKILLS_PATH="${ENTROPIC_SKILLS_PATH:-/data/skills}"
+export ENTROPIC_SKILL_MANIFESTS_PATH="${ENTROPIC_SKILL_MANIFESTS_PATH:-/data/skill-manifests}"
+export ENTROPIC_BROWSER_PROFILE="${ENTROPIC_BROWSER_PROFILE:-/data/browser/profile}"
 export HOME="${HOME:-/data}"
 export TMPDIR="${TMPDIR:-/data/tmp}"
 export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/data/.config}"
@@ -144,11 +144,11 @@ fi
 # Note: The top-level "memory" config block was removed in OpenClaw >= 2026.1.29.
 # The memory-core plugin now handles memory search internally via api.runtime.tools.
 
-PLUGIN_ENTRIES="\"nova-integrations\": { \"enabled\": true }"
-ALSO_ALLOW="\"nova-integrations\""
+PLUGIN_ENTRIES="\"entropic-integrations\": { \"enabled\": true }"
+ALSO_ALLOW="\"entropic-integrations\""
 
-if [ -d "/app/extensions/nova-x" ] || [ -d "/data/nova-skills/nova-x" ] || [ -d "${NOVA_SKILLS_PATH}/nova-x" ] || [ -d "${NOVA_SKILLS_PATH}/nova-x/current" ]; then
-    PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, \"nova-x\": { \"enabled\": true }"
+if [ -d "/app/extensions/entropic-x" ] || [ -d "/data/entropic-skills/entropic-x" ] || [ -d "${ENTROPIC_SKILLS_PATH}/entropic-x" ] || [ -d "${ENTROPIC_SKILLS_PATH}/entropic-x/current" ]; then
+    PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, \"entropic-x\": { \"enabled\": true }"
     ALSO_ALLOW="${ALSO_ALLOW}, \"x_search\", \"x_profile\", \"x_thread\", \"x_user_tweets\""
 fi
 if [ -n "$MEMORY_CONFIG" ]; then
@@ -168,14 +168,14 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
     TOOLS_BLOCK=",
   \"tools\": {
     \"alsoAllow\": [${ALSO_ALLOW}]"
-    if [ -n "${NOVA_PROXY_MODE:-}" ] && [ -n "${NOVA_PROXY_BASE_URL:-}" ]; then
-        NOVA_PROXY_BASE_URL_ESC="$(json_escape "${NOVA_PROXY_BASE_URL}")"
+    if [ -n "${ENTROPIC_PROXY_MODE:-}" ] && [ -n "${ENTROPIC_PROXY_BASE_URL:-}" ]; then
+        ENTROPIC_PROXY_BASE_URL_ESC="$(json_escape "${ENTROPIC_PROXY_BASE_URL}")"
         TOOLS_BLOCK="${TOOLS_BLOCK},
     \"web\": {
       \"search\": {
         \"provider\": \"perplexity\",
         \"perplexity\": {
-          \"baseUrl\": \"${NOVA_PROXY_BASE_URL_ESC}\"
+          \"baseUrl\": \"${ENTROPIC_PROXY_BASE_URL_ESC}\"
         }
       }
     }"
@@ -185,18 +185,18 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
 
     MODELS_BLOCK=""
     LOAD_PATHS_BLOCK=""
-    if [ -d "${NOVA_SKILLS_PATH}/nova-x/current" ]; then
+    if [ -d "${ENTROPIC_SKILLS_PATH}/entropic-x/current" ]; then
         LOAD_PATHS_BLOCK=",
-    \"load\": { \"paths\": [\"${NOVA_SKILLS_PATH}/nova-x/current\"] }"
-    elif [ -d "${NOVA_SKILLS_PATH}/nova-x" ]; then
+    \"load\": { \"paths\": [\"${ENTROPIC_SKILLS_PATH}/entropic-x/current\"] }"
+    elif [ -d "${ENTROPIC_SKILLS_PATH}/entropic-x" ]; then
         LOAD_PATHS_BLOCK=",
-    \"load\": { \"paths\": [\"${NOVA_SKILLS_PATH}/nova-x\"] }"
-    elif [ -d "/data/nova-skills/nova-x" ]; then
+    \"load\": { \"paths\": [\"${ENTROPIC_SKILLS_PATH}/entropic-x\"] }"
+    elif [ -d "/data/entropic-skills/entropic-x" ]; then
         LOAD_PATHS_BLOCK=",
-    \"load\": { \"paths\": [\"/data/nova-skills/nova-x\"] }"
+    \"load\": { \"paths\": [\"/data/entropic-skills/entropic-x\"] }"
     fi
-    if [ -n "${NOVA_PROXY_BASE_URL:-}" ]; then
-        NOVA_PROXY_BASE_URL_ESC="$(json_escape "${NOVA_PROXY_BASE_URL}")"
+    if [ -n "${ENTROPIC_PROXY_BASE_URL:-}" ]; then
+        ENTROPIC_PROXY_BASE_URL_ESC="$(json_escape "${ENTROPIC_PROXY_BASE_URL}")"
         MODEL_ID_RAW="${OPENCLAW_MODEL#openrouter/}"
         if [ "$MODEL_ID_RAW" = "free" ] || [ "$MODEL_ID_RAW" = "auto" ]; then
             MODEL_ID_RAW="${OPENCLAW_MODEL}"
@@ -215,7 +215,7 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
   \"models\": {
     \"providers\": {
       \"openrouter\": {
-        \"baseUrl\": \"${NOVA_PROXY_BASE_URL_ESC}\",
+        \"baseUrl\": \"${ENTROPIC_PROXY_BASE_URL_ESC}\",
         \"api\": \"openai-completions\",
         \"models\": [
           { \"id\": \"${MODEL_ID_ESC}\", \"name\": \"${MODEL_ID_ESC}\" }${IMAGE_MODEL_ID_ESC:+,

@@ -1,12 +1,12 @@
 #!/bin/bash
 set -euo pipefail
 
-# Nova Cleanup Script
-# Run this script to completely remove Nova's runtime and data
-# Usage: ./scripts/cleanup-nova.sh
+# Entropic Cleanup Script
+# Run this script to completely remove Entropic's runtime and data
+# Usage: ./scripts/cleanup-entropic.sh
 
 echo "╔════════════════════════════════════════╗"
-echo "║      Nova Application Cleanup          ║"
+echo "║      Entropic Application Cleanup          ║"
 echo "╚════════════════════════════════════════╝"
 echo ""
 echo "This script will remove:"
@@ -15,7 +15,7 @@ echo "  • Docker containers and volumes"
 echo "  • Application cache and state"
 echo "  • Runtime binaries and configuration"
 echo ""
-echo "Your settings in ~/Library/Application Support/ai.openclaw.nova will be preserved."
+echo "Your settings in ~/Library/Application Support/ai.openclaw.entropic will be preserved."
 echo ""
 read -p "Continue? (y/N) " -n 1 -r
 echo
@@ -44,8 +44,8 @@ fi
 if [ -n "$DOCKER_BIN" ]; then
     echo "→ Cleaning up Docker resources..."
 
-    for profile in nova-vz nova-qemu; do
-        for colima_home in "$HOME/.nova/colima" "$HOME/.nova/colima-dev"; do
+    for profile in nova-vz nova-qemu entropic-vz entropic-qemu; do
+        for colima_home in "$HOME/.nova/colima" "$HOME/.nova/colima-dev" "$HOME/.entropic/colima" "$HOME/.entropic/colima-dev"; do
             sock="$colima_home/$profile/docker.sock"
             if [ -S "$sock" ]; then
                 DOCKER_HOST="unix://$sock"
@@ -73,9 +73,9 @@ fi
 if [ -n "$COLIMA_BIN" ]; then
     echo "→ Stopping and deleting Colima VMs..."
 
-    for profile in nova-vz nova-qemu; do
-        for colima_home in "$HOME/.nova/colima" "$HOME/.nova/colima-dev"; do
-            echo "  Deleting $profile from $colima_home..."
+    for profile in nova-vz nova-qemu entropic-vz entropic-qemu; do
+        for colima_home in "$HOME/.nova/colima" "$HOME/.nova/colima-dev" "$HOME/.entropic/colima" "$HOME/.entropic/colima-dev"; do
+            echo "  Removing legacy $colima_home ($profile)..."
             COLIMA_HOME="$colima_home" LIMA_HOME="$colima_home/_lima" \
                 $COLIMA_BIN delete -f -p "$profile" 2>/dev/null || true
         done
@@ -86,18 +86,20 @@ else
     echo "  ⊘ Colima not found, skipping VM deletion"
 fi
 
-# Remove .nova directory
-echo "→ Removing Nova runtime directory..."
-if [ -d "$HOME/.nova" ]; then
-    rm -rf "$HOME/.nova"
-    echo "  ✓ Removed $HOME/.nova"
-else
-    echo "  ⊘ $HOME/.nova not found"
-fi
+# Remove runtime directories from both naming eras.
+for runtime_dir in "$HOME/.nova" "$HOME/.entropic"; do
+    echo "→ Removing runtime directory: $runtime_dir"
+    if [ -d "$runtime_dir" ]; then
+        rm -rf "$runtime_dir"
+        echo "  ✓ Removed $runtime_dir"
+    else
+        echo "  ⊘ $runtime_dir not found"
+    fi
+done
 
 # Clean app cache (but preserve settings)
 echo "→ Cleaning application cache..."
-APP_SUPPORT="$HOME/Library/Application Support/ai.openclaw.nova"
+APP_SUPPORT="$HOME/Library/Application Support/ai.openclaw.entropic"
 if [ -d "$APP_SUPPORT" ]; then
     rm -rf "$APP_SUPPORT/logs" "$APP_SUPPORT/cache" "$APP_SUPPORT/tmp" 2>/dev/null || true
     echo "  ✓ Cache cleaned (settings preserved)"
@@ -110,6 +112,8 @@ echo "→ Cleaning Docker contexts..."
 if [ -n "$DOCKER_BIN" ]; then
     $DOCKER_BIN context rm colima-nova-vz 2>/dev/null || true
     $DOCKER_BIN context rm colima-nova-qemu 2>/dev/null || true
+    $DOCKER_BIN context rm colima-entropic-vz 2>/dev/null || true
+    $DOCKER_BIN context rm colima-entropic-qemu 2>/dev/null || true
     echo "  ✓ Docker contexts cleaned"
 fi
 
@@ -118,11 +122,11 @@ echo "╔═══════════════════════�
 echo "║        Cleanup Complete! ✓             ║"
 echo "╚════════════════════════════════════════╝"
 echo ""
-echo "Nova has been reset to a clean state."
+echo "Entropic has been reset to a clean state."
 echo "Your settings in $APP_SUPPORT have been preserved."
 echo ""
 echo "You can now:"
-echo "  • Reinstall Nova"
+echo "  • Reinstall Entropic"
 echo "  • Restart the app for a fresh setup"
 echo "  • Move the app to trash if uninstalling"
 echo ""

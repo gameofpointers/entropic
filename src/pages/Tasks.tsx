@@ -305,7 +305,7 @@ function buildGeneratePrompt(editor: EditorState, selected: SkillOption[]): stri
       : "Selected plugins: none";
 
   return [
-    "You are helping a user create a scheduled task for Nova/OpenClaw.",
+    "You are helping a user create a scheduled task for Entropic/OpenClaw.",
     `Task name: ${editor.name.trim() || "(untitled)"}`,
     `Task description: ${editor.description.trim() || "(none)"}`,
     `Goal: ${goal}`,
@@ -1303,7 +1303,7 @@ export function Tasks({ gatewayRunning }: Props) {
                 </div>
                 <textarea
                   className="w-full px-4 py-3.5 bg-white border border-[var(--border-default)] rounded-xl text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20 min-h-[160px] leading-relaxed"
-                  placeholder="Tell Nova exactly what steps to take during this run..."
+                  placeholder="Tell Joulie exactly what steps to take during this run..."
                   value={editor.message}
                   onChange={(e) => updateEditor({ message: e.target.value })}
                 />

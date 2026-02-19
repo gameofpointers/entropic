@@ -27,10 +27,10 @@ type RuntimeStatus = {
 
 type AppState = "loading" | "signin" | "onboarding" | "docker-install" | "setup" | "ready";
 
-const DEFAULT_AGENT_NAME = "Nova";
-const DEFAULT_SOUL = `# About Nova
+const DEFAULT_AGENT_NAME = "Joulie";
+const DEFAULT_SOUL = `# About Joulie
 
-You are Nova, a helpful AI assistant for coding, research, and execution tasks.
+You are Joulie, a helpful AI assistant for coding, research, and execution tasks.
 Be concise, practical, and action-oriented.
 `;
 
@@ -129,8 +129,8 @@ function AppContent() {
         return "signin";
       });
     };
-    window.addEventListener("nova-require-signin", onRequireSignIn);
-    return () => window.removeEventListener("nova-require-signin", onRequireSignIn);
+    window.addEventListener("entropic-require-signin", onRequireSignIn);
+    return () => window.removeEventListener("entropic-require-signin", onRequireSignIn);
   }, []);
 
   async function init() {
@@ -161,7 +161,7 @@ function AppContent() {
           console.warn("Profile save warning:", error);
         }
         await setOnboardingComplete(true);
-        window.dispatchEvent(new Event("nova-profile-updated"));
+        window.dispatchEvent(new Event("entropic-profile-updated"));
         clientLog("app.onboarding.bootstrap.success");
       }
     } catch (error) {

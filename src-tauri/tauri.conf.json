@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Nova",
+  "productName": "Entropic",
   "version": "0.1.1",
-  "identifier": "ai.openclaw.nova",
+  "identifier": "ai.openclaw.entropic",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:5174",
@@ -14,7 +14,7 @@
     "macOSPrivateApi": true,
         "windows": [
       {
-        "title": "Nova",
+        "title": "Entropic",
         "width": 900,
         "height": 700,
         "minWidth": 600,
@@ -27,7 +27,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://localhost:* ws://localhost:* ws://127.0.0.1:* https://*.supabase.co https://*.workers.dev https://openrouter.ai https://api.anthropic.com https://api.openai.com https://console.anthropic.com https://claude.ai https://platform.claude.com https://auth.openai.com https://nova.qu.ai https://*.qu.ai; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; connect-src 'self' http://localhost:* ws://localhost:* ws://127.0.0.1:* https://*.supabase.co https://*.workers.dev https://openrouter.ai https://api.anthropic.com https://api.openai.com https://console.anthropic.com https://claude.ai https://platform.claude.com https://auth.openai.com https://entropic.qu.ai https://*.qu.ai; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {
@@ -48,7 +48,7 @@
     ],
     "category": "DeveloperTool",
     "shortDescription": "AI assistant with secure sandboxing",
-    "longDescription": "Nova brings OpenClaw to your desktop with a beautiful interface and secure container-based sandboxing for AI-generated commands.",
+    "longDescription": "Entropic brings OpenClaw to your desktop with a beautiful interface and secure container-based sandboxing for AI-generated commands.",
     "macOS": {
       "entitlements": "entitlements.plist",
       "exceptionDomain": null,
@@ -64,13 +64,13 @@
     "deep-link": {
       "mobile": [],
       "desktop": {
-        "schemes": ["nova"]
+        "schemes": ["entropic"]
       }
     },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDREMzk5RDFCNUE3RkZBNDYKUldSRytuOWFHNTA1VGY0cE9NKzNZUjFHQklOVW5XODFkSGZPRGh6NjNzREdoQVNDMjJ4L0Yvc1cK",
       "endpoints": [
-        "https://github.com/dominant-strategies/nova-releases/releases/latest/download/latest.json"
+        "https://github.com/dominant-strategies/entropic-releases/releases/latest/download/latest.json"
       ]
     }
   }

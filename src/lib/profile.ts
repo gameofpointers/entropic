@@ -6,14 +6,14 @@ export type AgentProfile = {
 };
 
 const DEFAULT_PROFILE: AgentProfile = {
-  name: "Nova",
+  name: "Joulie",
 };
 
 let storePromise: Promise<Store> | null = null;
 
 async function getStore(): Promise<Store> {
   if (!storePromise) {
-    storePromise = Store.load("nova-profile.json");
+    storePromise = Store.load("entropic-profile.json");
   }
   return storePromise;
 }

@@ -12,7 +12,7 @@ set -euo pipefail
 # Usage:
 #   ./scripts/bundle-runtime-image.sh           # export openclaw-runtime:latest
 #   IMAGE=myregistry/rt:v1 ./scripts/bundle-runtime-image.sh  # custom image
-#   IMAGE=nova-skill-scanner:latest OUTPUT=src-tauri/resources/nova-skill-scanner.tar.gz ./scripts/bundle-runtime-image.sh
+#   IMAGE=entropic-skill-scanner:latest OUTPUT=src-tauri/resources/entropic-skill-scanner.tar.gz ./scripts/bundle-runtime-image.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -24,10 +24,10 @@ OUTPUT="${OUTPUT:-$RESOURCES_DIR/openclaw-runtime.tar.gz}"
 # built inside a Colima VM even when no DOCKER_HOST is set in the environment.
 if [ -z "${DOCKER_HOST:-}" ]; then
     for _sock in \
-        "$HOME/.nova/colima-dev/nova-vz/docker.sock" \
-        "$HOME/.nova/colima-dev/nova-qemu/docker.sock" \
-        "$HOME/.nova/colima/nova-vz/docker.sock" \
-        "$HOME/.nova/colima/nova-qemu/docker.sock"; do
+        "$HOME/.entropic/colima-dev/entropic-vz/docker.sock" \
+        "$HOME/.entropic/colima-dev/entropic-qemu/docker.sock" \
+        "$HOME/.entropic/colima/entropic-vz/docker.sock" \
+        "$HOME/.entropic/colima/entropic-qemu/docker.sock"; do
         if [ -S "$_sock" ]; then
             export DOCKER_HOST="unix://$_sock"
             break

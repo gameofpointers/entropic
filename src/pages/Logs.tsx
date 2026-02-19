@@ -30,7 +30,7 @@ export function Logs({ compact = false, className = "" }: LogsProps) {
   }
 
   function refreshLogs() {
-    console.log("[Nova] refreshing logs...");
+    console.log("[Entropic] refreshing logs...");
     // TODO: Fetch from gateway
   }
 

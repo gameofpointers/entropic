@@ -11,9 +11,9 @@ const SUPABASE_ANON_KEY = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || ""
 const RAW_API_URL = (import.meta as any).env?.VITE_API_URL || "";
 const API_URL = RAW_API_URL || ((import.meta as any).env?.DEV ? "/api" : "");
 const AUTH_REDIRECT_URL =
-  (import.meta as any).env?.VITE_AUTH_REDIRECT_URL || "nova://auth/callback";
+  (import.meta as any).env?.VITE_AUTH_REDIRECT_URL || "entropic://auth/callback";
 const AUTH_STORE_NAME =
-  (import.meta as any).env?.VITE_AUTH_STORE_NAME || "nova-auth.json";
+  (import.meta as any).env?.VITE_AUTH_STORE_NAME || "entropic-auth.json";
 const AUTH_USE_LOCALHOST =
   (import.meta as any).env?.VITE_AUTH_USE_LOCALHOST === "1";
 const AUTH_FORCE_DEEPLINK =
@@ -103,7 +103,7 @@ async function shouldUseLocalhostOAuth(): Promise<boolean> {
   if (AUTH_USE_LOCALHOST) return true;
   try {
     const os = await platform();
-    // On macOS, always prefer localhost OAuth – deep-link (nova://) redirects
+    // On macOS, always prefer localhost OAuth – deep-link (entropic://) redirects
     // are unreliable for OAuth callbacks and can end up re-opening the Google
     // login page instead of handing the code back to the app.
     return os === "macos";
@@ -125,7 +125,7 @@ async function resolveOAuthRedirectUrl(): Promise<string> {
   } catch (error) {
     console.error("Failed to start localhost OAuth server", error);
     throw new Error(
-      "Failed to start localhost OAuth server. Is port 27100 in use? You can change it with NOVA_AUTH_LOCALHOST_PORT."
+      "Failed to start localhost OAuth server. Is port 27100 in use? You can change it with ENTROPIC_AUTH_LOCALHOST_PORT."
     );
   }
 }
@@ -163,7 +163,7 @@ export async function signInWithOAuth(provider: OAuthProvider): Promise<void> {
       authDebug("OAuth URL generated", { hasUrl: true });
     }
     // Set a timestamp for OAuth pending (for both dev and production)
-    sessionStorage.setItem('nova_oauth_pending', Date.now().toString());
+    sessionStorage.setItem('entropic_oauth_pending', Date.now().toString());
 
     // Open system browser for OAuth
     await open(data.url);
@@ -466,7 +466,7 @@ export async function apiRequest<T>(
       "Content-Type": "application/json",
     };
     try {
-      requestHeaders["X-Nova-Device-Fingerprint"] = await getDeviceFingerprintHash();
+      requestHeaders["X-Entropic-Device-Fingerprint"] = await getDeviceFingerprintHash();
     } catch (error: any) {
       authDebug("apiRequest fingerprint unavailable", {
         endpoint,
@@ -571,14 +571,14 @@ export async function createGatewayToken(opts?: {
   if (accessToken) {
     headers.Authorization = `Bearer ${accessToken}`;
     try {
-      headers["X-Nova-Device-Fingerprint"] = await getDeviceFingerprintHash();
+      headers["X-Entropic-Device-Fingerprint"] = await getDeviceFingerprintHash();
     } catch (error: any) {
       authDebug("createGatewayToken fingerprint unavailable", {
         message: error?.message || String(error),
       });
     }
   } else if (allowAnonymous) {
-    headers["X-Nova-Device-Fingerprint"] = await getDeviceFingerprintHash();
+    headers["X-Entropic-Device-Fingerprint"] = await getDeviceFingerprintHash();
   } else {
     throw new ApiRequestError("Not authenticated", { status: 401, kind: "http" });
   }

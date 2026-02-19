@@ -2,11 +2,11 @@ import { appDataDir, join } from "@tauri-apps/api/path";
 import { Store } from "@tauri-apps/plugin-store";
 import { Stronghold } from "@tauri-apps/plugin-stronghold";
 
-const VAULT_FILE = "nova-integrations.hold";
-const VAULT_CLIENT = "nova-integrations";
+const VAULT_FILE = "entropic-integrations.hold";
+const VAULT_CLIENT = "entropic-integrations";
 const VAULT_PASSWORD_KEY = "vaultPassword";
 const INDEX_KEY = "__integration_index__";
-const INTEGRATION_STORE = "nova-integrations.json";
+const INTEGRATION_STORE = "entropic-integrations.json";
 const INDEX_CACHE_KEY = "integrationIndex";
 
 type StrongholdStore = {

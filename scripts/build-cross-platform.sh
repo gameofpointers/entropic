@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Cross-platform Nova build script
+# Cross-platform Entropic build script
 # Automatically detects platform and bundles appropriate runtime
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,7 +11,7 @@ ARCH=$(uname -m)
 
 cd "$PROJECT_ROOT"
 
-echo "=== Nova Cross-Platform Build ==="
+echo "=== Entropic Cross-Platform Build ==="
 echo "Platform: $PLATFORM"
 echo "Architecture: $ARCH"
 echo "=================================="
@@ -49,7 +49,7 @@ case "$PLATFORM" in
 
         # Copy bundled runtime image into the app bundle (if available)
         # Tauri doesn't support optional resources, so we copy it post-build
-        APP_RESOURCES="src-tauri/target/release/bundle/macos/Nova.app/Contents/Resources"
+        APP_RESOURCES="src-tauri/target/release/bundle/macos/Entropic.app/Contents/Resources"
         if [ -f src-tauri/resources/openclaw-runtime.tar.gz ]; then
             echo "Copying bundled runtime image into app..."
             cp src-tauri/resources/openclaw-runtime.tar.gz "$APP_RESOURCES/"
@@ -61,8 +61,8 @@ case "$PLATFORM" in
         # Show build results
         echo ""
         echo "✅ macOS Build Complete!"
-        echo "📦 Location: src-tauri/target/release/bundle/macos/Nova.app"
-        du -sh src-tauri/target/release/bundle/macos/Nova.app
+        echo "📦 Location: src-tauri/target/release/bundle/macos/Entropic.app"
+        du -sh src-tauri/target/release/bundle/macos/Entropic.app
         echo ""
         echo "Runtime components included:"
         echo "  ✅ Colima (container runtime)"

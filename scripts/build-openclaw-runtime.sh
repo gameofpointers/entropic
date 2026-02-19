@@ -7,17 +7,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 RUNTIME_DIR="$PROJECT_ROOT/openclaw-runtime"
 OPENCLAW_SOURCE="${OPENCLAW_SOURCE:-$PROJECT_ROOT/../openclaw}"
-NOVA_SKILLS_SOURCE="${NOVA_SKILLS_SOURCE:-$PROJECT_ROOT/../nova-skills}"
+ENTROPIC_SKILLS_SOURCE="${ENTROPIC_SKILLS_SOURCE:-$PROJECT_ROOT/../entropic-skills}"
 SCRIPT_BIN_DIRS="${PROJECT_ROOT}/src-tauri/target/debug/resources/bin:${PROJECT_ROOT}/src-tauri/resources/bin"
 USER_UID="$(id -u)"
 TMP_BASE="${TMPDIR:-/tmp}"
 TMP_BASE="${TMP_BASE%/}"
-FALLBACK_COLIMA_HOME_SHARED="/Users/Shared/nova/colima-${USER_UID}"
-FALLBACK_COLIMA_HOME_TMP="${TMP_BASE}/nova-colima-${USER_UID}"
+FALLBACK_COLIMA_HOME_SHARED="/Users/Shared/entropic/colima-${USER_UID}"
+FALLBACK_COLIMA_HOME_TMP="${TMP_BASE}/entropic-colima-${USER_UID}"
 ACTIVE_DOCKER_HOST=""
 ACTIVE_COLIMA_HOME=""
 COLIMA_HOME_CANDIDATES=()
-COLIMA_PROFILES=(nova-vz nova-qemu)
+COLIMA_PROFILES=(entropic-vz entropic-qemu)
 COLIMA_VM_TYPES=(vz qemu)
 
 find_docker_binary() {
@@ -82,11 +82,11 @@ add_colima_home_candidate() {
 }
 
 build_colima_home_candidates() {
-    if [ -n "${NOVA_COLIMA_HOME:-}" ]; then
-        add_colima_home_candidate "$NOVA_COLIMA_HOME"
+    if [ -n "${ENTROPIC_COLIMA_HOME:-}" ]; then
+        add_colima_home_candidate "$ENTROPIC_COLIMA_HOME"
     fi
-    add_colima_home_candidate "$HOME/.nova/colima"
-    add_colima_home_candidate "$HOME/.nova/colima-dev"
+    add_colima_home_candidate "$HOME/.entropic/colima"
+    add_colima_home_candidate "$HOME/.entropic/colima-dev"
     add_colima_home_candidate "$FALLBACK_COLIMA_HOME_SHARED"
     add_colima_home_candidate "$FALLBACK_COLIMA_HOME_TMP"
     add_colima_home_candidate "$HOME/.colima"
@@ -233,7 +233,7 @@ mkdir -p "$STAGING_DIR/extensions"
 PLUGINS_TO_BUNDLE=(
     "memory-core"
     "memory-lancedb"
-    "nova-integrations"
+    "entropic-integrations"
     "discord"
     "telegram"
     "slack"
@@ -257,10 +257,10 @@ for plugin in "${PLUGINS_TO_BUNDLE[@]}"; do
     fi
 done
 
-# Copy Nova-owned skills/plugins (optional)
-if [ -d "$NOVA_SKILLS_SOURCE" ]; then
-    echo "Copying Nova skills from $NOVA_SKILLS_SOURCE..."
-    for plugin_dir in "$NOVA_SKILLS_SOURCE"/*; do
+# Copy Entropic-owned skills/plugins (optional)
+if [ -d "$ENTROPIC_SKILLS_SOURCE" ]; then
+    echo "Copying Entropic skills from $ENTROPIC_SKILLS_SOURCE..."
+    for plugin_dir in "$ENTROPIC_SKILLS_SOURCE"/*; do
         if [ -d "$plugin_dir" ] && [ -f "$plugin_dir/openclaw.plugin.json" ]; then
             plugin_name="$(basename "$plugin_dir")"
             echo "Copying ${plugin_name} plugin..."
@@ -271,7 +271,7 @@ if [ -d "$NOVA_SKILLS_SOURCE" ]; then
         fi
     done
 else
-    echo "No Nova skills directory found at $NOVA_SKILLS_SOURCE (skipping)."
+    echo "No Entropic skills directory found at $ENTROPIC_SKILLS_SOURCE (skipping)."
 fi
 
 # Copy node_modules (production only)

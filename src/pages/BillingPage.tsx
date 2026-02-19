@@ -81,22 +81,22 @@ export function BillingPage() {
       if (balanceResult.status === "fulfilled") {
         setLocalBalance(balanceResult.value);
       } else {
-        console.warn("[Nova] Failed to load local trial balance:", balanceResult.reason);
+        console.warn("[Entropic] Failed to load local trial balance:", balanceResult.reason);
       }
 
       if (usageResult.status === "fulfilled") {
         setLocalUsage(usageResult.value);
       } else {
-        console.warn("[Nova] Failed to load local trial usage:", usageResult.reason);
+        console.warn("[Entropic] Failed to load local trial usage:", usageResult.reason);
       }
     };
     load();
 
     const onLocalCreditsChanged = () => load();
-    window.addEventListener("nova-local-credits-changed", onLocalCreditsChanged);
+    window.addEventListener("entropic-local-credits-changed", onLocalCreditsChanged);
     return () => {
       cancelled = true;
-      window.removeEventListener("nova-local-credits-changed", onLocalCreditsChanged);
+      window.removeEventListener("entropic-local-credits-changed", onLocalCreditsChanged);
     };
   }, [isAuthenticated, isAuthConfigured]);
 
