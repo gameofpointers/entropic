@@ -5,7 +5,6 @@ import {
   X,
   Loader2,
   ExternalLink,
-  Paperclip,
   MessageSquare,
   Calendar,
   Globe,
@@ -1827,6 +1826,8 @@ export function Chat({
       setIsLoading(false);
       setThinkingStatus(null);
       clearActiveRunTracking();
+      // Notify Dashboard to refresh credit balance after message completion
+      window.dispatchEvent(new Event("entropic-local-credits-changed"));
     }
     if (
       !isActiveRun &&
@@ -3098,7 +3099,6 @@ export function Chat({
           WebkitBackdropFilter: 'blur(12px)'
         }}>
         <div className="max-w-3xl mx-auto flex items-end gap-2">
-          <button className="btn-secondary !p-2.5"><Paperclip className="w-5 h-5" /></button>
           <textarea
             ref={textareaRef}
             value={activeDraft}

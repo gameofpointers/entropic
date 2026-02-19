@@ -183,11 +183,18 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       }
     };
     window.addEventListener("entropic-local-credits-changed", onLocalCreditsChanged as EventListener);
+
+    // Poll credit balance every 30 minutes to catch any missed updates
+    const pollInterval = window.setInterval(() => {
+      refreshLocalCredits();
+    }, 30 * 60 * 1000); // 30 minutes
+
     return () => {
       window.removeEventListener(
         "entropic-local-credits-changed",
         onLocalCreditsChanged as EventListener
       );
+      window.clearInterval(pollInterval);
     };
   }, [isAuthenticated, isAuthConfigured]);
 

@@ -3629,6 +3629,46 @@ Use it for durable decisions, preferences, and facts that should persist across 
         }
     }
 
+    // Write OpenRouter proxy credentials to auth-profiles.json if in proxy mode
+    // OpenClaw runtime expects auth-profiles.json even when OPENROUTER_API_KEY env is set
+    {
+        let openrouter_key = read_container_env("OPENROUTER_API_KEY");
+        let proxy_mode = read_container_env("ENTROPIC_PROXY_MODE");
+
+        if proxy_mode.as_deref() == Some("1") && openrouter_key.is_some() {
+            let key = openrouter_key.unwrap();
+            println!(
+                "[Entropic] Writing OpenRouter proxy credentials to auth-profiles.json (key len={})",
+                key.len()
+            );
+            // Include placeholder Anthropic key to satisfy diagnostic checks
+            // Actual requests will use the proxy, so this key is never used
+            let auth_profiles = serde_json::json!({
+                "version": 1,
+                "profiles": {
+                    "openrouter:default": {
+                        "type": "api_key",
+                        "provider": "openrouter",
+                        "key": key
+                    },
+                    "anthropic:default": {
+                        "type": "api_key",
+                        "provider": "anthropic",
+                        "key": "proxy-placeholder"
+                    }
+                }
+            });
+            let payload = serde_json::to_string_pretty(&auth_profiles)
+                .map_err(|e| e.to_string())?;
+            if let Err(e) = write_container_file(
+                "/home/node/.openclaw/agents/main/agent/auth-profiles.json",
+                &payload,
+            ) {
+                println!("[Entropic] Failed to write proxy auth-profiles.json: {}", e);
+            }
+        }
+    }
+
     {
         let mut cache = applied_agent_settings_fingerprint()
             .lock()

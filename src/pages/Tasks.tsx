@@ -348,13 +348,16 @@ function waitForChatCompletion(
         if (text) lastText = text;
         if (event.state === "final") {
           cleanup();
+          window.dispatchEvent(new Event("entropic-local-credits-changed"));
           resolve(lastText.trim());
         }
       } else if (event.state === "error") {
         cleanup();
+        window.dispatchEvent(new Event("entropic-local-credits-changed"));
         reject(new Error(event.errorMessage || "OpenClaw error"));
       } else if (event.state === "aborted") {
         cleanup();
+        window.dispatchEvent(new Event("entropic-local-credits-changed"));
         reject(new Error("OpenClaw generation aborted"));
       }
     };

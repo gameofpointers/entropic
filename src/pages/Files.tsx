@@ -684,8 +684,14 @@ export function Files({
       }
       if (!text) return;
       setChatMessages((prev) => { const idx = prev.findIndex((m) => m.id === event.runId && m.role === "assistant"); if (idx >= 0) { const u = [...prev]; u[idx] = { ...u[idx], content: text }; return u; } return [...prev, { id: event.runId, role: "assistant", content: text }]; });
-      if (event.state === "final") setChatLoading(false);
-    } else if (event.state === "error" || event.state === "aborted") setChatLoading(false);
+      if (event.state === "final") {
+        setChatLoading(false);
+        window.dispatchEvent(new Event("entropic-local-credits-changed"));
+      }
+    } else if (event.state === "error" || event.state === "aborted") {
+      setChatLoading(false);
+      window.dispatchEvent(new Event("entropic-local-credits-changed"));
+    }
   }
 
   async function handleChatSend() {

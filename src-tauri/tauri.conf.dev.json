@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Entropic (Dev)",
+  "productName": "Entropic",
   "version": "0.1.0",
   "identifier": "ai.openclaw.entropic.dev",
   "build": {
@@ -14,7 +14,7 @@
     "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "Entropic (Dev)",
+        "title": "Entropic",
         "width": 900,
         "height": 700,
         "minWidth": 600,
@@ -24,6 +24,7 @@
         "decorations": true,
         "transparent": false,
         "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
         "trafficLightPosition": {
           "x": 14,
           "y": 18

@@ -14,7 +14,6 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   MoreHorizontal,
-  Pencil,
   Pin,
   Trash2,
 } from "lucide-react";
@@ -188,14 +187,15 @@ export function Layout({
         )}
       >
         {sidebarCollapsed ? (
-          /* Collapsed: stack vertically — traffic-light clearance, then toggle, then nav */
-          <div className="flex flex-col items-center mb-2">
+          /* Collapsed: stack vertically — traffic-light clearance, then logo, then toggle, then nav */
+          <div className="flex flex-col items-center">
             {/* Clear native macOS traffic light buttons */}
             {isMacOS && <div className="h-7 shrink-0" />}
+            <img src={entropicLogo} alt="Entropic" className="w-8 h-8 rounded-lg shadow-md mt-3 mb-4 pointer-events-none" />
             <button
               onMouseDown={(e) => e.stopPropagation()}
               onClick={toggleSidebarCollapsed}
-              className="w-8 h-8 rounded-md bg-black/5 hover:bg-black/10 text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center justify-center transition-colors"
+              className="w-8 h-8 mb-4 rounded-md bg-black/5 hover:bg-black/10 text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center justify-center transition-colors"
               title="Expand navigation"
               aria-label="Expand navigation"
             >
@@ -317,24 +317,6 @@ export function Layout({
                             data-chat-session-menu
                             className="absolute right-0 top-7 z-30 w-40 rounded-lg border border-[var(--border-subtle)] bg-white shadow-lg p-1"
                           >
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                const nextLabel = window.prompt("Rename chat", sessionTitle(session));
-                                if (nextLabel !== null && nextLabel.trim()) {
-                                  onChatSessionAction?.({
-                                    type: "rename",
-                                    key: session.key,
-                                    label: nextLabel.trim(),
-                                  });
-                                }
-                                setOpenSessionMenuKey(null);
-                              }}
-                              className="w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-left text-[var(--text-primary)] hover:bg-[var(--bg-secondary)]"
-                            >
-                              <Pencil className="w-3.5 h-3.5" />
-                              Rename
-                            </button>
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();

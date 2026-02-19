@@ -213,7 +213,16 @@ export OPENCLAW_SOURCE
 
 echo "✅ OpenClaw runtime image built"
 
-# Check image exists
+# Check image exists (use the same DOCKER_HOST that build-openclaw-runtime.sh used)
+if [ -z "${DOCKER_HOST:-}" ]; then
+    DEV_SOCK="$HOME/.entropic/colima-dev/entropic-vz/docker.sock"
+    PROD_SOCK="$HOME/.entropic/colima/entropic-vz/docker.sock"
+    if [ -S "$DEV_SOCK" ]; then
+        export DOCKER_HOST="unix://$DEV_SOCK"
+    elif [ -S "$PROD_SOCK" ]; then
+        export DOCKER_HOST="unix://$PROD_SOCK"
+    fi
+fi
 if ! docker image inspect openclaw-runtime:latest > /dev/null 2>&1; then
     echo "❌ ERROR: openclaw-runtime:latest image not found after build"
     exit 1
@@ -228,7 +237,16 @@ echo "🔍 Building Skill Scanner image..."
 "$PROJECT_ROOT/scripts/build-skill-scanner.sh"
 echo "✅ Skill scanner image built"
 
-# Check image exists
+# Check image exists (use the same DOCKER_HOST that build-skill-scanner.sh used)
+if [ -z "${DOCKER_HOST:-}" ]; then
+    DEV_SOCK="$HOME/.entropic/colima-dev/entropic-vz/docker.sock"
+    PROD_SOCK="$HOME/.entropic/colima/entropic-vz/docker.sock"
+    if [ -S "$DEV_SOCK" ]; then
+        export DOCKER_HOST="unix://$DEV_SOCK"
+    elif [ -S "$PROD_SOCK" ]; then
+        export DOCKER_HOST="unix://$PROD_SOCK"
+    fi
+fi
 if ! docker image inspect entropic-skill-scanner:latest > /dev/null 2>&1; then
     echo "❌ ERROR: entropic-skill-scanner:latest image not found after build"
     exit 1

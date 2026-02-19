@@ -703,9 +703,9 @@ export function Settings({
               <AlertTriangle className="w-4 h-4" />
             </div>
             <div className="flex-1">
-              <div className="text-[14px] font-medium text-[var(--text-primary)] mb-1">Import Legacy Nova Data</div>
+              <div className="text-[14px] font-medium text-[var(--text-primary)] mb-1">Import Legacy Entropic Data</div>
               <div className="text-[12px] text-[var(--text-secondary)] mb-3">
-                Imports auth/session/profile/settings files from a previous Nova install into this Entropic app data directory.
+                Imports auth/session/profile/settings files from a previous Entropic install into this app data directory.
               </div>
               <button
                 onClick={async () => {
@@ -723,13 +723,13 @@ export function Settings({
                 className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
                 {legacyMigrationLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                {legacyMigrationLoading ? "Importing..." : "Import Nova Data"}
+                {legacyMigrationLoading ? "Importing..." : "Import Entropic Data"}
               </button>
 
               <button
                 onClick={async () => {
                   const confirmed = await ask(
-                    "Import data from Nova, then fully reset runtime VMs/containers/volumes to fix Colima or Docker drift? Runtime workspace data may be removed, but imported auth/settings are kept.",
+                    "Import data from previous install, then fully reset runtime VMs/containers/volumes to fix Colima or Docker drift? Runtime workspace data may be removed, but imported auth/settings are kept.",
                     {
                       title: "Import + Runtime Reset",
                       kind: "warning",
