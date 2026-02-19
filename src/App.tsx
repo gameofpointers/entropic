@@ -17,6 +17,7 @@ import {
 } from "./lib/profile";
 import { clientLog } from "./lib/clientLog";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
+import { getLocalCreditBalance } from "./lib/localCredits";
 
 type RuntimeStatus = {
   colima_installed: boolean;
@@ -169,6 +170,20 @@ function AppContent() {
       setAppState("onboarding");
       clientLog("app.onboarding.check.failed", { error: String(error) });
       return;
+    }
+
+    // Pre-load local trial credits for unauthenticated users
+    // This ensures backend session is initialized before features are used
+    if (!isAuthenticated && isAuthConfigured) {
+      try {
+        const balance = await getLocalCreditBalance();
+        console.log("[App] Local trial balance pre-loaded:", balance.balance_cents, "cents");
+        clientLog("app.trial_credits.preload.success", { balance_cents: balance.balance_cents });
+      } catch (error) {
+        console.warn("[App] Failed to pre-load trial credits:", error);
+        clientLog("app.trial_credits.preload.failed", { error: String(error) });
+        // Continue anyway - non-blocking
+      }
     }
 
     // Onboarding is complete, check runtime status

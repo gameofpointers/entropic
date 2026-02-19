@@ -2419,6 +2419,10 @@ fn apply_default_qmd_memory_config(
     let cfg_obj = cfg.as_object_mut().expect("config root must be an object");
     let memory_enabled = slot != "none";
 
+    // DISABLED: QMD memory config not supported by current runtime
+    // The top-level "memory" key causes validation errors in openclaw.json
+    // TODO: Re-enable when runtime supports QMD
+    /*
     let memory_backend = cfg_obj
         .get("memory")
         .and_then(|memory| memory.get("backend"))
@@ -2487,7 +2491,12 @@ fn apply_default_qmd_memory_config(
             }
         }
     }
+    */
 
+    // Remove any existing "memory" key to prevent validation errors
+    cfg_obj.remove("memory");
+
+    // Configure agents.defaults.memorySearch (this IS supported by current runtime)
     let agents = ensure_object_entry(cfg_obj, "agents");
     let defaults = ensure_object_entry(agents, "defaults");
     let memory_search = defaults
@@ -2498,45 +2507,38 @@ fn apply_default_qmd_memory_config(
         *memory_search = serde_json::json!({"enabled": memory_enabled});
     }
 
-    if !memory_search.is_object() {
-        *memory_search = serde_json::json!({"enabled": memory_enabled});
-    }
-
     let memory_search_obj = memory_search
         .as_object_mut()
         .expect("memorySearch must be an object");
 
-    if !memory_search_obj.contains_key("enabled") {
-        memory_search_obj.insert("enabled".to_string(), serde_json::json!(memory_enabled));
+    memory_search_obj.insert("enabled".to_string(), serde_json::json!(memory_enabled));
+
+    // Set memory sources (since QMD is disabled, always use builtin memory)
+    if !memory_search_obj.contains_key("sources") {
+        if sessions_enabled {
+            memory_search_obj.insert(
+                "sources".to_string(),
+                serde_json::json!(["memory", "sessions"]),
+            );
+        } else {
+            memory_search_obj.insert("sources".to_string(), serde_json::json!(["memory"]));
+        }
+    } else if let Some(sources) = memory_search_obj
+        .get_mut("sources")
+        .and_then(|v| v.as_array_mut())
+    {
+        if !sources.iter().any(|v| v.as_str() == Some("memory")) {
+            sources.push(serde_json::json!("memory"));
+        }
+        if sessions_enabled && !sources.iter().any(|v| v.as_str() == Some("sessions")) {
+            sources.push(serde_json::json!("sessions"));
+        }
     }
 
-    if !using_qmd {
-        if !memory_search_obj.contains_key("sources") {
-            if sessions_enabled {
-                memory_search_obj.insert(
-                    "sources".to_string(),
-                    serde_json::json!(["memory", "sessions"]),
-                );
-            } else {
-                memory_search_obj.insert("sources".to_string(), serde_json::json!(["memory"]));
-            }
-        } else if let Some(sources) = memory_search_obj
-            .get_mut("sources")
-            .and_then(|v| v.as_array_mut())
-        {
-            if !sources.iter().any(|v| v.as_str() == Some("memory")) {
-                sources.push(serde_json::json!("memory"));
-            }
-            if sessions_enabled && !sources.iter().any(|v| v.as_str() == Some("sessions")) {
-                sources.push(serde_json::json!("sessions"));
-            }
-        }
-
-        if sessions_enabled {
-            let experimental = ensure_object_entry(memory_search_obj, "experimental");
-            if !experimental.contains_key("sessionMemory") {
-                experimental.insert("sessionMemory".to_string(), serde_json::json!(true));
-            }
+    if sessions_enabled {
+        let experimental = ensure_object_entry(memory_search_obj, "experimental");
+        if !experimental.contains_key("sessionMemory") {
+            experimental.insert("sessionMemory".to_string(), serde_json::json!(true));
         }
     }
 }
@@ -5453,13 +5455,17 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
         let current_schema = read_container_env("ENTROPIC_GATEWAY_SCHEMA_VERSION");
         let current_model = read_container_env("OPENCLAW_MODEL");
         let current_proxy_mode = read_container_env("ENTROPIC_PROXY_MODE");
+        // Check legacy environment variable for backward compatibility during migration
+        let legacy_proxy_mode = read_container_env("NOVA_PROXY_MODE");
         // Check if the Anthropic auth type matches (OAuth token vs API key)
         let has_oauth_token = read_container_env("ANTHROPIC_OAUTH_TOKEN").is_some();
         let wants_oauth_token = api_keys.get("anthropic").map_or(false, |k| k.starts_with("sk-ant-oat01-"));
         let auth_type_matches = has_oauth_token == wants_oauth_token;
         // Only reuse the running container if token, schema, model, and auth type all match
         // AND the container isn't a stale proxy-mode instance (start_gateway = local keys).
-        let is_proxy_container = current_proxy_mode.as_deref() == Some("1");
+        // Check both new and legacy proxy mode env vars to properly detect old containers
+        let is_proxy_container = current_proxy_mode.as_deref() == Some("1")
+            || legacy_proxy_mode.as_deref() == Some("1");
         if !is_proxy_container
             && auth_type_matches
             && current_gateway_token.as_deref() == Some(gateway_token.as_str())
@@ -6879,6 +6885,13 @@ pub async fn set_channels_config(
     eprintln!("[set_channels_config] Saving agent settings...");
     save_agent_settings(&app, settings)?;
     eprintln!("[set_channels_config] Agent settings saved successfully");
+
+    // Config is written to container. Changes will take effect on next gateway restart.
+    // We don't auto-restart here because:
+    // - In proxy mode, restart_gateway requires local keys which won't exist
+    // - The user can manually restart via Dashboard or the app will auto-restart on next launch
+    eprintln!("[set_channels_config] Channel config saved. Restart gateway to apply changes.");
+
     eprintln!("[set_channels_config] Completed successfully");
     Ok(())
 }
