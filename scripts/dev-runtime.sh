@@ -3,28 +3,29 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DEFAULT_COLIMA_HOME="$HOME/.nova/colima-dev"
-COLIMA_HOME="${NOVA_COLIMA_HOME:-$DEFAULT_COLIMA_HOME}"
+DEFAULT_COLIMA_HOME="$HOME/.entropic/colima-dev"
+LEGACY_DEFAULT_COLIMA_HOME="$HOME/.nova/colima-dev"
+COLIMA_HOME="${ENTROPIC_COLIMA_HOME:-$DEFAULT_COLIMA_HOME}"
 ACTIVE_DOCKER_HOST=""
 SCRIPT_BIN_DIRS="${PROJECT_ROOT}/src-tauri/target/debug/resources/bin:${PROJECT_ROOT}/src-tauri/resources/bin"
 
 usage() {
-  local default_colima_home="${NOVA_COLIMA_HOME:-$DEFAULT_COLIMA_HOME}"
+  local default_colima_home="${ENTROPIC_COLIMA_HOME:-$DEFAULT_COLIMA_HOME}"
 
   cat <<USAGE
 Usage: ./scripts/dev-runtime.sh <command>
 
 By default, this script uses the isolated runtime home:
   ${default_colima_home}
-Set NOVA_COLIMA_HOME to override.
+Set ENTROPIC_COLIMA_HOME to override.
 
 Commands:
-  status       Print current Docker/Colima and Nova container status
+  status       Print current Docker/Colima and Entropic container status
   start        Start Colima (if available), then confirm Docker is ready
   up           Run \`pnpm tauri:dev\` after prep for Colima/Docker
-  stop         Stop Nova containers (gateway + scanner)
-  prune        Remove Nova containers and nova-net
-  logs [name]  Tail logs for nova-openclaw or nova-skill-scanner
+  stop         Stop Entropic containers (gateway + scanner)
+  prune        Remove Entropic containers and entropic-net
+  logs [name]  Tail logs for entropic-openclaw or entropic-skill-scanner
   help         Show this help
 USAGE
 }
@@ -91,7 +92,9 @@ run_colima() {
   "$COLIMA_BIN" "$@"
 }
 
-colima_profiles=(nova-vz nova-qemu)
+colima_profiles=(entropic-vz entropic-qemu)
+legacy_colima_profiles=(nova-vz nova-qemu)
+all_colima_profiles=("${colima_profiles[@]}" "${legacy_colima_profiles[@]}")
 colima_vm_types=(vz qemu)
 
 resolve_docker_host() {
@@ -99,15 +102,21 @@ resolve_docker_host() {
   local candidate_homes=(
     "$COLIMA_HOME"
     "$DEFAULT_COLIMA_HOME"
+    "$LEGACY_DEFAULT_COLIMA_HOME"
+    "$HOME/.entropic/colima"
     "$HOME/.nova/colima"
   )
   local home
   local sock
+  local candidate
   for home in "${candidate_homes[@]}"; do
     sock="$home/$profile/docker.sock"
     if [ -S "$sock" ]; then
-      echo "unix://$sock"
-      return 0
+      candidate="unix://$sock"
+      if docker_host_is_available "$candidate"; then
+        echo "$candidate"
+        return 0
+      fi
     fi
   done
   return 1
@@ -129,10 +138,12 @@ resolve_working_docker_host() {
 
   # Re-scan known Colima homes in case environment changed across sessions.
   local profile home sock candidate
-  for profile in "${colima_profiles[@]}"; do
+  for profile in "${all_colima_profiles[@]}"; do
     for home in \
       "$COLIMA_HOME" \
       "$DEFAULT_COLIMA_HOME" \
+      "$LEGACY_DEFAULT_COLIMA_HOME" \
+      "$HOME/.entropic/colima" \
       "$HOME/.nova/colima" \
       "$HOME/.colima"; do
       [ -d "$home" ] || continue
@@ -186,28 +197,38 @@ colima_running_profile() {
   local profile=$1
   local sock
   local home
+  local candidate
   local candidate_homes=(
     "$COLIMA_HOME"
     "$DEFAULT_COLIMA_HOME"
+    "$LEGACY_DEFAULT_COLIMA_HOME"
+    "$HOME/.entropic/colima"
     "$HOME/.nova/colima"
   )
   for home in "${candidate_homes[@]}"; do
     sock="$home/$profile/docker.sock"
     if [ -S "$sock" ]; then
-      ACTIVE_DOCKER_HOST="unix://$sock"
-      return 0
+      candidate="unix://$sock"
+      if docker_host_is_available "$candidate"; then
+        ACTIVE_DOCKER_HOST="$candidate"
+        return 0
+      fi
+      echo "[dev] Found $profile socket at $sock but Docker API is not reachable yet." >&2
     fi
   done
 
   if [ -n "${COLIMA_BIN:-}" ] && run_colima status --profile "$profile" 2>/dev/null | grep -qi "running"; then
-    return 0
+    # Colima can report "running" while the docker.sock is stale/missing.
+    # Treat that as not-running so caller can restart the profile.
+    echo "[dev] Colima reports $profile running but no docker socket was found." >&2
+    return 1
   fi
 
   return 1
 }
 
 resolve_runtime_host() {
-  for profile in "${colima_profiles[@]}"; do
+  for profile in "${all_colima_profiles[@]}"; do
     if active="$(resolve_docker_host "$profile")"; then
       ACTIVE_DOCKER_HOST="$active"
       return 0
@@ -220,7 +241,7 @@ resolve_runtime_host() {
 colima_has_crash_marker() {
   local profile=$1
   local home log
-  for home in "$COLIMA_HOME" "$DEFAULT_COLIMA_HOME" "$HOME/.nova/colima"; do
+  for home in "$COLIMA_HOME" "$DEFAULT_COLIMA_HOME" "$LEGACY_DEFAULT_COLIMA_HOME" "$HOME/.entropic/colima" "$HOME/.nova/colima"; do
     log="$home/$profile/daemon/daemon.log"
     if [ -f "$log" ] && grep -q "signal: killed" "$log" 2>/dev/null; then
       return 0
@@ -254,6 +275,14 @@ _try_start_colima_profiles() {
       ACTIVE_DOCKER_HOST="$(resolve_docker_host "$profile")"
       echo "[dev] Colima already running: $profile"
       return 0
+    fi
+
+    # If Colima says profile is running but we couldn't resolve docker.sock,
+    # force-stop before attempting start so socket gets recreated cleanly.
+    if [ -n "${COLIMA_BIN:-}" ] && run_colima status --profile "$profile" 2>/dev/null | grep -qi "running"; then
+      echo "[dev] Forcing restart for $profile to recover missing docker socket..."
+      run_colima --profile "$profile" stop --force 2>/dev/null || true
+      sleep 1
     fi
 
     # Proactively reset if the daemon log shows the VM was OOM-killed.
@@ -368,15 +397,21 @@ start_stack() {
 }
 
 stop_stack() {
-  echo "[dev] Stopping Nova gateway containers..."
-  run_docker stop nova-openclaw nova-skill-scanner 2>/dev/null || true
-  echo "[dev] Nova gateway containers stopped."
+  echo "[dev] Stopping Entropic gateway containers..."
+  run_docker stop \
+    entropic-openclaw entropic-skill-scanner \
+    nova-openclaw nova-skill-scanner \
+    2>/dev/null || true
+  echo "[dev] Entropic gateway containers stopped."
 }
 
 prune_stack() {
-  echo "[dev] Removing Nova gateway containers and network artifacts..."
-  run_docker rm -f nova-openclaw nova-skill-scanner 2>/dev/null || true
-  run_docker network rm nova-net 2>/dev/null || true
+  echo "[dev] Removing Entropic gateway containers and network artifacts..."
+  run_docker rm -f \
+    entropic-openclaw entropic-skill-scanner \
+    nova-openclaw nova-skill-scanner \
+    2>/dev/null || true
+  run_docker network rm entropic-net nova-net 2>/dev/null || true
   echo "[dev] Cleanup complete."
 }
 
@@ -400,7 +435,7 @@ status() {
   fi
 
   if [ -n "${COLIMA_BIN:-}" ]; then
-    for profile in "${colima_profiles[@]}"; do
+    for profile in "${all_colima_profiles[@]}"; do
       if colima_running_profile "$profile"; then
         echo "[dev] Colima profile: $profile (running)"
       else
@@ -412,13 +447,25 @@ status() {
   fi
 
   echo "[dev] Containers:"
-  run_docker ps -a --filter "name=nova-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || true
+  local container_rows
+  container_rows="$(run_docker ps -a --format "{{.Names}}\t{{.Status}}\t{{.Ports}}" || true)"
+  if [ -n "$container_rows" ]; then
+    echo "NAMES	STATUS	PORTS"
+    echo "$container_rows" | awk -F '\t' '$1 ~ /^(entropic|nova)-/ { print }'
+  else
+    echo "[dev] (no containers)"
+  fi
 
   echo "[dev] Network:"
-  if run_docker network inspect nova-net >/dev/null 2>&1; then
-    echo "[dev] nova-net exists"
-  else
-    echo "[dev] nova-net missing"
+  local found_network=0
+  for network in entropic-net nova-net; do
+    if run_docker network inspect "$network" >/dev/null 2>&1; then
+      echo "[dev] ${network} exists"
+      found_network=1
+    fi
+  done
+  if [ "$found_network" -eq 0 ]; then
+    echo "[dev] entropic-net/nova-net missing"
   fi
 }
 
@@ -427,23 +474,37 @@ up_stack() {
 
   # Remove stale stopped gateway containers before launching a new one.
   # This avoids the Docker "name already in use" retry path.
-  STOPPED_CONTAINER_IDS="$(run_docker ps -aq -f "name=nova-openclaw" -f "status=exited" || true)"
-  if [ -n "$STOPPED_CONTAINER_IDS" ]; then
-    run_docker rm -f nova-openclaw >/dev/null 2>&1 || true
-  fi
+  for container in entropic-openclaw nova-openclaw; do
+    STOPPED_CONTAINER_IDS="$(run_docker ps -aq -f "name=$container" -f "status=exited" || true)"
+    if [ -n "$STOPPED_CONTAINER_IDS" ]; then
+      run_docker rm -f "$container" >/dev/null 2>&1 || true
+    fi
+  done
 
-  echo "[dev] Starting Nova app with runtime prepared..."
+  echo "[dev] Starting Entropic app with runtime prepared..."
   if [ -n "${ACTIVE_DOCKER_HOST}" ]; then
-    echo "[dev] Launching with NOVA_COLIMA_HOME=$COLIMA_HOME and DOCKER_HOST=$ACTIVE_DOCKER_HOST"
-    NOVA_COLIMA_HOME="$COLIMA_HOME" DOCKER_HOST="$ACTIVE_DOCKER_HOST" pnpm tauri:dev
+    echo "[dev] Launching with ENTROPIC_COLIMA_HOME=$COLIMA_HOME and DOCKER_HOST=$ACTIVE_DOCKER_HOST"
+    ENTROPIC_COLIMA_HOME="$COLIMA_HOME" DOCKER_HOST="$ACTIVE_DOCKER_HOST" pnpm tauri:dev
   else
-    echo "[dev] Launching with NOVA_COLIMA_HOME=$COLIMA_HOME"
-    NOVA_COLIMA_HOME="$COLIMA_HOME" pnpm tauri:dev
+    echo "[dev] Launching with ENTROPIC_COLIMA_HOME=$COLIMA_HOME"
+    ENTROPIC_COLIMA_HOME="$COLIMA_HOME" pnpm tauri:dev
   fi
 }
 
 tail_logs() {
-  local target="${1:-nova-openclaw}"
+  local target="${1:-}"
+  if [ -z "$target" ]; then
+    local candidate
+    for candidate in entropic-openclaw nova-openclaw; do
+      if run_docker ps -a --format "{{.Names}}" | grep -qx "$candidate"; then
+        target="$candidate"
+        break
+      fi
+    done
+    if [ -z "$target" ]; then
+      target="entropic-openclaw"
+    fi
+  fi
   run_docker logs --tail 200 -f "$target"
 }
 
@@ -464,7 +525,7 @@ case "${1:-help}" in
     prune_stack
     ;;
   logs)
-    tail_logs "${2:-nova-openclaw}"
+    tail_logs "${2:-}"
     ;;
   help|--help|-h)
     usage

@@ -1,6 +1,7 @@
 use crate::runtime::{
-    macos_docker_socket_candidates, nova_colima_home_path, Platform, Runtime, RuntimeStatus,
-    NOVA_QEMU_PROFILE, NOVA_VZ_PROFILE,
+    macos_docker_socket_candidates, entropic_colima_home_path, Platform, Runtime, RuntimeStatus,
+    ENTROPIC_QEMU_PROFILE, ENTROPIC_VZ_PROFILE, LEGACY_NOVA_QEMU_PROFILE,
+    LEGACY_NOVA_VZ_PROFILE,
 };
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -27,9 +28,9 @@ use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use url::Url;
 
-const NOVA_PROXY_DEV_ORIGIN: &str = "http://host.docker.internal:5174";
-const NOVA_PROXY_ALLOWED_HOSTS: &[&str] = &[
-    "nova.qu.ai",
+const ENTROPIC_PROXY_DEV_ORIGIN: &str = "http://host.docker.internal:5174";
+const ENTROPIC_PROXY_ALLOWED_HOSTS: &[&str] = &[
+    "entropic.qu.ai",
     "host.docker.internal",
     "localhost",
     "127.0.0.1",
@@ -39,8 +40,8 @@ const CLIENT_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 fn client_log_path() -> PathBuf {
     dirs::home_dir()
-        .map(|home| home.join("nova-runtime.log"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/nova-runtime.log"))
+        .map(|home| home.join("entropic-runtime.log"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/entropic-runtime.log"))
 }
 
 fn append_client_log_line(message: &str) -> Result<(), String> {
@@ -70,7 +71,7 @@ fn append_client_log_line(message: &str) -> Result<(), String> {
 fn get_docker_host() -> Option<String> {
     match Platform::detect() {
         Platform::MacOS => {
-            // Prefer Nova-managed Colima sockets, then Docker Desktop sockets.
+            // Prefer Entropic-managed Colima sockets, then Docker Desktop sockets.
             for socket in macos_docker_socket_candidates() {
                 if socket.exists() {
                     return Some(format!("unix://{}", socket.display()));
@@ -125,15 +126,15 @@ fn docker_binary_usable(candidate: &str) -> bool {
 fn resolve_container_proxy_base(proxy_url: &str) -> Result<String, String> {
     let trimmed = proxy_url.trim();
     if trimmed.is_empty() {
-        return Ok(NOVA_PROXY_DEV_ORIGIN.to_string());
+        return Ok(ENTROPIC_PROXY_DEV_ORIGIN.to_string());
     }
 
     if trimmed.starts_with('/') {
         let path = trimmed.trim_start_matches('/');
         return Ok(if path.is_empty() {
-            NOVA_PROXY_DEV_ORIGIN.trim_end_matches('/').to_string()
+            ENTROPIC_PROXY_DEV_ORIGIN.trim_end_matches('/').to_string()
         } else {
-            format!("{}/{}", NOVA_PROXY_DEV_ORIGIN.trim_end_matches('/'), path)
+            format!("{}/{}", ENTROPIC_PROXY_DEV_ORIGIN.trim_end_matches('/'), path)
         });
     }
 
@@ -150,9 +151,9 @@ fn resolve_container_proxy_base(proxy_url: &str) -> Result<String, String> {
     let host = url
         .host_str()
         .ok_or_else(|| "Invalid proxy URL: missing host.".to_string())?;
-    if !NOVA_PROXY_ALLOWED_HOSTS.contains(&host) {
+    if !ENTROPIC_PROXY_ALLOWED_HOSTS.contains(&host) {
         return Err(format!(
-            "Proxy host '{}' is not allowed. Configure NOVA_PROXY_BASE_URL with an allowed host.",
+            "Proxy host '{}' is not allowed. Configure ENTROPIC_PROXY_BASE_URL with an allowed host.",
             host
         ));
     }
@@ -179,7 +180,7 @@ fn resolve_container_openai_base(proxy_base: &str) -> String {
         return trimmed.to_string();
     }
     if trimmed.is_empty() {
-        return NOVA_PROXY_DEV_ORIGIN.to_string();
+        return ENTROPIC_PROXY_DEV_ORIGIN.to_string();
     }
     format!("{}/v1", trimmed)
 }
@@ -243,14 +244,14 @@ fn docker_command() -> Command {
 const RUNTIME_IMAGE: &str = "openclaw-runtime:latest";
 
 /// Registry to pull the runtime image from when not available locally.
-/// Override at build time with NOVA_RUNTIME_REGISTRY env var.
+/// Override at build time with ENTROPIC_RUNTIME_REGISTRY env var.
 fn runtime_registry_image() -> String {
     // Build-time override
-    if let Some(val) = option_env!("NOVA_RUNTIME_REGISTRY") {
+    if let Some(val) = option_env!("ENTROPIC_RUNTIME_REGISTRY") {
         return val.to_string();
     }
     // Runtime override
-    if let Ok(val) = std::env::var("NOVA_RUNTIME_REGISTRY") {
+    if let Ok(val) = std::env::var("ENTROPIC_RUNTIME_REGISTRY") {
         if !val.trim().is_empty() {
             return val;
         }
@@ -348,13 +349,13 @@ fn runtime_image_id() -> Result<Option<String>, String> {
             RuntimeImageInspectState::Unavailable(err) => {
                 if attempt < MAX_ATTEMPTS {
                     println!(
-                        "[Nova] Runtime image inspect unavailable (attempt {}/{}): {}. Retrying...",
+                        "[Entropic] Runtime image inspect unavailable (attempt {}/{}): {}. Retrying...",
                         attempt, MAX_ATTEMPTS, err
                     );
                     std::thread::sleep(Duration::from_millis(300));
                 } else {
                     println!(
-                        "[Nova] Runtime image inspect unavailable after {} attempts: {}. Proceeding with bundled runtime fallback.",
+                        "[Entropic] Runtime image inspect unavailable after {} attempts: {}. Proceeding with bundled runtime fallback.",
                         MAX_ATTEMPTS, err
                     );
                 }
@@ -370,14 +371,14 @@ fn find_runtime_tar() -> Option<PathBuf> {
 
     let mut search_dirs = Vec::new();
 
-    // Release bundle: .../Contents/MacOS/Nova → .../Contents/Resources/
+    // Release bundle: .../Contents/MacOS/Entropic → .../Contents/Resources/
     if let Some(contents_dir) = exe_dir.parent() {
         let resources = contents_dir.join("Resources");
         search_dirs.push(resources.clone());
         search_dirs.push(resources.join("resources"));
     }
 
-    // Dev mode: .../target/debug/nova → .../target/debug/resources/
+    // Dev mode: .../target/debug/entropic → .../target/debug/resources/
     search_dirs.push(exe_dir.join("resources"));
     // Also check src-tauri/resources/ (when running from project root)
     search_dirs.push(exe_dir.join("..").join("..").join("resources"));
@@ -395,18 +396,18 @@ fn find_runtime_tar() -> Option<PathBuf> {
 }
 
 fn load_runtime_from_tar(tar_path: &Path) -> Result<bool, String> {
-    println!("[Nova] Loading runtime image from {}", tar_path.display());
+    println!("[Entropic] Loading runtime image from {}", tar_path.display());
     let load = docker_command()
         .args(["load", "-i"])
         .arg(tar_path)
         .output()
         .map_err(|e| format!("docker load failed: {}", e))?;
     if load.status.success() {
-        println!("[Nova] Runtime image loaded from bundled tar");
+        println!("[Entropic] Runtime image loaded from bundled tar");
         return Ok(true);
     }
     let stderr = String::from_utf8_lossy(&load.stderr);
-    println!("[Nova] docker load failed: {}", stderr);
+    println!("[Entropic] docker load failed: {}", stderr);
     Ok(false)
 }
 
@@ -415,7 +416,7 @@ fn ensure_runtime_image() -> Result<(), String> {
 
     if let Some(tar_path) = find_runtime_tar() {
         let tar_signature = bundled_runtime_signature_from_manifest(&tar_path).map_err(|e| {
-            println!("[Nova] Failed to read bundled runtime signature: {}", e);
+            println!("[Entropic] Failed to read bundled runtime signature: {}", e);
             e
         });
 
@@ -431,7 +432,7 @@ fn ensure_runtime_image() -> Result<(), String> {
                 }
                 require_local_reload = true;
                 println!(
-                    "[Nova] Runtime image signature changed (local: {}, bundled: {}). Reloading bundled runtime image.",
+                    "[Entropic] Runtime image signature changed (local: {}, bundled: {}). Reloading bundled runtime image.",
                     local_signature, tar_signature
                 );
             }
@@ -441,7 +442,7 @@ fn ensure_runtime_image() -> Result<(), String> {
             }
         }
 
-        println!("[Nova] Falling back to docker image lookup/pull flow for runtime image.");
+        println!("[Entropic] Falling back to docker image lookup/pull flow for runtime image.");
     }
 
     // 2. Already present?
@@ -453,19 +454,19 @@ fn ensure_runtime_image() -> Result<(), String> {
         return Ok(());
     }
 
-    println!("[Nova] Runtime image not found locally, attempting to load/pull...");
+    println!("[Entropic] Runtime image not found locally, attempting to load/pull...");
 
     if let Some(tar_path) = find_runtime_tar() {
         match load_runtime_from_tar(&tar_path) {
             Ok(true) => return Ok(()),
             Ok(false) => {} // no tar found or load failed, continue
-            Err(e) => println!("[Nova] Bundled tar check failed: {}", e),
+            Err(e) => println!("[Entropic] Bundled tar check failed: {}", e),
         }
     }
 
     // 3. Pull from registry
     let registry_image = runtime_registry_image();
-    println!("[Nova] Pulling runtime image from {}...", registry_image);
+    println!("[Entropic] Pulling runtime image from {}...", registry_image);
     let pull = docker_command()
         .args(["pull", &registry_image])
         .output()
@@ -478,12 +479,12 @@ fn ensure_runtime_image() -> Result<(), String> {
                 .args(["tag", &registry_image, RUNTIME_IMAGE])
                 .output();
         }
-        println!("[Nova] Runtime image pulled successfully");
+        println!("[Entropic] Runtime image pulled successfully");
         return Ok(());
     }
 
     let stderr = String::from_utf8_lossy(&pull.stderr);
-    println!("[Nova] Pull failed: {}", stderr);
+    println!("[Entropic] Pull failed: {}", stderr);
 
     Err(format!(
         "OpenClaw runtime image not available.\n\
@@ -497,18 +498,18 @@ fn ensure_runtime_image() -> Result<(), String> {
 
 /// Ensure the scanner image is available locally.
 /// 1. If already present → return Ok immediately.
-/// 2. Try loading a bundled tar (resources/nova-skill-scanner.tar.gz or .tar).
+/// 2. Try loading a bundled tar (resources/entropic-skill-scanner.tar.gz or .tar).
 /// 3. Return an error if the image is still missing.
 fn ensure_scanner_image() -> Result<(), String> {
     let check = docker_command()
-        .args(["image", "inspect", "nova-skill-scanner:latest"])
+        .args(["image", "inspect", "entropic-skill-scanner:latest"])
         .output()
         .map_err(|e| format!("Failed to check scanner image: {}", e))?;
     if check.status.success() {
         return Ok(());
     }
 
-    println!("[Nova] Scanner image not found locally, attempting to load bundled tar...");
+    println!("[Entropic] Scanner image not found locally, attempting to load bundled tar...");
 
     let tar_loaded = (|| -> Result<bool, String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -516,39 +517,39 @@ fn ensure_scanner_image() -> Result<(), String> {
 
         let mut search_dirs = Vec::new();
 
-        // Release bundle: .../Contents/MacOS/Nova → .../Contents/Resources/
+        // Release bundle: .../Contents/MacOS/Entropic → .../Contents/Resources/
         if let Some(contents_dir) = exe_dir.parent() {
             let resources = contents_dir.join("Resources");
             search_dirs.push(resources.clone());
             search_dirs.push(resources.join("resources"));
         }
 
-        // Dev mode: .../target/debug/nova → .../target/debug/resources/
+        // Dev mode: .../target/debug/entropic → .../target/debug/resources/
         search_dirs.push(exe_dir.join("resources"));
         // Also check src-tauri/resources/ (when running from project root)
         search_dirs.push(exe_dir.join("..").join("..").join("resources"));
 
         for dir in &search_dirs {
             for name in &[
-                "nova-skill-scanner.tar.gz",
-                "nova-skill-scanner.tar",
+                "entropic-skill-scanner.tar.gz",
+                "entropic-skill-scanner.tar",
                 "skill-scanner.tar.gz",
                 "skill-scanner.tar",
             ] {
                 let tar_path = dir.join(name);
                 if tar_path.exists() {
-                    println!("[Nova] Loading scanner image from {}", tar_path.display());
+                    println!("[Entropic] Loading scanner image from {}", tar_path.display());
                     let load = docker_command()
                         .args(["load", "-i"])
                         .arg(&tar_path)
                         .output()
                         .map_err(|e| format!("docker load failed: {}", e))?;
                     if load.status.success() {
-                        println!("[Nova] Scanner image loaded from bundled tar");
+                        println!("[Entropic] Scanner image loaded from bundled tar");
                         return Ok(true);
                     }
                     let stderr = String::from_utf8_lossy(&load.stderr);
-                    println!("[Nova] Scanner docker load failed: {}", stderr);
+                    println!("[Entropic] Scanner docker load failed: {}", stderr);
                 }
             }
         }
@@ -597,7 +598,7 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
                                 "maxProtocol": 3,
                                 "client": {
                                     "id": "openclaw-probe",
-                                    "displayName": "Nova Health",
+                                    "displayName": "Entropic Health",
                                     "version": "0.1.0",
                                     "platform": "desktop",
                                     "mode": "probe"
@@ -1084,7 +1085,7 @@ impl Default for StoredAgentSettings {
                     enabled: true,
                 },
             ],
-            identity_name: "Nova".to_string(),
+            identity_name: "Entropic".to_string(),
             identity_avatar: None,
             imessage_enabled: false,
             imessage_cli_path: "/usr/local/bin/imsg".to_string(),
@@ -1136,10 +1137,15 @@ fn get_runtime(app: &AppHandle) -> Runtime {
     Runtime::new(resource_dir)
 }
 
-const OPENCLAW_CONTAINER: &str = "nova-openclaw";
-const SCANNER_CONTAINER: &str = "nova-skill-scanner";
+const OPENCLAW_CONTAINER: &str = "entropic-openclaw";
+const LEGACY_OPENCLAW_CONTAINER: &str = "nova-openclaw";
+const OPENCLAW_NETWORK: &str = "entropic-net";
+const LEGACY_OPENCLAW_NETWORK: &str = "nova-net";
+const OPENCLAW_DATA_VOLUME: &str = "entropic-openclaw-data";
+const LEGACY_OPENCLAW_DATA_VOLUME: &str = "nova-openclaw-data";
+const SCANNER_CONTAINER: &str = "entropic-skill-scanner";
 const SCANNER_HOST_PORT: &str = "19791";
-const NOVA_GATEWAY_SCHEMA_VERSION: &str = "2026-02-13";
+const ENTROPIC_GATEWAY_SCHEMA_VERSION: &str = "2026-02-13";
 const OPENCLAW_STATE_ROOT: &str = "/home/node/.openclaw";
 const WORKSPACE_ROOT: &str = "/data/workspace";
 const SKILLS_ROOT: &str = "/data/skills";
@@ -1148,7 +1154,12 @@ const LEGACY_SKILLS_ROOTS: &[&str] = &[
     "/data/workspace/skills",
     "/home/node/.openclaw/workspace/skills",
 ];
-const MANAGED_PLUGIN_IDS: &[&str] = &["nova-integrations", "nova-x"];
+const MANAGED_PLUGIN_IDS: &[&str] = &[
+    "entropic-integrations",
+    "nova-integrations",
+    "entropic-x",
+    "nova-x",
+];
 static GATEWAY_START_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 static APPLIED_AGENT_SETTINGS_FINGERPRINT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
@@ -1158,6 +1169,69 @@ fn gateway_start_lock() -> &'static AsyncMutex<()> {
 
 fn applied_agent_settings_fingerprint() -> &'static Mutex<Option<String>> {
     APPLIED_AGENT_SETTINGS_FINGERPRINT.get_or_init(|| Mutex::new(None))
+}
+
+fn named_gateway_container_exists(name: &str, running_only: bool) -> bool {
+    let name_filter = format!("name={}", name);
+    let mut args = vec!["ps", "-q", "-f", name_filter.as_str()];
+    if running_only {
+        args.extend(["-f", "status=running"]);
+    }
+    let output = docker_command().args(args).output().ok();
+    match output {
+        Some(out) if out.status.success() => !out.stdout.is_empty(),
+        _ => false,
+    }
+}
+
+fn gateway_container_exists(running_only: bool) -> bool {
+    [OPENCLAW_CONTAINER, LEGACY_OPENCLAW_CONTAINER]
+        .into_iter()
+        .any(|name| named_gateway_container_exists(name, running_only))
+}
+
+fn cleanup_legacy_gateway_artifacts() {
+    let check = docker_command()
+        .args(["ps", "-aq", "-f", &format!("name={}", LEGACY_OPENCLAW_CONTAINER)])
+        .output();
+    if let Ok(out) = check {
+        if !out.stdout.is_empty() {
+            println!(
+                "[Entropic] Removing legacy gateway container: {}",
+                LEGACY_OPENCLAW_CONTAINER
+            );
+            let _ = docker_command()
+                .args(["rm", "-f", LEGACY_OPENCLAW_CONTAINER])
+                .output();
+        }
+    }
+
+    let _ = docker_command()
+        .args(["network", "rm", LEGACY_OPENCLAW_NETWORK])
+        .output();
+}
+
+fn docker_volume_exists(name: &str) -> bool {
+    docker_command()
+        .args(["volume", "inspect", name])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+fn openclaw_data_volume_mount() -> String {
+    let volume_name = if docker_volume_exists(OPENCLAW_DATA_VOLUME) {
+        OPENCLAW_DATA_VOLUME
+    } else if docker_volume_exists(LEGACY_OPENCLAW_DATA_VOLUME) {
+        println!(
+            "[Entropic] Reusing legacy gateway data volume: {}",
+            LEGACY_OPENCLAW_DATA_VOLUME
+        );
+        LEGACY_OPENCLAW_DATA_VOLUME
+    } else {
+        OPENCLAW_DATA_VOLUME
+    };
+    format!("{}:/data", volume_name)
 }
 
 fn workspace_file(path: &str) -> String {
@@ -1501,10 +1575,10 @@ fn start_scanner_sidecar() {
             "--volumes-from",
             &format!("{}:ro", OPENCLAW_CONTAINER),
             "--network",
-            "nova-net",
+            OPENCLAW_NETWORK,
             "-p",
             &format!("127.0.0.1:{}:8000", SCANNER_HOST_PORT),
-            "nova-skill-scanner:latest",
+            "entropic-skill-scanner:latest",
         ])
         .output();
 
@@ -1528,10 +1602,10 @@ fn stop_scanner_sidecar() {
     let _ = docker_command().args(["stop", SCANNER_CONTAINER]).output();
 }
 
-/// Preserve Nova containers on app exit; keep state for faster resume.
+/// Preserve Entropic containers on app exit; keep state for faster resume.
 /// Called from the Tauri RunEvent::Exit handler.
 pub fn cleanup_on_exit() {
-    println!("[Nova] App exit requested — preserving running Nova containers.");
+    println!("[Entropic] App exit requested — preserving running Entropic containers.");
 }
 
 fn docker_exec_output(args: &[&str]) -> Result<String, String> {
@@ -1600,7 +1674,7 @@ fn clawhub_exec_with_retry(args: &[&str], max_retries: u32) -> Result<Output, St
         attempts += 1;
         let delay_secs = 2u64.pow(attempts); // 2, 4, 8 …
         eprintln!(
-            "[Nova] ClawHub rate-limited (attempt {}/{}), retrying in {}s…",
+            "[Entropic] ClawHub rate-limited (attempt {}/{}), retrying in {}s…",
             attempts,
             max_retries + 1,
             delay_secs
@@ -2242,6 +2316,30 @@ fn container_path_exists(path: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn container_plugin_exists(plugin_id: &str) -> bool {
+    if container_path_exists(&format!("/app/extensions/{}", plugin_id)) {
+        return true;
+    }
+    if let Some(skills_root) = read_container_env("ENTROPIC_SKILLS_PATH") {
+        let base = format!("{}/{}", skills_root.trim_end_matches('/'), plugin_id);
+        let current = format!("{}/current", base);
+        if container_path_exists(&current) || container_path_exists(&base) {
+            return true;
+        }
+    }
+    false
+}
+
+fn resolve_managed_plugin_id(primary: &'static str, legacy: &'static str) -> Option<&'static str> {
+    if container_plugin_exists(primary) {
+        Some(primary)
+    } else if container_plugin_exists(legacy) {
+        Some(legacy)
+    } else {
+        None
+    }
+}
+
 fn write_openclaw_config(value: &serde_json::Value) -> Result<(), String> {
     let payload = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
     write_container_file(&state_file("openclaw.json"), &payload)
@@ -2443,8 +2541,8 @@ fn apply_default_qmd_memory_config(
     }
 }
 
-fn append_nova_skills_mount(docker_args: &mut Vec<String>) {
-    let path = std::env::var("NOVA_SKILLS_PATH").ok().and_then(|p| {
+fn append_entropic_skills_mount(docker_args: &mut Vec<String>) {
+    let path = std::env::var("ENTROPIC_SKILLS_PATH").ok().and_then(|p| {
         let trimmed = p.trim().to_string();
         if trimmed.is_empty() {
             None
@@ -2454,11 +2552,11 @@ fn append_nova_skills_mount(docker_args: &mut Vec<String>) {
     });
 
     if let Some(host_path) = path {
-        println!("[Nova] Mounting nova-skills from: {}", host_path);
+        println!("[Entropic] Mounting entropic-skills from: {}", host_path);
         docker_args.push("-v".to_string());
-        docker_args.push(format!("{}:/data/nova-skills:ro", host_path));
+        docker_args.push(format!("{}:/data/entropic-skills:ro", host_path));
         docker_args.push("-e".to_string());
-        docker_args.push("NOVA_SKILLS_PATH=/data/nova-skills".to_string());
+        docker_args.push("ENTROPIC_SKILLS_PATH=/data/entropic-skills".to_string());
     }
 }
 
@@ -2468,9 +2566,9 @@ async fn call_whatsapp_qr_endpoint(
     token: &str,
 ) -> Result<WhatsAppLoginState, String> {
     let base = if std::path::Path::new("/.dockerenv").exists() {
-        "http://nova-openclaw:18789"
+        format!("http://{}:18789", OPENCLAW_CONTAINER)
     } else {
-        "http://127.0.0.1:19789"
+        "http://127.0.0.1:19789".to_string()
     };
     let url = format!(
         "{}/channels/whatsapp/qr?action={}&force={}",
@@ -2638,7 +2736,7 @@ fn list_extension_manifests() -> Result<Vec<serde_json::Value>, String> {
         add_manifest(&path, &mut manifests_by_id);
     }
 
-    if let Some(skills_root) = read_container_env("NOVA_SKILLS_PATH") {
+    if let Some(skills_root) = read_container_env("ENTROPIC_SKILLS_PATH") {
         let normalized_root = skills_root.trim_end_matches('/');
         for skill_id in collect_skill_ids()? {
             let candidate = resolve_installed_skill_dir(&skill_id)?;
@@ -2761,11 +2859,11 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
         .iter()
         .map(|(_, path)| path.to_string())
         .collect();
-    let proxy_mode = read_container_env("NOVA_PROXY_MODE").is_some();
-    let base_url = read_container_env("NOVA_PROXY_BASE_URL");
+    let proxy_mode = read_container_env("ENTROPIC_PROXY_MODE").is_some();
+    let base_url = read_container_env("ENTROPIC_PROXY_BASE_URL");
     let model = read_container_env("OPENCLAW_MODEL");
     let image_model = read_container_env("OPENCLAW_IMAGE_MODEL");
-    let web_base_url = read_container_env("NOVA_WEB_BASE_URL");
+    let web_base_url = read_container_env("ENTROPIC_WEB_BASE_URL");
     let container_id = container_instance_id();
     let openai_key_for_lancedb = {
         let keys = state.api_keys.lock().map_err(|e| e.to_string())?;
@@ -2822,7 +2920,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
     let identity_path = workspace_file("IDENTITY.md");
     let memory_path = workspace_file("MEMORY.md");
     let soul_path = workspace_file("SOUL.md");
-    let thinking_level_env = read_container_env("NOVA_THINKING_LEVEL");
+    let thinking_level_env = read_container_env("ENTROPIC_THINKING_LEVEL");
     let fingerprint_payload = serde_json::json!({
         "container_id": container_id,
         "proxy_mode": proxy_mode,
@@ -3016,23 +3114,29 @@ Use it for durable decisions, preferences, and facts that should persist across 
         serde_json::json!("/data/cron/jobs.json"),
     );
 
-    // Ensure Nova integrations plugin is enabled (OAuth bridge tools).
-    set_openclaw_config_value(
-        &mut cfg,
-        &["plugins", "entries", "nova-integrations", "enabled"],
-        serde_json::json!(true),
-    );
+    // Ensure integrations plugin is enabled (Entropic or legacy Nova id, depending on runtime image).
+    let integrations_plugin_id =
+        resolve_managed_plugin_id("entropic-integrations", "nova-integrations");
+    remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "entropic-integrations"]);
+    remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "nova-integrations"]);
+    if let Some(plugin_id) = integrations_plugin_id {
+        set_openclaw_config_value(
+            &mut cfg,
+            &["plugins", "entries", plugin_id, "enabled"],
+            serde_json::json!(true),
+        );
+    }
 
     // Ensure optional plugin tools are allowed without restricting core tools.
-    const NOVA_INTEGRATION_TOOLS: [&str; 5] = [
+    const ENTROPIC_INTEGRATION_TOOLS: [&str; 5] = [
         "calendar_list",
         "calendar_create",
         "gmail_search",
         "gmail_get",
         "gmail_send",
     ];
-    const NOVA_X_TOOLS: [&str; 4] = ["x_search", "x_profile", "x_thread", "x_user_tweets"];
-    const NOVA_CORE_TOOLS: [&str; 1] = ["image"];
+    const ENTROPIC_X_TOOLS: [&str; 4] = ["x_search", "x_profile", "x_thread", "x_user_tweets"];
+    const ENTROPIC_CORE_TOOLS: [&str; 1] = ["image"];
 
     let mut workspace_skill_ids: Vec<String> = installed_skill_paths
         .iter()
@@ -3071,29 +3175,32 @@ Use it for durable decisions, preferences, and facts that should persist across 
         }
     }
 
-    // Enable nova-x plugin if it exists (bundled or mounted).
-    let mut has_nova_x = container_path_exists("/app/extensions/nova-x");
-    let mut nova_x_path: Option<String> = None;
-    if let Some(skills_root) = read_container_env("NOVA_SKILLS_PATH") {
-        let base = format!("{}/nova-x", skills_root.trim_end_matches('/'));
-        let current = format!("{}/current", base);
-        let candidate = if container_path_exists(&current) {
-            current
-        } else {
-            base
-        };
-        if container_path_exists(&candidate) {
-            has_nova_x = true;
-            nova_x_path = Some(candidate);
+    // Enable x plugin if it exists (entropic-x or legacy nova-x).
+    let x_plugin_id = resolve_managed_plugin_id("entropic-x", "nova-x");
+    remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "entropic-x"]);
+    remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "nova-x"]);
+    let mut has_x_plugin = false;
+    let mut x_plugin_path: Option<String> = None;
+    if let Some(plugin_id) = x_plugin_id {
+        has_x_plugin = true;
+        if let Some(skills_root) = read_container_env("ENTROPIC_SKILLS_PATH") {
+            let base = format!("{}/{}", skills_root.trim_end_matches('/'), plugin_id);
+            let current = format!("{}/current", base);
+            let candidate = if container_path_exists(&current) {
+                current
+            } else {
+                base
+            };
+            if container_path_exists(&candidate) {
+                x_plugin_path = Some(candidate);
+            }
         }
-    }
-    if has_nova_x {
         set_openclaw_config_value(
             &mut cfg,
-            &["plugins", "entries", "nova-x", "enabled"],
+            &["plugins", "entries", plugin_id, "enabled"],
             serde_json::json!(true),
         );
-        if let Some(path) = nova_x_path {
+        if let Some(path) = x_plugin_path {
             let load_paths = cfg
                 .pointer_mut("/plugins/load/paths")
                 .and_then(|v| v.as_array_mut());
@@ -3135,22 +3242,26 @@ Use it for durable decisions, preferences, and facts that should persist across 
             *allow_entry = serde_json::json!([]);
         }
         if let Some(list) = allow_entry.as_array_mut() {
-            list.retain(|v| v.as_str().map(|s| s != "nova-integrations").unwrap_or(true));
-            for tool in NOVA_INTEGRATION_TOOLS {
+            list.retain(|v| {
+                v.as_str()
+                    .map(|s| s != "entropic-integrations" && s != "nova-integrations")
+                    .unwrap_or(true)
+            });
+            for tool in ENTROPIC_INTEGRATION_TOOLS {
                 let exists = list.iter().any(|v| v.as_str() == Some(tool));
                 if !exists {
                     list.push(serde_json::json!(tool));
                 }
             }
-            if has_nova_x {
-                for tool in NOVA_X_TOOLS {
+            if has_x_plugin {
+                for tool in ENTROPIC_X_TOOLS {
                     let exists = list.iter().any(|v| v.as_str() == Some(tool));
                     if !exists {
                         list.push(serde_json::json!(tool));
                     }
                 }
             }
-            for tool in NOVA_CORE_TOOLS {
+            for tool in ENTROPIC_CORE_TOOLS {
                 let exists = list.iter().any(|v| v.as_str() == Some(tool));
                 if !exists {
                     list.push(serde_json::json!(tool));
@@ -3441,12 +3552,12 @@ Use it for durable decisions, preferences, and facts that should persist across 
         disable_legacy_messaging_config(&mut cfg);
     }
 
-    // Set thinking level from NOVA_THINKING_LEVEL env var (set by start_gateway from model suffix)
+    // Set thinking level from ENTROPIC_THINKING_LEVEL env var (set by start_gateway from model suffix)
     // Use the value already read for the fingerprint to avoid a second docker exec
     if let Some(ref thinking_level) = thinking_level_env {
         let level = thinking_level.trim();
         println!(
-            "[Nova] apply_agent_settings: NOVA_THINKING_LEVEL={:?}, setting thinkingDefault={}",
+            "[Entropic] apply_agent_settings: ENTROPIC_THINKING_LEVEL={:?}, setting thinkingDefault={}",
             thinking_level,
             if !level.is_empty() && level != "off" { level } else { "off" }
         );
@@ -3464,11 +3575,11 @@ Use it for durable decisions, preferences, and facts that should persist across 
             );
         }
     } else {
-        println!("[Nova] apply_agent_settings: NOVA_THINKING_LEVEL not set in container env");
+        println!("[Entropic] apply_agent_settings: ENTROPIC_THINKING_LEVEL not set in container env");
     }
 
     println!(
-        "[Nova] apply_agent_settings: writing openclaw.json with model={:?}",
+        "[Entropic] apply_agent_settings: writing openclaw.json with model={:?}",
         cfg.get("agents")
             .and_then(|a| a.get("defaults"))
             .and_then(|d| d.get("model"))
@@ -3485,13 +3596,13 @@ Use it for durable decisions, preferences, and facts that should persist across 
         if let (Some(meta), Some(access_token)) = (openai_meta, openai_key) {
             if meta.source == "openai_codex" && !access_token.is_empty() {
                 println!(
-                    "[Nova] Writing OpenAI Codex OAuth credentials to auth-profiles.json (token len={})",
+                    "[Entropic] Writing OpenAI Codex OAuth credentials to auth-profiles.json (token len={})",
                     access_token.len()
                 );
                 let auth_profiles = serde_json::json!({
                     "version": 1,
                     "profiles": {
-                        "openai-codex:nova": {
+                        "openai-codex:entropic": {
                             "type": "oauth",
                             "provider": "openai-codex",
                             "access": access_token,
@@ -3506,12 +3617,12 @@ Use it for durable decisions, preferences, and facts that should persist across 
                     "/home/node/.openclaw/agents/main/agent/auth-profiles.json",
                     &payload,
                 ) {
-                    println!("[Nova] Failed to write auth-profiles.json: {}", e);
+                    println!("[Entropic] Failed to write auth-profiles.json: {}", e);
                 }
             }
         } else {
             println!(
-                "[Nova] No OpenAI Codex OAuth credentials found (meta={}, key={})",
+                "[Entropic] No OpenAI Codex OAuth credentials found (meta={}, key={})",
                 stored.oauth_metadata.contains_key("openai"),
                 stored.keys.contains_key("openai"),
             );
@@ -3536,16 +3647,217 @@ fn auth_store_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("auth.json"))
 }
 
+const LEGACY_NOVA_APP_IDENTIFIER: &str = "ai.openclaw.nova";
+const LEGACY_NOVA_STORE_FILE_MAPPINGS: &[(&str, &str)] = &[
+    ("nova-auth.json", "entropic-auth.json"),
+    ("nova-profile.json", "entropic-profile.json"),
+    ("nova-settings.json", "entropic-settings.json"),
+    ("nova-chat-history.json", "entropic-chat-history.json"),
+    ("nova-integrations.json", "entropic-integrations.json"),
+    ("nova-integrations.hold", "entropic-integrations.hold"),
+];
+
+fn legacy_nova_app_data_dir_candidates() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(
+            home.join("Library")
+                .join("Application Support")
+                .join(LEGACY_NOVA_APP_IDENTIFIER),
+        );
+        dirs.push(home.join(".local/share").join(LEGACY_NOVA_APP_IDENTIFIER));
+        dirs.push(
+            home.join("AppData")
+                .join("Roaming")
+                .join(LEGACY_NOVA_APP_IDENTIFIER),
+        );
+        dirs.push(
+            home.join("AppData")
+                .join("Local")
+                .join(LEGACY_NOVA_APP_IDENTIFIER),
+        );
+    }
+
+    if let Some(data_local) = dirs::data_local_dir() {
+        dirs.push(data_local.join(LEGACY_NOVA_APP_IDENTIFIER));
+    }
+    if let Some(data_dir) = dirs::data_dir() {
+        dirs.push(data_dir.join(LEGACY_NOVA_APP_IDENTIFIER));
+    }
+
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+fn find_legacy_nova_app_data_dir(current_data_dir: &Path) -> Option<PathBuf> {
+    legacy_nova_app_data_dir_candidates()
+        .into_iter()
+        .find(|path| path != current_data_dir && path.is_dir())
+}
+
+fn merge_auth_with_legacy(mut current: StoredAuth, legacy: StoredAuth) -> StoredAuth {
+    for (provider, key) in legacy.keys {
+        current.keys.entry(provider).or_insert(key);
+    }
+
+    if current.active_provider.as_deref().unwrap_or("").trim().is_empty() {
+        current.active_provider = legacy.active_provider;
+    }
+    if current.gateway_token.as_deref().unwrap_or("").trim().is_empty() {
+        current.gateway_token = legacy.gateway_token;
+    }
+    if current.agent_settings.is_none() {
+        current.agent_settings = legacy.agent_settings;
+    }
+    for (provider, meta) in legacy.oauth_metadata {
+        current.oauth_metadata.entry(provider).or_insert(meta);
+    }
+
+    current.version = current.version.max(legacy.version);
+    current
+}
+
+fn migrate_legacy_nova_store_files(app: &AppHandle) -> Result<Vec<String>, String> {
+    let mut log = Vec::new();
+    let current_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "Failed to resolve app data dir".to_string())?;
+    fs::create_dir_all(&current_dir)
+        .map_err(|e| format!("Failed to create app data dir {}: {}", current_dir.display(), e))?;
+
+    let Some(legacy_dir) = find_legacy_nova_app_data_dir(&current_dir) else {
+        log.push("No legacy Nova app data directory found.".to_string());
+        return Ok(log);
+    };
+
+    log.push(format!(
+        "Found legacy Nova app data at {}",
+        legacy_dir.display()
+    ));
+
+    let mut migrated_any = false;
+
+    let legacy_auth_path = legacy_dir.join("auth.json");
+    if legacy_auth_path.exists() {
+        match fs::read_to_string(&legacy_auth_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<StoredAuth>(&raw).ok())
+        {
+            Some(legacy_auth) => {
+                let current_auth_path = current_dir.join("auth.json");
+                let current_auth = fs::read_to_string(&current_auth_path)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<StoredAuth>(&raw).ok())
+                    .unwrap_or_default();
+                let merged = merge_auth_with_legacy(current_auth, legacy_auth);
+                let payload = serde_json::to_string_pretty(&merged)
+                    .map_err(|e| format!("Failed to serialize merged auth store: {}", e))?;
+                fs::write(&current_auth_path, payload).map_err(|e| {
+                    format!(
+                        "Failed to write migrated auth store {}: {}",
+                        current_auth_path.display(),
+                        e
+                    )
+                })?;
+                log.push("Merged legacy auth.json into current app data.".to_string());
+                migrated_any = true;
+            }
+            None => {
+                log.push(format!(
+                    "Warning: Could not parse legacy auth store at {}",
+                    legacy_auth_path.display()
+                ));
+            }
+        }
+    }
+
+    for (legacy_name, current_name) in LEGACY_NOVA_STORE_FILE_MAPPINGS {
+        let source = legacy_dir.join(legacy_name);
+        if !source.exists() {
+            continue;
+        }
+        let dest = current_dir.join(current_name);
+        if dest.exists() {
+            continue;
+        }
+        fs::copy(&source, &dest).map_err(|e| {
+            format!(
+                "Failed to copy legacy file {} -> {}: {}",
+                source.display(),
+                dest.display(),
+                e
+            )
+        })?;
+        log.push(format!("Copied {} -> {}", legacy_name, current_name));
+        migrated_any = true;
+    }
+
+    if !migrated_any {
+        log.push(
+            "Legacy Nova directory exists, but no migration was needed (current files already present)."
+                .to_string(),
+        );
+    }
+
+    Ok(log)
+}
+
+pub fn migrate_legacy_nova_data_on_startup(app: &AppHandle) -> Result<(), String> {
+    let log = migrate_legacy_nova_store_files(app)?;
+    for line in log {
+        println!("[Entropic] {}", line);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn migrate_legacy_nova_data(app: AppHandle) -> Result<String, String> {
+    Ok(migrate_legacy_nova_store_files(&app)?.join("\n"))
+}
+
+#[tauri::command]
+pub async fn migrate_legacy_nova_install(
+    app: AppHandle,
+    cleanup_runtime: bool,
+) -> Result<String, String> {
+    let mut log = migrate_legacy_nova_store_files(&app)?;
+    if cleanup_runtime {
+        log.push("Running runtime cleanup after legacy data import...".to_string());
+        let cleanup = cleanup_app_data(app.clone(), true).await?;
+        log.extend(cleanup.lines().map(|line| line.to_string()));
+    }
+    Ok(log.join("\n"))
+}
+
 fn load_auth(app: &AppHandle) -> StoredAuth {
     let path = match auth_store_path(app) {
         Ok(p) => p,
         Err(_) => return StoredAuth::default(),
     };
-    let raw = match fs::read_to_string(&path) {
-        Ok(data) => data,
-        Err(_) => return StoredAuth::default(),
+    if let Ok(raw) = fs::read_to_string(&path) {
+        return serde_json::from_str(&raw).unwrap_or_default();
+    }
+
+    // Compatibility fallback for upgrades from Nova's old app identifier path.
+    let current_dir = match path.parent() {
+        Some(dir) => dir,
+        None => return StoredAuth::default(),
     };
-    serde_json::from_str(&raw).unwrap_or_default()
+    if let Some(legacy_dir) = find_legacy_nova_app_data_dir(current_dir) {
+        let legacy_auth_path = legacy_dir.join("auth.json");
+        if let Ok(raw) = fs::read_to_string(&legacy_auth_path) {
+            if let Ok(legacy_auth) = serde_json::from_str::<StoredAuth>(&raw) {
+                // Best-effort hydrate current path so future loads are direct.
+                let _ = save_auth(app, &legacy_auth);
+                return legacy_auth;
+            }
+        }
+    }
+
+    StoredAuth::default()
 }
 
 fn save_auth(app: &AppHandle, data: &StoredAuth) -> Result<(), String> {
@@ -3555,11 +3867,11 @@ fn save_auth(app: &AppHandle, data: &StoredAuth) -> Result<(), String> {
     Ok(())
 }
 
-fn gateway_ws_url() -> &'static str {
+fn gateway_ws_url() -> String {
     if std::path::Path::new("/.dockerenv").exists() {
-        "ws://nova-openclaw:18789"
+        format!("ws://{}:18789", OPENCLAW_CONTAINER)
     } else {
-        "ws://127.0.0.1:19789"
+        "ws://127.0.0.1:19789".to_string()
     }
 }
 
@@ -3587,7 +3899,7 @@ fn container_gateway_token() -> Option<String> {
 }
 
 fn expected_gateway_token(_app: &AppHandle) -> Result<String, String> {
-    if let Some(from_env) = normalize_token(std::env::var("NOVA_GATEWAY_TOKEN").ok()) {
+    if let Some(from_env) = normalize_token(std::env::var("ENTROPIC_GATEWAY_TOKEN").ok()) {
         return Ok(from_env);
     }
 
@@ -3630,7 +3942,7 @@ fn bridge_device_summaries(settings: &StoredAgentSettings) -> Vec<BridgeDeviceSu
         .map(|device| BridgeDeviceSummary {
             id: device.id.clone(),
             name: if device.name.trim().is_empty() {
-                "Nova Mobile".to_string()
+                "Entropic Mobile".to_string()
             } else {
                 device.name.clone()
             },
@@ -3694,7 +4006,7 @@ fn migrate_bridge_devices(settings: &mut StoredAgentSettings) -> bool {
         }
         device.id = id;
         if device.name.trim().is_empty() {
-            device.name = "Nova Mobile".to_string();
+            device.name = "Entropic Mobile".to_string();
             changed = true;
         }
         if device.owner_name.trim().is_empty() {
@@ -3727,7 +4039,7 @@ fn migrate_bridge_devices(settings: &mut StoredAgentSettings) -> bool {
         normalized.push(BridgeDeviceRecord {
             id: settings.bridge_device_id.trim().to_string(),
             name: if settings.bridge_device_name.trim().is_empty() {
-                "Nova Mobile".to_string()
+                "Entropic Mobile".to_string()
             } else {
                 settings.bridge_device_name.trim().to_string()
             },
@@ -3801,7 +4113,7 @@ fn build_bridge_pair_uri(settings: &StoredAgentSettings, token: &str) -> String 
     } else {
         settings.bridge_tailnet_ip.trim().to_string()
     };
-    let mut url = match Url::parse("nova-bridge://pair") {
+    let mut url = match Url::parse("entropic-bridge://pair") {
         Ok(url) => url,
         Err(_) => return String::new(),
     };
@@ -3873,7 +4185,6 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
         &["tools", "web", "search", "perplexity"],
         &["plugins", "slots"],
         &["plugins", "load", "paths"],
-        &["plugins", "entries", "nova-integrations"],
         &["plugins", "entries", "memory-lancedb"],
         &["plugins", "entries", "discord"],
         &["plugins", "entries", "telegram"],
@@ -4120,7 +4431,7 @@ async fn handle_bridge_http_connection(mut socket: tokio::net::TcpStream, app: A
                             http_json_response(
                                 400,
                                 "Bad Request",
-                                serde_json::json!({ "ok": false, "error": "Bridge is disabled in Nova desktop." }),
+                                serde_json::json!({ "ok": false, "error": "Bridge is disabled in Entropic desktop." }),
                             )
                         } else if device_id.is_empty() {
                             http_json_response(
@@ -4138,7 +4449,7 @@ async fn handle_bridge_http_connection(mut socket: tokio::net::TcpStream, app: A
                             let device_name = req
                                 .device_name
                                 .as_deref()
-                                .unwrap_or("Nova Mobile")
+                                .unwrap_or("Entropic Mobile")
                                 .trim()
                                 .to_string();
                             let owner_name = req
@@ -4162,7 +4473,7 @@ async fn handle_bridge_http_connection(mut socket: tokio::net::TcpStream, app: A
                                     "Too Many Requests",
                                     serde_json::json!({
                                         "ok": false,
-                                        "error": format!("Maximum paired device limit reached ({}). Remove a device in Nova Desktop and retry pairing.", MAX_BRIDGE_DEVICES)
+                                        "error": format!("Maximum paired device limit reached ({}). Remove a device in Entropic Desktop and retry pairing.", MAX_BRIDGE_DEVICES)
                                     }),
                                 )
                             } else {
@@ -4192,7 +4503,7 @@ async fn handle_bridge_http_connection(mut socket: tokio::net::TcpStream, app: A
                                     settings.bridge_devices.push(BridgeDeviceRecord {
                                         id: device_id.clone(),
                                         name: if device_name.is_empty() {
-                                            "Nova Mobile".to_string()
+                                            "Entropic Mobile".to_string()
                                         } else {
                                             device_name
                                         },
@@ -4301,7 +4612,7 @@ async fn run_bridge_server(app: AppHandle, port: u16) -> Result<(), String> {
     let listener = TcpListener::bind(("0.0.0.0", port))
         .await
         .map_err(|e| format!("Failed to bind bridge server on {}: {}", port, e))?;
-    println!("[Nova] Bridge server listening on 0.0.0.0:{}", port);
+    println!("[Entropic] Bridge server listening on 0.0.0.0:{}", port);
     loop {
         let (socket, _) = listener
             .accept()
@@ -4330,7 +4641,7 @@ fn ensure_bridge_server_running(
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(err) = run_bridge_server(app_handle, port).await {
-            eprintln!("[Nova] Bridge server stopped: {}", err);
+            eprintln!("[Entropic] Bridge server stopped: {}", err);
         }
     });
     Ok(())
@@ -4342,7 +4653,7 @@ fn redact_env_value(env: &str) -> String {
         "OPENAI_API_KEY=",
         "GEMINI_API_KEY=",
         "OPENROUTER_API_KEY=",
-        "NOVA_PROXY_BASE_URL=",
+        "ENTROPIC_PROXY_BASE_URL=",
     ];
     for prefix in SECRET_ENV_PREFIXES {
         if env.starts_with(prefix) {
@@ -4407,7 +4718,7 @@ fn gateway_env_file(entries: &[(&str, &str)]) -> Result<GatewayEnvFile, String> 
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let file_name = format!("nova-openclaw-env-{}-{}.env", std::process::id(), nanos);
+    let file_name = format!("entropic-openclaw-env-{}-{}.env", std::process::id(), nanos);
     let path = std::env::temp_dir().join(file_name);
     fs::write(&path, lines).map_err(|e| format!("Failed to create gateway env file: {}", e))?;
 
@@ -4446,7 +4757,7 @@ async fn wait_for_gateway_health_strict(token: &str, attempts: usize) -> Result<
         }
 
         if should_probe_ws {
-            match check_gateway_ws_health(ws_url, token).await {
+            match check_gateway_ws_health(&ws_url, token).await {
                 Ok(true) => return Ok(()),
                 Ok(false) => {
                     last_error = "health rpc rejected".to_string();
@@ -4509,21 +4820,7 @@ fn container_instance_id() -> Option<String> {
 }
 
 fn container_running() -> bool {
-    let output = docker_command()
-        .args([
-            "ps",
-            "-q",
-            "-f",
-            "name=nova-openclaw",
-            "-f",
-            "status=running",
-        ])
-        .output()
-        .ok();
-    match output {
-        Some(out) if out.status.success() => !out.stdout.is_empty(),
-        _ => false,
-    }
+    gateway_container_exists(true)
 }
 
 fn colima_daemon_killed_hint() -> Option<String> {
@@ -4531,8 +4828,8 @@ fn colima_daemon_killed_hint() -> Option<String> {
         return None;
     }
 
-    let colima_home = nova_colima_home_path();
-    for profile in [NOVA_VZ_PROFILE, NOVA_QEMU_PROFILE] {
+    let colima_home = entropic_colima_home_path();
+    for profile in [ENTROPIC_VZ_PROFILE, ENTROPIC_QEMU_PROFILE] {
         let daemon_log = colima_home.join(profile).join("daemon").join("daemon.log");
         let content = match fs::read_to_string(&daemon_log) {
             Ok(raw) => raw,
@@ -4545,13 +4842,13 @@ fn colima_daemon_killed_hint() -> Option<String> {
             .find(|line| line.contains("signal: killed"))
         {
             println!(
-                "[Nova] Colima daemon crash marker in {} ({}): {}",
+                "[Entropic] Colima daemon crash marker in {} ({}): {}",
                 profile,
                 daemon_log.display(),
                 line.trim()
             );
             return Some(format!(
-                "Detected Colima {} daemon crash marker (`signal: killed`) in {}. This usually means the VM was killed by host resource pressure; increase Nova runtime memory and keep Colima running.",
+                "Detected Colima {} daemon crash marker (`signal: killed`) in {}. This usually means the VM was killed by host resource pressure; increase Entropic runtime memory and keep Colima running.",
                 profile,
                 daemon_log.display()
             ));
@@ -4577,7 +4874,7 @@ fn finish_health_wait_or_tolerate_starting(err: String, context: &str) -> Result
         || err.contains("WebSocket protocol error")
     {
         println!(
-            "[Nova] {}: {} (continuing; container still warming up)",
+            "[Entropic] {}: {} (continuing; container still warming up)",
             context, err
         );
         return Ok(());
@@ -4596,7 +4893,7 @@ async fn recover_gateway_health(
         let health_status = container_health_status();
         if matches!(health_status.as_deref(), Some("starting")) {
             println!(
-                "[Nova] {} health check failed while health=starting; extending wait: {}",
+                "[Entropic] {} health check failed while health=starting; extending wait: {}",
                 label, initial
             );
             if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
@@ -4607,7 +4904,7 @@ async fn recover_gateway_health(
             }
         } else if matches!(health_status.as_deref(), Some("healthy")) {
             println!(
-                "[Nova] {} health check failed but container health=healthy; extending wait without restart: {}",
+                "[Entropic] {} health check failed but container health=healthy; extending wait without restart: {}",
                 label, initial
             );
             if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
@@ -4618,7 +4915,7 @@ async fn recover_gateway_health(
             }
         } else if matches!(health_status.as_deref(), Some("unhealthy")) || !container_running() {
             println!(
-                "[Nova] {} health check failed with container state {:?}; attempting restart: {}",
+                "[Entropic] {} health check failed with container state {:?}; attempting restart: {}",
                 label, health_status, initial
             );
             let restart = docker_command()
@@ -4631,7 +4928,7 @@ async fn recover_gateway_health(
                 let stderr = String::from_utf8_lossy(&restart.stderr);
                 if stderr.contains("is not running") || stderr.contains("no such container") {
                     println!(
-                        "[Nova] {} container is not running; removing and recreating...",
+                        "[Entropic] {} container is not running; removing and recreating...",
                         label
                     );
                     let cleanup = docker_command()
@@ -4640,7 +4937,7 @@ async fn recover_gateway_health(
                         .map_err(|e| format!("Failed to cleanup stale container: {}", e))?;
                     if !cleanup.status.success() {
                         println!(
-                            "[Nova] Container cleanup warning after restart failure: {}",
+                            "[Entropic] Container cleanup warning after restart failure: {}",
                             String::from_utf8_lossy(&cleanup.stderr)
                         );
                     }
@@ -4674,7 +4971,7 @@ async fn recover_gateway_health(
             }
         } else {
             println!(
-                "[Nova] {} health check failed with container state {:?}; extending wait without restart: {}",
+                "[Entropic] {} health check failed with container state {:?}; extending wait without restart: {}",
                 label, health_status, initial
             );
             if let Err(e) = wait_for_gateway_health_strict(token, 16).await {
@@ -4781,10 +5078,18 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
         let colima_homes = vec![
             home_dir.join(".nova").join("colima"),
             home_dir.join(".nova").join("colima-dev"),
+            home_dir.join(".entropic").join("colima"),
+            home_dir.join(".entropic").join("colima-dev"),
+        ];
+        let profiles = vec![
+            ENTROPIC_VZ_PROFILE,
+            ENTROPIC_QEMU_PROFILE,
+            LEGACY_NOVA_VZ_PROFILE,
+            LEGACY_NOVA_QEMU_PROFILE,
         ];
 
         for colima_home in &colima_homes {
-            for profile in &["nova-vz", "nova-qemu"] {
+            for profile in &profiles {
                 let socket = colima_home.join(profile).join("docker.sock");
                 if socket.exists() {
                     let host = format!("unix://{}", socket.display());
@@ -4818,20 +5123,38 @@ pub async fn cleanup_app_data(app: AppHandle, include_vms: bool) -> Result<Strin
 
         // Delete Colima VMs
         cleanup_log.push("Deleting Colima VMs...".to_string());
-        for profile in &["nova-vz", "nova-qemu"] {
-            let _ = std::process::Command::new("colima")
-                .args(&["delete", "-f", "-p", profile])
-                .output();
+        for colima_home in &colima_homes {
+            let prefix = if colima_home
+                .to_string_lossy()
+                .contains(&format!("{}{}", std::path::MAIN_SEPARATOR, ".nova"))
+            {
+                "Removing legacy"
+            } else {
+                "Removing runtime"
+            };
+            cleanup_log.push(format!("{} {}...", prefix, colima_home.display()));
+            for profile in &profiles {
+                let _ = std::process::Command::new("colima")
+                    .args(&["delete", "-f", "-p", profile])
+                    .env("COLIMA_HOME", colima_home)
+                    .env("LIMA_HOME", colima_home.join("_lima"))
+                    .output();
+            }
         }
         cleanup_log.push("Colima VMs deleted".to_string());
 
-        // Remove .nova directory (Colima state)
-        let nova_dir = home_dir.join(".nova");
-        if nova_dir.exists() {
-            if let Err(e) = fs::remove_dir_all(&nova_dir) {
-                cleanup_log.push(format!("Warning: Failed to remove {}: {}", nova_dir.display(), e));
-            } else {
-                cleanup_log.push(format!("Removed {}", nova_dir.display()));
+        // Remove runtime state directories from both naming eras.
+        for runtime_dir in [home_dir.join(".nova"), home_dir.join(".entropic")] {
+            if runtime_dir.exists() {
+                if let Err(e) = fs::remove_dir_all(&runtime_dir) {
+                    cleanup_log.push(format!(
+                        "Warning: Failed to remove {}: {}",
+                        runtime_dir.display(),
+                        e
+                    ));
+                } else {
+                    cleanup_log.push(format!("Removed {}", runtime_dir.display()));
+                }
             }
         }
     }
@@ -5024,7 +5347,7 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
         }
     }
     println!(
-        "[Nova] Startup timing: runtime_ready={}ms",
+        "[Entropic] Startup timing: runtime_ready={}ms",
         startup_started.elapsed().as_millis()
     );
 
@@ -5082,17 +5405,14 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
         .and_then(|p| p.strip_prefix("reasoning="))
         .unwrap_or("");
 
-    // Check if nova-openclaw container is already running with matching config
-    let check = docker_command()
-        .args(["ps", "-q", "-f", "name=nova-openclaw"])
-        .output()
-        .map_err(|e| format!("Failed to check container: {}", e))?;
+    cleanup_legacy_gateway_artifacts();
 
-    if !check.stdout.is_empty() {
+    // Check if gateway container is already running with matching config
+    if named_gateway_container_exists(OPENCLAW_CONTAINER, true) {
         let current_gateway_token = read_container_env("OPENCLAW_GATEWAY_TOKEN");
-        let current_schema = read_container_env("NOVA_GATEWAY_SCHEMA_VERSION");
+        let current_schema = read_container_env("ENTROPIC_GATEWAY_SCHEMA_VERSION");
         let current_model = read_container_env("OPENCLAW_MODEL");
-        let current_proxy_mode = read_container_env("NOVA_PROXY_MODE");
+        let current_proxy_mode = read_container_env("ENTROPIC_PROXY_MODE");
         // Check if the Anthropic auth type matches (OAuth token vs API key)
         let has_oauth_token = read_container_env("ANTHROPIC_OAUTH_TOKEN").is_some();
         let wants_oauth_token = api_keys.get("anthropic").map_or(false, |k| k.starts_with("sk-ant-oat01-"));
@@ -5103,7 +5423,7 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
         if !is_proxy_container
             && auth_type_matches
             && current_gateway_token.as_deref() == Some(gateway_token.as_str())
-            && current_schema.as_deref() == Some(NOVA_GATEWAY_SCHEMA_VERSION)
+            && current_schema.as_deref() == Some(ENTROPIC_GATEWAY_SCHEMA_VERSION)
             && current_model.as_deref() == Some(base_model)
         {
             apply_agent_settings(&app, &state)?;
@@ -5113,32 +5433,33 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
 
         // Container config doesn't match — recreate it.
         let _ = docker_command()
-            .args(["rm", "-f", "nova-openclaw"])
+            .args(["rm", "-f", OPENCLAW_CONTAINER])
             .output();
     }
 
     // Check if container exists but stopped
+    let any_filter = format!("name={}", OPENCLAW_CONTAINER);
     let check_all = docker_command()
-        .args(["ps", "-aq", "-f", "name=nova-openclaw"])
+        .args(["ps", "-aq", "-f", any_filter.as_str()])
         .output()
         .map_err(|e| format!("Failed to check container: {}", e))?;
 
     if !check_all.stdout.is_empty() {
         let _ = docker_command()
-            .args(["rm", "-f", "nova-openclaw"])
+            .args(["rm", "-f", OPENCLAW_CONTAINER])
             .output();
     }
 
     // Create network if it doesn't exist
     let _ = docker_command()
-        .args(["network", "create", "nova-net"])
+        .args(["network", "create", OPENCLAW_NETWORK])
         .output();
 
     // Ensure runtime image is available
     let image_started = Instant::now();
     ensure_runtime_image()?;
     println!(
-        "[Nova] Startup timing: runtime_image_ready={}ms",
+        "[Entropic] Startup timing: runtime_image_ready={}ms",
         image_started.elapsed().as_millis()
     );
 
@@ -5154,24 +5475,24 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
     // Build docker run command - pass API keys as env vars
     let mut env_entries: Vec<(&str, &str)> = vec![
         ("OPENCLAW_GATEWAY_TOKEN", gateway_token.as_str()),
-        ("NOVA_GATEWAY_SCHEMA_VERSION", NOVA_GATEWAY_SCHEMA_VERSION),
+        ("ENTROPIC_GATEWAY_SCHEMA_VERSION", ENTROPIC_GATEWAY_SCHEMA_VERSION),
         // OPENCLAW_MODEL is read by apply_agent_settings to write openclaw.json config.
         // Keep base model and pass reasoning/thinking separately.
         ("OPENCLAW_MODEL", base_model),
         ("OPENCLAW_MEMORY_SLOT", memory_slot),
-        // NOVA_THINKING_LEVEL is read by apply_agent_settings to set thinkingDefault in config
-        ("NOVA_THINKING_LEVEL", thinking_level),
-        ("NOVA_WORKSPACE_PATH", WORKSPACE_ROOT),
-        ("NOVA_SKILLS_PATH", SKILLS_ROOT),
-        ("NOVA_SKILL_MANIFESTS_PATH", SKILL_MANIFESTS_ROOT),
+        // ENTROPIC_THINKING_LEVEL is read by apply_agent_settings to set thinkingDefault in config
+        ("ENTROPIC_THINKING_LEVEL", thinking_level),
+        ("ENTROPIC_WORKSPACE_PATH", WORKSPACE_ROOT),
+        ("ENTROPIC_SKILLS_PATH", SKILLS_ROOT),
+        ("ENTROPIC_SKILL_MANIFESTS_PATH", SKILL_MANIFESTS_ROOT),
         ("HOME", "/data"),
         ("TMPDIR", "/data/tmp"),
         ("XDG_CONFIG_HOME", "/data/.config"),
         ("XDG_CACHE_HOME", "/data/.cache"),
         ("npm_config_cache", "/data/.npm"),
         ("PLAYWRIGHT_BROWSERS_PATH", "/data/playwright"),
-        ("NOVA_BROWSER_PROFILE", "/data/browser/profile"),
-        ("NOVA_TOOLS_PATH", "/data/tools"),
+        ("ENTROPIC_BROWSER_PROFILE", "/data/browser/profile"),
+        ("ENTROPIC_TOOLS_PATH", "/data/tools"),
     ];
 
     // Anthropic: use ANTHROPIC_OAUTH_TOKEN for OAuth tokens (sk-ant-oat01-...), ANTHROPIC_API_KEY for regular keys
@@ -5195,13 +5516,13 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
         env_entries.push(("GEMINI_API_KEY", key.as_str()));
     }
     let mut web_base_url = None;
-    if let Ok(base) = std::env::var("NOVA_WEB_BASE_URL") {
+    if let Ok(base) = std::env::var("ENTROPIC_WEB_BASE_URL") {
         if !base.trim().is_empty() {
             web_base_url = Some(base);
         }
     }
     if let Some(base) = web_base_url.as_deref() {
-        env_entries.push(("NOVA_WEB_BASE_URL", base));
+        env_entries.push(("ENTROPIC_WEB_BASE_URL", base));
     }
 
     let env_file = gateway_env_file(&env_entries)?;
@@ -5211,7 +5532,7 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
         "run".to_string(),
         "-d".to_string(),
         "--name".to_string(),
-        "nova-openclaw".to_string(),
+        OPENCLAW_CONTAINER.to_string(),
         "--restart".to_string(),
         "unless-stopped".to_string(),
         "--user".to_string(),
@@ -5232,21 +5553,21 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
         env_file_path,
     ];
 
-    append_nova_skills_mount(&mut docker_args);
+    append_entropic_skills_mount(&mut docker_args);
 
     // Add remaining args (always use bridge networking)
     docker_args.extend([
         "-v".to_string(),
-        "nova-openclaw-data:/data".to_string(),
+        openclaw_data_volume_mount(),
         "--network".to_string(),
-        "nova-net".to_string(),
+        OPENCLAW_NETWORK.to_string(),
         "-p".to_string(),
         gateway_bind.to_string(),
         "openclaw-runtime:latest".to_string(),
     ]);
 
     // Dev-only: bind-mount local OpenClaw dist/extensions to avoid image rebuilds
-    if let Ok(source) = std::env::var("NOVA_DEV_OPENCLAW_SOURCE") {
+    if let Ok(source) = std::env::var("ENTROPIC_DEV_OPENCLAW_SOURCE") {
         if !source.trim().is_empty() {
             docker_args.push("-v".to_string());
             docker_args.push(format!("{}/dist:/app/dist:ro", source));
@@ -5256,9 +5577,9 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
     }
 
     // Create and start container with hardened settings
-    println!("[Nova] Starting gateway container with model: {}", model_full);
+    println!("[Entropic] Starting gateway container with model: {}", model_full);
     println!(
-        "[Nova] Docker command: docker {}",
+        "[Entropic] Docker command: docker {}",
         docker_args_for_log(&docker_args)
     );
 
@@ -5270,16 +5591,16 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
 
     if !run.status.success() {
         let stderr = String::from_utf8_lossy(&run.stderr);
-        println!("[Nova] Failed to start container: {}", stderr);
+        println!("[Entropic] Failed to start container: {}", stderr);
         return Err(append_colima_runtime_hint(format!(
             "Failed to start container: {}",
             stderr
         )));
     }
 
-    println!("[Nova] Container started successfully");
+    println!("[Entropic] Container started successfully");
     println!(
-        "[Nova] Startup timing: container_launch={}ms",
+        "[Entropic] Startup timing: container_launch={}ms",
         container_launch_started.elapsed().as_millis()
     );
 
@@ -5287,7 +5608,7 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
     let settings_started = Instant::now();
     apply_agent_settings(&app, &state)?;
     println!(
-        "[Nova] Startup timing: post_launch_config={}ms",
+        "[Entropic] Startup timing: post_launch_config={}ms",
         settings_started.elapsed().as_millis()
     );
 
@@ -5303,10 +5624,10 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
         *cache = None;
     }
     apply_agent_settings(&app, &state)?;
-    println!("[Nova] Startup timing: post_health_config applied");
+    println!("[Entropic] Startup timing: post_health_config applied");
     start_scanner_sidecar_background();
     println!(
-        "[Nova] Startup timing: health={}ms total={}ms",
+        "[Entropic] Startup timing: health={}ms total={}ms",
         health_started.elapsed().as_millis(),
         startup_started.elapsed().as_millis()
     );
@@ -5318,23 +5639,25 @@ pub async fn start_gateway(app: AppHandle, state: State<'_, AppState>, model: Op
 pub async fn stop_gateway() -> Result<(), String> {
     stop_scanner_sidecar();
 
-    let stop = docker_command()
-        .args(["stop", "nova-openclaw"])
-        .output()
-        .map_err(|e| format!("Failed to stop container: {}", e))?;
+    for name in [OPENCLAW_CONTAINER, LEGACY_OPENCLAW_CONTAINER] {
+        let stop = docker_command()
+            .args(["stop", name])
+            .output()
+            .map_err(|e| format!("Failed to stop container: {}", e))?;
 
-    if !stop.status.success() {
-        // Container might not be running, that's OK
-        let stderr = String::from_utf8_lossy(&stop.stderr);
-        if !stderr.contains("No such container") {
-            return Err(format!("Failed to stop container: {}", stderr));
+        if !stop.status.success() {
+            // Container might not be running, that's OK
+            let stderr = String::from_utf8_lossy(&stop.stderr);
+            if !stderr.contains("No such container") {
+                return Err(format!("Failed to stop container {}: {}", name, stderr));
+            }
         }
     }
 
     Ok(())
 }
 
-/// Start gateway using the Nova proxy (for users without their own API keys)
+/// Start gateway using the Entropic proxy (for users without their own API keys)
 #[tauri::command]
 pub async fn start_gateway_with_proxy(
     app: AppHandle,
@@ -5346,6 +5669,7 @@ pub async fn start_gateway_with_proxy(
 ) -> Result<(), String> {
     let startup_started = Instant::now();
     let _start_guard = gateway_start_lock().lock().await;
+    cleanup_legacy_gateway_artifacts();
     let settings = load_agent_settings(&app);
     let gateway_bind = if settings.bridge_enabled {
         "0.0.0.0:19789:18789"
@@ -5374,31 +5698,31 @@ pub async fn start_gateway_with_proxy(
         }
     }
     println!(
-        "[Nova] Startup timing (proxy): runtime_ready={}ms",
+        "[Entropic] Startup timing (proxy): runtime_ready={}ms",
         startup_started.elapsed().as_millis()
     );
     let local_gateway_token = expected_gateway_token(&app)?;
     let build_proxy_docker_args = || -> Result<(Vec<String>, GatewayEnvFile), String> {
         let mut env_entries: Vec<(&str, &str)> = vec![
             ("OPENCLAW_GATEWAY_TOKEN", local_gateway_token.as_str()),
-            ("NOVA_GATEWAY_SCHEMA_VERSION", NOVA_GATEWAY_SCHEMA_VERSION),
+            ("ENTROPIC_GATEWAY_SCHEMA_VERSION", ENTROPIC_GATEWAY_SCHEMA_VERSION),
             ("OPENCLAW_MODEL", model.as_str()),
             ("OPENCLAW_MEMORY_SLOT", "memory-core"),
-            ("NOVA_PROXY_MODE", "1"),
+            ("ENTROPIC_PROXY_MODE", "1"),
             ("OPENROUTER_API_KEY", gateway_token.as_str()),
-            ("NOVA_PROXY_BASE_URL", docker_proxy_api_url.as_str()),
-            ("NOVA_WEB_BASE_URL", resolved_proxy_url.as_str()),
-            ("NOVA_WORKSPACE_PATH", WORKSPACE_ROOT),
-            ("NOVA_SKILLS_PATH", SKILLS_ROOT),
-            ("NOVA_SKILL_MANIFESTS_PATH", SKILL_MANIFESTS_ROOT),
+            ("ENTROPIC_PROXY_BASE_URL", docker_proxy_api_url.as_str()),
+            ("ENTROPIC_WEB_BASE_URL", resolved_proxy_url.as_str()),
+            ("ENTROPIC_WORKSPACE_PATH", WORKSPACE_ROOT),
+            ("ENTROPIC_SKILLS_PATH", SKILLS_ROOT),
+            ("ENTROPIC_SKILL_MANIFESTS_PATH", SKILL_MANIFESTS_ROOT),
             ("HOME", "/data"),
             ("TMPDIR", "/data/tmp"),
             ("XDG_CONFIG_HOME", "/data/.config"),
             ("XDG_CACHE_HOME", "/data/.cache"),
             ("npm_config_cache", "/data/.npm"),
             ("PLAYWRIGHT_BROWSERS_PATH", "/data/playwright"),
-            ("NOVA_BROWSER_PROFILE", "/data/browser/profile"),
-            ("NOVA_TOOLS_PATH", "/data/tools"),
+            ("ENTROPIC_BROWSER_PROFILE", "/data/browser/profile"),
+            ("ENTROPIC_TOOLS_PATH", "/data/tools"),
         ];
         if let Some(image_model) = image_model.as_deref() {
             if !image_model.trim().is_empty() {
@@ -5412,7 +5736,7 @@ pub async fn start_gateway_with_proxy(
             "run".to_string(),
             "-d".to_string(),
             "--name".to_string(),
-            "nova-openclaw".to_string(),
+            OPENCLAW_CONTAINER.to_string(),
             "--restart".to_string(),
             "unless-stopped".to_string(),
             "--user".to_string(),
@@ -5433,19 +5757,19 @@ pub async fn start_gateway_with_proxy(
             env_file_path,
         ];
 
-        append_nova_skills_mount(&mut docker_args);
+        append_entropic_skills_mount(&mut docker_args);
 
         docker_args.extend([
             "-v".to_string(),
-            "nova-openclaw-data:/data".to_string(),
+            openclaw_data_volume_mount(),
             "--network".to_string(),
-            "nova-net".to_string(),
+            OPENCLAW_NETWORK.to_string(),
             "-p".to_string(),
             gateway_bind.to_string(),
             "openclaw-runtime:latest".to_string(),
         ]);
 
-        if let Ok(source) = std::env::var("NOVA_DEV_OPENCLAW_SOURCE") {
+        if let Ok(source) = std::env::var("ENTROPIC_DEV_OPENCLAW_SOURCE") {
             if !source.trim().is_empty() {
                 docker_args.insert(docker_args.len() - 1, "-v".to_string());
                 docker_args.insert(
@@ -5464,17 +5788,12 @@ pub async fn start_gateway_with_proxy(
     };
 
     // Check if container is already running
-    let check = docker_command()
-        .args(["ps", "-q", "-f", "name=nova-openclaw"])
-        .output()
-        .map_err(|e| format!("Failed to check container: {}", e))?;
-
-    if !check.stdout.is_empty() {
+    if named_gateway_container_exists(OPENCLAW_CONTAINER, true) {
         let expected_proxy_env = docker_proxy_api_url.clone();
-        let current_proxy = read_container_env("NOVA_PROXY_BASE_URL");
+        let current_proxy = read_container_env("ENTROPIC_PROXY_BASE_URL");
         let current_token = read_container_env("OPENROUTER_API_KEY");
         let current_gateway_token = read_container_env("OPENCLAW_GATEWAY_TOKEN");
-        let current_schema = read_container_env("NOVA_GATEWAY_SCHEMA_VERSION");
+        let current_schema = read_container_env("ENTROPIC_GATEWAY_SCHEMA_VERSION");
         let current_model = read_container_env("OPENCLAW_MODEL");
         let current_image = read_container_env("OPENCLAW_IMAGE_MODEL");
         let expected_image = image_model.clone().unwrap_or_default();
@@ -5482,7 +5801,7 @@ pub async fn start_gateway_with_proxy(
         let proxy_matches = current_proxy.as_deref() == Some(expected_proxy_env.as_str());
         let gateway_token_matches =
             current_gateway_token.as_deref() == Some(local_gateway_token.as_str());
-        let schema_matches = current_schema.as_deref() == Some(NOVA_GATEWAY_SCHEMA_VERSION);
+        let schema_matches = current_schema.as_deref() == Some(ENTROPIC_GATEWAY_SCHEMA_VERSION);
         let model_matches = current_model.as_deref() == Some(model.as_str());
         let image_matches =
             expected_image.is_empty() || current_image.as_deref() == Some(expected_image.as_str());
@@ -5495,11 +5814,11 @@ pub async fn start_gateway_with_proxy(
             && image_matches
             && token_matches
         {
-            println!("[Nova] Proxy container already running with matching config. Reusing.");
+            println!("[Entropic] Proxy container already running with matching config. Reusing.");
             let reuse_prepare_started = Instant::now();
             apply_agent_settings(&app, &state)?;
             println!(
-                "[Nova] Startup timing (proxy): reused_container_prepare={}ms",
+                "[Entropic] Startup timing (proxy): reused_container_prepare={}ms",
                 reuse_prepare_started.elapsed().as_millis()
             );
             let health_started = Instant::now();
@@ -5513,7 +5832,7 @@ pub async fn start_gateway_with_proxy(
             )
             .await?;
             println!(
-                "[Nova] Startup timing (proxy): health={}ms total={}ms",
+                "[Entropic] Startup timing (proxy): health={}ms total={}ms",
                 health_started.elapsed().as_millis(),
                 startup_started.elapsed().as_millis()
             );
@@ -5522,47 +5841,48 @@ pub async fn start_gateway_with_proxy(
         }
 
         if !token_matches {
-            println!("[Nova] OPENROUTER_API_KEY changed; tearing down proxy container to apply new credentials.");
+            println!("[Entropic] OPENROUTER_API_KEY changed; tearing down proxy container to apply new credentials.");
         }
         // Remove running container to ensure proxy config/model updates take effect
         let _ = docker_command()
-            .args(["rm", "-f", "nova-openclaw"])
+            .args(["rm", "-f", OPENCLAW_CONTAINER])
             .output();
     }
 
     // Check if container exists but stopped - remove it to recreate with new config
+    let any_filter = format!("name={}", OPENCLAW_CONTAINER);
     let check_all = docker_command()
-        .args(["ps", "-aq", "-f", "name=nova-openclaw"])
+        .args(["ps", "-aq", "-f", any_filter.as_str()])
         .output()
         .map_err(|e| format!("Failed to check container: {}", e))?;
 
     if !check_all.stdout.is_empty() {
         // Remove existing container to recreate with new proxy config
         let _ = docker_command()
-            .args(["rm", "-f", "nova-openclaw"])
+            .args(["rm", "-f", OPENCLAW_CONTAINER])
             .output();
     }
 
     // Create network if it doesn't exist
     let _ = docker_command()
-        .args(["network", "create", "nova-net"])
+        .args(["network", "create", OPENCLAW_NETWORK])
         .output();
 
     // Ensure runtime image is available (load from bundle or pull from registry)
     let image_started = Instant::now();
     ensure_runtime_image()?;
     println!(
-        "[Nova] Startup timing (proxy): runtime_image_ready={}ms",
+        "[Entropic] Startup timing (proxy): runtime_image_ready={}ms",
         image_started.elapsed().as_millis()
     );
     let (docker_args, _proxy_env_file) = build_proxy_docker_args()?;
 
     // Create and start container
-    println!("[Nova] Starting proxy gateway with model: {}", model);
-    println!("[Nova] Proxy URL: {}", resolved_proxy_url);
-    println!("[Nova] Proxy API URL: {}", docker_proxy_api_url);
+    println!("[Entropic] Starting proxy gateway with model: {}", model);
+    println!("[Entropic] Proxy URL: {}", resolved_proxy_url);
+    println!("[Entropic] Proxy API URL: {}", docker_proxy_api_url);
     println!(
-        "[Nova] Docker command: docker {}",
+        "[Entropic] Docker command: docker {}",
         docker_args_for_log(&docker_args)
     );
 
@@ -5574,9 +5894,9 @@ pub async fn start_gateway_with_proxy(
 
     if !run.status.success() {
         let stderr = String::from_utf8_lossy(&run.stderr);
-        println!("[Nova] Failed to start proxy container: {}", stderr);
+        println!("[Entropic] Failed to start proxy container: {}", stderr);
         if stderr.contains("Conflict. The container name") {
-            println!("[Nova] Existing container conflict detected; attempting cleanup and retry.");
+            println!("[Entropic] Existing container conflict detected; attempting cleanup and retry.");
             let cleanup = docker_command()
                 .args(["rm", "-f", OPENCLAW_CONTAINER])
                 .output()
@@ -5612,9 +5932,9 @@ pub async fn start_gateway_with_proxy(
         }
     }
 
-    println!("[Nova] Proxy container started successfully");
+    println!("[Entropic] Proxy container started successfully");
     println!(
-        "[Nova] Startup timing (proxy): container_launch={}ms",
+        "[Entropic] Startup timing (proxy): container_launch={}ms",
         container_launch_started.elapsed().as_millis()
     );
 
@@ -5622,7 +5942,7 @@ pub async fn start_gateway_with_proxy(
     let settings_started = Instant::now();
     apply_agent_settings(&app, &state)?;
     println!(
-        "[Nova] Startup timing (proxy): post_launch_config={}ms",
+        "[Entropic] Startup timing (proxy): post_launch_config={}ms",
         settings_started.elapsed().as_millis()
     );
 
@@ -5635,9 +5955,20 @@ pub async fn start_gateway_with_proxy(
         &state,
     )
     .await?;
+    // Re-apply settings AFTER health check passes.
+    // OpenClaw initialization can overwrite files written during startup
+    // (including openclaw.json provider baseUrl), so apply again once healthy.
+    {
+        let mut cache = applied_agent_settings_fingerprint()
+            .lock()
+            .map_err(|e| e.to_string())?;
+        *cache = None;
+    }
+    apply_agent_settings(&app, &state)?;
+    println!("[Entropic] Startup timing (proxy): post_health_config applied");
     start_scanner_sidecar_background();
     println!(
-        "[Nova] Startup timing (proxy): health={}ms total={}ms",
+        "[Entropic] Startup timing (proxy): health={}ms total={}ms",
         health_started.elapsed().as_millis(),
         startup_started.elapsed().as_millis()
     );
@@ -5686,7 +6017,7 @@ pub fn update_gateway_model(model: String) -> Result<(), String> {
     }
 
     println!(
-        "[Nova] update_gateway_model: hot-swapping model to {} (thinking={})",
+        "[Entropic] update_gateway_model: hot-swapping model to {} (thinking={})",
         base_model, thinking_level
     );
     write_openclaw_config(&cfg)
@@ -5695,10 +6026,10 @@ pub fn update_gateway_model(model: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn restart_gateway(app: AppHandle, state: State<'_, AppState>, model: Option<String>) -> Result<(), String> {
     // Stop and remove existing container (to pick up new env vars)
-    let _ = docker_command().args(["stop", "nova-openclaw"]).output();
-    let _ = docker_command()
-        .args(["rm", "-f", "nova-openclaw"])
-        .output();
+    for name in [OPENCLAW_CONTAINER, LEGACY_OPENCLAW_CONTAINER] {
+        let _ = docker_command().args(["stop", name]).output();
+        let _ = docker_command().args(["rm", "-f", name]).output();
+    }
 
     // Start with current API keys
     start_gateway(app, state, model).await
@@ -5707,32 +6038,20 @@ pub async fn restart_gateway(app: AppHandle, state: State<'_, AppState>, model: 
 #[tauri::command]
 pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
     // Check if container is running
-    let check = docker_command()
-        .args([
-            "ps",
-            "-q",
-            "-f",
-            "name=nova-openclaw",
-            "-f",
-            "status=running",
-        ])
-        .output()
-        .map_err(|e| format!("Failed to check container: {}", e))?;
-
-    if check.stdout.is_empty() {
-        println!("[Nova] Container not running");
+    if !gateway_container_exists(true) {
+        println!("[Entropic] Container not running");
         return Ok(false);
     }
 
     let ws_url = gateway_ws_url();
     let token = effective_gateway_token(&app)?;
 
-    println!("[Nova] Checking gateway health via WS at: {}", ws_url);
+    println!("[Entropic] Checking gateway health via WS at: {}", ws_url);
     let mut last_error: Option<String> = None;
     for attempt in 1..=2 {
-        match check_gateway_ws_health(ws_url, &token).await {
+        match check_gateway_ws_health(&ws_url, &token).await {
             Ok(true) => {
-                println!("[Nova] Gateway health check passed");
+                println!("[Entropic] Gateway health check passed");
                 return Ok(true);
             }
             Ok(false) => {
@@ -5749,39 +6068,39 @@ pub async fn get_gateway_status(app: AppHandle) -> Result<bool, String> {
     }
 
     if let Some(health_status) = container_health_status() {
-        println!("[Nova] Container health status: {}", health_status);
+        println!("[Entropic] Container health status: {}", health_status);
         if health_status == "healthy" || health_status == "starting" {
             println!(
-                "[Nova] Gateway WS probe failed after retries while container health is {}; reporting not running until WS recovers.",
+                "[Entropic] Gateway WS probe failed after retries while container health is {}; reporting not running until WS recovers.",
                 health_status
             );
         }
     }
 
     if !container_running() {
-        println!("[Nova] Container stopped while checking gateway health");
+        println!("[Entropic] Container stopped while checking gateway health");
         return Ok(false);
     }
 
     println!(
-        "[Nova] Gateway health check failed after retries: {}",
+        "[Entropic] Gateway health check failed after retries: {}",
         last_error.unwrap_or_else(|| "unknown health failure".to_string())
     );
     if let Some(hint) = colima_daemon_killed_hint() {
-        println!("[Nova] {}", hint);
+        println!("[Entropic] {}", hint);
     }
     Ok(false)
 }
 
 #[tauri::command]
 pub async fn get_gateway_ws_url() -> Result<String, String> {
-    Ok(gateway_ws_url().to_string())
+    Ok(gateway_ws_url())
 }
 
 #[tauri::command]
 pub async fn get_gateway_auth(app: AppHandle) -> Result<GatewayAuthPayload, String> {
     Ok(GatewayAuthPayload {
-        ws_url: gateway_ws_url().to_string(),
+        ws_url: gateway_ws_url(),
         token: effective_gateway_token(&app)?,
     })
 }
@@ -6758,7 +7077,7 @@ pub async fn get_plugin_store() -> Result<Vec<PluginInfo>, String> {
 #[tauri::command]
 pub async fn set_plugin_enabled(id: String, enabled: bool) -> Result<(), String> {
     if MANAGED_PLUGIN_IDS.contains(&id.as_str()) {
-        return Err("Plugin is managed by Nova".to_string());
+        return Err("Plugin is managed by Entropic".to_string());
     }
     let mut cfg = read_openclaw_config();
     set_openclaw_config_value(
@@ -6803,8 +7122,8 @@ pub async fn remove_workspace_skill(id: String) -> Result<(), String> {
     if !is_safe_component(&skill_id) {
         return Err("Invalid skill id".to_string());
     }
-    if skill_id == "nova-x" {
-        return Err("Nova-managed skills cannot be removed".to_string());
+    if skill_id == "entropic-x" {
+        return Err("Entropic-managed skills cannot be removed".to_string());
     }
 
     let mut config_removal_paths: Vec<String> = Vec::new();
@@ -7137,7 +7456,7 @@ pub async fn scan_plugin(id: String) -> Result<PluginScanResult, String> {
         .success();
 
     if !exists {
-        if let Some(skills_root) = read_container_env("NOVA_SKILLS_PATH") {
+        if let Some(skills_root) = read_container_env("ENTROPIC_SKILLS_PATH") {
             let base = format!("{}/{}", skills_root.trim_end_matches('/'), plugin_id);
             let current = format!("{}/current", base);
             let candidate = if container_path_exists(&current) {
@@ -7162,7 +7481,7 @@ pub async fn scan_plugin(id: String) -> Result<PluginScanResult, String> {
         return Err("Plugin directory not found".to_string());
     }
 
-    let scanner_dir = format!("/tmp/nova-scan/plugins/{}", plugin_id);
+    let scanner_dir = format!("/tmp/entropic-scan/plugins/{}", plugin_id);
     clone_dir_from_openclaw_to_scanner(&source_dir, &scanner_dir)?;
     scan_directory_with_scanner(&scanner_dir).await
 }
@@ -7182,7 +7501,7 @@ pub async fn scan_workspace_skill(id: String) -> Result<PluginScanResult, String
     let source_dir = resolve_installed_skill_dir(&skill_id)?
         .ok_or_else(|| "Skill directory not found".to_string())?;
 
-    let scanner_dir = format!("/tmp/nova-scan/workspace-skills/{}", skill_id);
+    let scanner_dir = format!("/tmp/entropic-scan/workspace-skills/{}", skill_id);
     clone_dir_from_openclaw_to_scanner(&source_dir, &scanner_dir)?;
     scan_directory_with_scanner(&scanner_dir).await
 }
@@ -7260,7 +7579,7 @@ pub async fn scan_and_install_clawhub_skill(
         });
     }
 
-    let temp_root = format!("/tmp/nova-clawhub-scan-{}", unique_id());
+    let temp_root = format!("/tmp/entropic-clawhub-scan-{}", unique_id());
     docker_exec_output(&[
         "exec",
         OPENCLAW_CONTAINER,
@@ -7302,7 +7621,7 @@ pub async fn scan_and_install_clawhub_skill(
                 return Err(err);
             }
         };
-    let scanner_dir = format!("/tmp/nova-scan/clawhub/{}", detected_skill_id);
+    let scanner_dir = format!("/tmp/entropic-scan/clawhub/{}", detected_skill_id);
     if let Err(err) = clone_dir_from_openclaw_to_scanner(&downloaded_path, &scanner_dir) {
         cleanup(&temp_root);
         return Err(err);
@@ -7384,7 +7703,7 @@ pub async fn scan_and_install_clawhub_skill(
         Ok(None) => installed_version_root.clone(),
         Err(err) => {
             eprintln!(
-                "[Nova] Failed to resolve installed skill root for {}: {}",
+                "[Entropic] Failed to resolve installed skill root for {}: {}",
                 detected_skill_id, err
             );
             installed_version_root.clone()
@@ -7447,7 +7766,7 @@ pub async fn scan_and_install_clawhub_skill(
     let manifest_version = skill_version.clone();
     let manifest_path_value = installed_skill_path.clone();
     let manifest = serde_json::json!({
-        "schema": "nova-skill-manifest/v1",
+        "schema": "entropic-skill-manifest/v1",
         "skill_id": manifest_skill_id,
         "source_slug": manifest_source_slug,
         "version": manifest_version,
@@ -7475,7 +7794,7 @@ pub async fn scan_and_install_clawhub_skill(
     // can discover it immediately without a full gateway restart.
     if let Err(e) = apply_agent_settings(&app, &state) {
         eprintln!(
-            "[Nova] Failed to apply agent settings after skill install: {}",
+            "[Entropic] Failed to apply agent settings after skill install: {}",
             e
         );
     }
@@ -7484,13 +7803,13 @@ pub async fn scan_and_install_clawhub_skill(
     // skills are loaded. Proxy-mode containers cannot be restarted this way
     // (no local keys available); apply_agent_settings above already
     // hot-registered the skill into the workspace config.
-    let is_proxy_mode = read_container_env("NOVA_PROXY_MODE").is_some();
+    let is_proxy_mode = read_container_env("ENTROPIC_PROXY_MODE").is_some();
     if container_running() && !is_proxy_mode {
-        println!("[Nova] Restarting gateway to load newly installed skill...");
+        println!("[Entropic] Restarting gateway to load newly installed skill...");
         let _ = app.emit("gateway-restarting", ());
         if let Err(e) = restart_gateway(app.clone(), state, None).await {
             eprintln!(
-                "[Nova] Failed to restart gateway after skill install: {}",
+                "[Entropic] Failed to restart gateway after skill install: {}",
                 e
             );
         }
@@ -7523,7 +7842,7 @@ async fn run_first_time_setup_internal(
             let mut progress = state.setup_progress.lock().map_err(|e| e.to_string())?;
             *progress = SetupProgress {
                 stage: "cleanup".to_string(),
-                message: "Cleaning Nova isolated container runtime state...".to_string(),
+                message: "Cleaning Entropic isolated container runtime state...".to_string(),
                 percent: 5,
                 complete: false,
                 error: None,
@@ -7538,7 +7857,7 @@ async fn run_first_time_setup_internal(
                 percent: 0,
                 complete: false,
                 error: Some(format!(
-                    "Nova could not clean its isolated Colima runtime: {}",
+                    "Entropic could not clean its isolated Colima runtime: {}",
                     e
                 )),
             };
@@ -7756,15 +8075,15 @@ async fn run_first_time_setup_internal(
         match preload {
             Ok(Ok(())) => {
                 println!(
-                    "[Nova] Runtime image preload finished in {}ms",
+                    "[Entropic] Runtime image preload finished in {}ms",
                     preload_started.elapsed().as_millis()
                 );
             }
             Ok(Err(e)) => {
-                println!("[Nova] Runtime image preload deferred/failed: {}", e);
+                println!("[Entropic] Runtime image preload deferred/failed: {}", e);
             }
             Err(e) => {
-                println!("[Nova] Runtime image preload task error: {}", e);
+                println!("[Entropic] Runtime image preload task error: {}", e);
             }
         }
     });
@@ -7951,7 +8270,7 @@ pub async fn upload_workspace_file(
 // Local OAuth (Google integrations)
 // =============================================================================
 
-const AUTH_LOCALHOST_PORT_ENV: &str = "NOVA_AUTH_LOCALHOST_PORT";
+const AUTH_LOCALHOST_PORT_ENV: &str = "ENTROPIC_AUTH_LOCALHOST_PORT";
 const AUTH_LOCALHOST_DEFAULT_PORT: u16 = 27100;
 
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -8017,20 +8336,20 @@ pub struct RefreshTokenResponse {
 }
 
 fn google_client_id() -> Result<String, String> {
-    if let Some(val) = option_env!("NOVA_GOOGLE_CLIENT_ID") {
+    if let Some(val) = option_env!("ENTROPIC_GOOGLE_CLIENT_ID") {
         return Ok(val.to_string());
     }
-    if let Ok(val) = std::env::var("NOVA_GOOGLE_CLIENT_ID") {
+    if let Ok(val) = std::env::var("ENTROPIC_GOOGLE_CLIENT_ID") {
         return Ok(val);
     }
-    Err("Google OAuth client ID not configured (NOVA_GOOGLE_CLIENT_ID)".to_string())
+    Err("Google OAuth client ID not configured (ENTROPIC_GOOGLE_CLIENT_ID)".to_string())
 }
 
 fn google_client_secret() -> Option<String> {
-    if let Some(val) = option_env!("NOVA_GOOGLE_CLIENT_SECRET") {
+    if let Some(val) = option_env!("ENTROPIC_GOOGLE_CLIENT_SECRET") {
         return Some(val.to_string());
     }
-    if let Ok(val) = std::env::var("NOVA_GOOGLE_CLIENT_SECRET") {
+    if let Ok(val) = std::env::var("ENTROPIC_GOOGLE_CLIENT_SECRET") {
         return Some(val);
     }
     None
@@ -8235,11 +8554,11 @@ fn oauth_callback_html(page_title: &str, title: &str, message: &str, success: bo
     <div class="blob two"></div>
   </div>
   <main class="card">
-    <div class="brand"><span class="logo">N</span><span>Nova</span></div>
+    <div class="brand"><span class="logo">N</span><span>Entropic</span></div>
     <span class="badge">{{BADGE_TEXT}}</span>
     <h1>{{TITLE}}</h1>
     <p>{{MESSAGE}}</p>
-    <p class="hint">You can return to Nova now. This tab will close automatically.</p>
+    <p class="hint">You can return to Entropic now. This tab will close automatically.</p>
   </main>
   <script>
     setTimeout(function () {
@@ -8292,9 +8611,9 @@ async fn wait_for_oauth_callback(
         .map(|(_, v)| v.to_string())
     {
         let html = oauth_callback_html(
-            "Nova OAuth",
+            "Entropic OAuth",
             "Connection failed",
-            "Google returned an OAuth error. Close this tab and try again from Nova.",
+            "Google returned an OAuth error. Close this tab and try again from Entropic.",
             false,
         );
         let _ = socket.write_all(oauth_html_response(html).as_bytes()).await;
@@ -8309,7 +8628,7 @@ async fn wait_for_oauth_callback(
         code
     } else {
         let html = oauth_callback_html(
-            "Nova OAuth",
+            "Entropic OAuth",
             "Missing authorization code",
             "Google did not provide an authorization code. Close this tab and retry.",
             false,
@@ -8324,9 +8643,9 @@ async fn wait_for_oauth_callback(
         .unwrap_or_default();
     if state != expected_state {
         let html = oauth_callback_html(
-            "Nova OAuth",
+            "Entropic OAuth",
             "Security check failed",
-            "The OAuth state did not match. Please close this tab and retry from Nova.",
+            "The OAuth state did not match. Please close this tab and retry from Entropic.",
             false,
         );
         let _ = socket.write_all(oauth_html_response(html).as_bytes()).await;
@@ -8334,7 +8653,7 @@ async fn wait_for_oauth_callback(
     }
 
     let html = oauth_callback_html(
-        "Nova OAuth",
+        "Entropic OAuth",
         "Google connected",
         "Authentication is complete and your integration is now connected.",
         true,
@@ -8374,7 +8693,7 @@ async fn wait_for_localhost_auth_callback(
     let (html, result) = if oauth_error.is_some() {
         (
             oauth_callback_html(
-                "Nova Sign-in",
+                "Entropic Sign-in",
                 "Sign-in failed",
                 "Google returned an OAuth error. Close this tab and try signing in again.",
                 false,
@@ -8384,9 +8703,9 @@ async fn wait_for_localhost_auth_callback(
     } else if has_code {
         (
             oauth_callback_html(
-                "Nova Sign-in",
+                "Entropic Sign-in",
                 "You're signed in",
-                "Authentication completed successfully. You can jump back into Nova.",
+                "Authentication completed successfully. You can jump back into Entropic.",
                 true,
             ),
             Ok(()),
@@ -8394,7 +8713,7 @@ async fn wait_for_localhost_auth_callback(
     } else {
         (
             oauth_callback_html(
-                "Nova Sign-in",
+                "Entropic Sign-in",
                 "Missing authorization code",
                 "No authorization code was returned. Please close this tab and retry sign-in.",
                 false,
@@ -8427,7 +8746,7 @@ pub async fn start_auth_localhost(app: AppHandle) -> Result<LocalhostAuthStart, 
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(err) = wait_for_localhost_auth_callback(listener, app_handle, port).await {
-            eprintln!("[Nova] Localhost OAuth error: {}", err);
+            eprintln!("[Entropic] Localhost OAuth error: {}", err);
         }
     });
 
@@ -8973,9 +9292,9 @@ async fn wait_for_openai_oauth_callback(
         .map(|(_, v)| v.to_string())
     {
         let html = oauth_callback_html(
-            "Nova OAuth",
+            "Entropic OAuth",
             "Connection failed",
-            "OpenAI returned an OAuth error. Close this tab and try again from Nova.",
+            "OpenAI returned an OAuth error. Close this tab and try again from Entropic.",
             false,
         );
         let _ = socket.write_all(oauth_html_response(html).as_bytes()).await;
@@ -8986,7 +9305,7 @@ async fn wait_for_openai_oauth_callback(
         Some(c) => c,
         None => {
             let html = oauth_callback_html(
-                "Nova OAuth",
+                "Entropic OAuth",
                 "Missing authorization code",
                 "No authorization code was returned. Close this tab and retry.",
                 false,
@@ -9003,9 +9322,9 @@ async fn wait_for_openai_oauth_callback(
         .unwrap_or_default();
     if cb_state != expected_state {
         let html = oauth_callback_html(
-            "Nova OAuth",
+            "Entropic OAuth",
             "Security check failed",
-            "The OAuth state did not match. Please close this tab and retry from Nova.",
+            "The OAuth state did not match. Please close this tab and retry from Entropic.",
             false,
         );
         let _ = socket.write_all(oauth_html_response(html).as_bytes()).await;
@@ -9013,9 +9332,9 @@ async fn wait_for_openai_oauth_callback(
     }
 
     let html = oauth_callback_html(
-        "Nova OAuth",
+        "Entropic OAuth",
         "OpenAI connected",
-        "Authentication is complete. You can return to Nova now.",
+        "Authentication is complete. You can return to Entropic now.",
         true,
     );
     let _ = socket.write_all(oauth_html_response(html).as_bytes()).await;
@@ -9128,7 +9447,7 @@ fn resolve_raw_device_identifier() -> String {
 pub async fn get_device_fingerprint_hash() -> Result<String, String> {
     let raw = resolve_raw_device_identifier();
     let mut hasher = Sha256::new();
-    hasher.update("nova-device-fingerprint-v1:");
+    hasher.update("entropic-device-fingerprint-v1:");
     hasher.update(raw.as_bytes());
     Ok(format!("{:x}", hasher.finalize()))
 }

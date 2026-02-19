@@ -6,8 +6,8 @@ use thiserror::Error;
 fn debug_log(msg: &str) {
     use std::io::Write;
     let log_path = dirs::home_dir()
-        .map(|h| h.join("nova-runtime.log"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/nova-runtime.log"));
+        .map(|h| h.join("entropic-runtime.log"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/entropic-runtime.log"));
 
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
@@ -56,26 +56,32 @@ pub struct Runtime {
     platform: Platform,
 }
 
-/// Isolated Colima home directory used by Nova to avoid conflicts with
+/// Isolated Colima home directory used by Entropic to avoid conflicts with
 /// any user-managed global Colima configuration under `~/.colima`.
 #[cfg(debug_assertions)]
-pub(crate) const NOVA_COLIMA_HOME_DIR: &str = ".nova/colima-dev";
+pub(crate) const ENTROPIC_COLIMA_HOME_DIR: &str = ".entropic/colima-dev";
 #[cfg(not(debug_assertions))]
-pub(crate) const NOVA_COLIMA_HOME_DIR: &str = ".nova/colima";
+pub(crate) const ENTROPIC_COLIMA_HOME_DIR: &str = ".entropic/colima";
+#[cfg(debug_assertions)]
+pub(crate) const LEGACY_NOVA_COLIMA_HOME_DIR: &str = ".nova/colima-dev";
+#[cfg(not(debug_assertions))]
+pub(crate) const LEGACY_NOVA_COLIMA_HOME_DIR: &str = ".nova/colima";
 /// Colima profile name used for Apple Virtualization.framework (`vz`) backend.
-pub(crate) const NOVA_VZ_PROFILE: &str = "nova-vz";
+pub(crate) const ENTROPIC_VZ_PROFILE: &str = "entropic-vz";
 /// Colima profile name used for QEMU backend fallback.
-pub(crate) const NOVA_QEMU_PROFILE: &str = "nova-qemu";
+pub(crate) const ENTROPIC_QEMU_PROFILE: &str = "entropic-qemu";
+pub(crate) const LEGACY_NOVA_VZ_PROFILE: &str = "nova-vz";
+pub(crate) const LEGACY_NOVA_QEMU_PROFILE: &str = "nova-qemu";
 const COLIMA_RETRY_DELAY_SECS: u64 = 2;
 
 fn fallback_colima_home_path() -> PathBuf {
-    let shared_base = PathBuf::from("/Users/Shared/nova");
+    let shared_base = PathBuf::from("/Users/Shared/entropic");
     if std::fs::create_dir_all(&shared_base).is_ok() {
         #[cfg(unix)]
         {
             // SAFETY: geteuid has no preconditions and does not dereference pointers.
             let uid = unsafe { libc::geteuid() };
-            return shared_base.join(format!("colima-{}", uid));
+            return shared_base.join(format!("entropic-colima-{}", uid));
         }
 
         #[cfg(not(unix))]
@@ -91,23 +97,23 @@ fn fallback_colima_home_path() -> PathBuf {
     {
         // SAFETY: geteuid has no preconditions and does not dereference pointers.
         let uid = unsafe { libc::geteuid() };
-        return base.join(format!("nova-colima-{}", uid));
+        return base.join(format!("entropic-colima-{}", uid));
     }
 
     #[cfg(not(unix))]
     {
-        base.join("nova-colima")
+        base.join("entropic-colima")
     }
 }
 
 fn fallback_runtime_home_path() -> PathBuf {
-    let shared_base = PathBuf::from("/Users/Shared/nova");
+    let shared_base = PathBuf::from("/Users/Shared/entropic");
     if std::fs::create_dir_all(&shared_base).is_ok() {
         #[cfg(unix)]
         {
             // SAFETY: geteuid has no preconditions and does not dereference pointers.
             let uid = unsafe { libc::geteuid() };
-            return shared_base.join(format!("home-{}", uid));
+            return shared_base.join(format!("entropic-home-{}", uid));
         }
 
         #[cfg(not(unix))]
@@ -122,12 +128,12 @@ fn fallback_runtime_home_path() -> PathBuf {
     {
         // SAFETY: geteuid has no preconditions and does not dereference pointers.
         let uid = unsafe { libc::geteuid() };
-        return base.join(format!("nova-home-{}", uid));
+        return base.join(format!("entropic-home-{}", uid));
     }
 
     #[cfg(not(unix))]
     {
-        base.join("nova-home")
+        base.join("entropic-home")
     }
 }
 
@@ -135,8 +141,8 @@ fn path_contains_whitespace(path: &std::path::Path) -> bool {
     path.to_string_lossy().chars().any(char::is_whitespace)
 }
 
-fn nova_runtime_home_path() -> PathBuf {
-    if let Ok(home) = std::env::var("NOVA_RUNTIME_HOME") {
+fn entropic_runtime_home_path() -> PathBuf {
+    if let Ok(home) = std::env::var("ENTROPIC_RUNTIME_HOME") {
         if !home.trim().is_empty() {
             return PathBuf::from(home);
         }
@@ -158,23 +164,34 @@ fn nova_runtime_home_path() -> PathBuf {
     fallback_runtime_home_path()
 }
 
-pub(crate) fn nova_colima_home_path() -> PathBuf {
-    if let Ok(home) = std::env::var("NOVA_COLIMA_HOME") {
+pub(crate) fn entropic_colima_home_path() -> PathBuf {
+    if let Ok(home) = std::env::var("ENTROPIC_COLIMA_HOME") {
         if !home.trim().is_empty() {
             return PathBuf::from(home);
         }
     }
 
     if let Some(home) = dirs::home_dir() {
-        let candidate = home.join(NOVA_COLIMA_HOME_DIR);
+        let candidate = home.join(ENTROPIC_COLIMA_HOME_DIR);
         if path_contains_whitespace(&candidate) {
             let fallback = fallback_colima_home_path();
             debug_log(&format!(
-                "NOVA_COLIMA_HOME contains whitespace ({}); using fallback {}",
+                "ENTROPIC_COLIMA_HOME contains whitespace ({}); using fallback {}",
                 candidate.display(),
                 fallback.display()
             ));
             return fallback;
+        }
+        if candidate.exists() {
+            return candidate;
+        }
+        let legacy = home.join(LEGACY_NOVA_COLIMA_HOME_DIR);
+        if legacy.exists() {
+            debug_log(&format!(
+                "Using legacy Colima home for compatibility: {}",
+                legacy.display()
+            ));
+            return legacy;
         }
         return candidate;
     }
@@ -182,16 +199,35 @@ pub(crate) fn nova_colima_home_path() -> PathBuf {
     fallback_colima_home_path()
 }
 
-pub(crate) fn nova_colima_socket_candidates() -> Vec<PathBuf> {
-    let home = nova_colima_home_path();
-    vec![
-        home.join(NOVA_VZ_PROFILE).join("docker.sock"),
-        home.join(NOVA_QEMU_PROFILE).join("docker.sock"),
-    ]
+pub(crate) fn entropic_colima_socket_candidates() -> Vec<PathBuf> {
+    let mut homes = vec![entropic_colima_home_path()];
+    if let Some(home) = dirs::home_dir() {
+        let entropic = home.join(ENTROPIC_COLIMA_HOME_DIR);
+        if !homes.contains(&entropic) {
+            homes.push(entropic);
+        }
+        let legacy = home.join(LEGACY_NOVA_COLIMA_HOME_DIR);
+        if !homes.contains(&legacy) {
+            homes.push(legacy);
+        }
+    }
+
+    let mut sockets = Vec::new();
+    for home in homes {
+        for profile in [
+            ENTROPIC_VZ_PROFILE,
+            ENTROPIC_QEMU_PROFILE,
+            LEGACY_NOVA_VZ_PROFILE,
+            LEGACY_NOVA_QEMU_PROFILE,
+        ] {
+            sockets.push(home.join(profile).join("docker.sock"));
+        }
+    }
+    sockets
 }
 
 pub(crate) fn macos_docker_socket_candidates() -> Vec<PathBuf> {
-    let mut candidates = nova_colima_socket_candidates();
+    let mut candidates = entropic_colima_socket_candidates();
     if let Some(home) = dirs::home_dir() {
         candidates.push(home.join(".docker/run/docker.sock"));
         candidates.push(home.join(".docker/desktop/docker.sock"));
@@ -279,11 +315,11 @@ impl Runtime {
     }
 
     fn colima_home(&self) -> PathBuf {
-        nova_colima_home_path()
+        entropic_colima_home_path()
     }
 
     fn runtime_home(&self) -> PathBuf {
-        nova_runtime_home_path()
+        entropic_runtime_home_path()
     }
 
     fn runtime_tmp_dir(&self) -> PathBuf {
@@ -291,7 +327,7 @@ impl Runtime {
     }
 
     fn colima_profiles(&self) -> [(&'static str, &'static str); 2] {
-        [(NOVA_VZ_PROFILE, "vz"), (NOVA_QEMU_PROFILE, "qemu")]
+        [(ENTROPIC_VZ_PROFILE, "vz"), (ENTROPIC_QEMU_PROFILE, "qemu")]
     }
 
     fn colima_socket_for_profile(&self, profile: &str) -> PathBuf {
@@ -614,7 +650,7 @@ impl Runtime {
     }
 
     fn reset_isolated_colima_runtime(&self) -> Result<(), RuntimeError> {
-        debug_log("Attempting automatic reset of Nova isolated Colima runtime");
+        debug_log("Attempting automatic reset of Entropic isolated Colima runtime");
         for (profile, _) in self.colima_profiles() {
             let _ = self.run_colima(profile, &["stop", "--force"]);
             let _ = self.run_colima(profile, &["delete", "--force"]);
@@ -807,7 +843,7 @@ impl Runtime {
         let docker_installed = docker_path.is_some() || system_docker;
         debug_log(&format!("docker_installed: {}", docker_installed));
 
-        // Check Nova-managed Colima sockets first.
+        // Check Entropic-managed Colima sockets first.
         // We skip relying only on `colima status` because it can fail with version mismatches.
         let colima_socket_exists = self.preferred_colima_socket().is_some();
         debug_log(&format!("Colima socket exists: {}", colima_socket_exists));
@@ -1020,7 +1056,7 @@ impl Runtime {
 
         format!(
             "unix://{}",
-            self.colima_socket_for_profile(NOVA_VZ_PROFILE).display()
+            self.colima_socket_for_profile(ENTROPIC_VZ_PROFILE).display()
         )
     }
 
@@ -1257,7 +1293,7 @@ impl Runtime {
                 .map(|p| format!("\"{}\"", p.display()))
                 .unwrap_or_else(|| "\"(unknown)\"".to_string());
             return Err(RuntimeError::ColimaStartFailed(format!(
-                "{}\n\nNova's container runtime (lima) does not support macOS usernames that contain spaces. Your home directory {} causes internal path handling to fail.\n\nWorkaround: create a new macOS administrator account with a username that has no spaces, then run Nova from that account.",
+                "{}\n\nEntropic's container runtime (lima) does not support macOS usernames that contain spaces. Your home directory {} causes internal path handling to fail.\n\nWorkaround: create a new macOS administrator account with a username that has no spaces, then run Entropic from that account.",
                 reason, home_hint
             )));
         }
@@ -1275,21 +1311,21 @@ impl Runtime {
                 }
                 Err(e) => {
                     reason = format!(
-                        "{}\n\nNova attempted an automatic isolated runtime reset, but it failed: {}",
+                        "{}\n\nEntropic attempted an automatic isolated runtime reset, but it failed: {}",
                         reason, e
                     );
                 }
             }
         }
 
-        let heading = if fell_back_from_vz && last_failed_profile == Some(NOVA_QEMU_PROFILE) {
-            "VZ was unavailable and qemu startup failed. To reset Nova's isolated runtime:"
+        let heading = if fell_back_from_vz && last_failed_profile == Some(ENTROPIC_QEMU_PROFILE) {
+            "VZ was unavailable and qemu startup failed. To reset Entropic's isolated runtime:"
         } else if auto_reset_attempted {
-            "Nova attempted an automatic isolated runtime reset. If this keeps happening, run a manual reset for Nova's isolated runtime:"
+            "Entropic attempted an automatic isolated runtime reset. If this keeps happening, run a manual reset for Entropic's isolated runtime:"
         } else {
-            "If this keeps happening, run a manual reset for Nova's isolated runtime:"
+            "If this keeps happening, run a manual reset for Entropic's isolated runtime:"
         };
-        let profile_to_reset = last_failed_profile.unwrap_or(NOVA_VZ_PROFILE);
+        let profile_to_reset = last_failed_profile.unwrap_or(ENTROPIC_VZ_PROFILE);
         let reset_commands = self
             .manual_reset_commands(&colima_path, &[profile_to_reset])
             .join("\n");
