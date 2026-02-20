@@ -76,11 +76,18 @@ echo "Image: $SCANNER_IMAGE"
 echo "Output: $OUTPUT"
 echo ""
 
-# Check if image exists
+# Check if image exists with computed tag
 if ! run_docker image inspect "$SCANNER_IMAGE" > /dev/null 2>&1; then
-    echo "ERROR: Scanner image '$SCANNER_IMAGE' not found in selected runtime daemon."
-    echo "Build it first: ./scripts/build-skill-scanner.sh"
-    exit 1
+    # Try finding :latest and tagging it
+    echo "Scanner image '$SCANNER_IMAGE' not found, checking for :latest..."
+    if run_docker image inspect "entropic-skill-scanner:latest" > /dev/null 2>&1; then
+        echo "Found entropic-skill-scanner:latest, tagging as $SCANNER_IMAGE..."
+        run_docker tag "entropic-skill-scanner:latest" "$SCANNER_IMAGE"
+    else
+        echo "ERROR: Scanner image not found (tried $SCANNER_IMAGE and :latest)."
+        echo "Build it first: ./scripts/build-skill-scanner.sh"
+        exit 1
+    fi
 fi
 
 mkdir -p "$(dirname "$OUTPUT")"
