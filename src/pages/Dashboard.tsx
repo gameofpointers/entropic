@@ -371,6 +371,16 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     return "Failed to start gateway";
   }
 
+  function isGatewayPortConflictError(message: string): boolean {
+    const text = message.toLowerCase();
+    return (
+      text.includes("localhost:19789") &&
+      (text.includes("legacy nova runtime process") ||
+        text.includes("port conflict detected") ||
+        text.includes("wrong gateway instance"))
+    );
+  }
+
   async function persistExperimentalDesktop(value: boolean) {
     setExperimentalDesktop(value);
     try {
@@ -580,6 +590,24 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             { label: "Retry", onClick: () => startGatewayProxyFlow({ model, image, stopFirst, allowRetry: false }) },
           ],
         });
+        setGatewayStartupStage("idle");
+        setShowGatewayStartup(false);
+        return false;
+      }
+
+      if (isGatewayPortConflictError(message)) {
+        setStartupError({
+          message,
+          actions: [
+            {
+              label: "Retry",
+              onClick: () => {
+                void startGatewayProxyFlow({ model, image, stopFirst: false, allowRetry: false });
+              },
+            },
+          ],
+        });
+        clearGatewayRetry();
         setGatewayStartupStage("idle");
         setShowGatewayStartup(false);
         return false;

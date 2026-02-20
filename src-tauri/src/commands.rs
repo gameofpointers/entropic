@@ -6056,10 +6056,14 @@ async fn wait_for_gateway_health_strict(token: &str, attempts: usize) -> Result<
     if last_error.is_empty() {
         last_error = "unknown health failure".to_string();
     }
-    Err(format!(
+    let mut message = format!(
         "Gateway failed strict health check at {}: {}",
         ws_url, last_error
-    ))
+    );
+    if let Some(conflict_hint) = gateway_port_conflict_hint(&last_error) {
+        message = format!("{}\n\n{}", message, conflict_hint);
+    }
+    Err(message)
 }
 
 fn container_health_status() -> Option<String> {
@@ -6101,6 +6105,105 @@ fn container_instance_id() -> Option<String> {
 
 fn container_running() -> bool {
     gateway_container_exists(true)
+}
+
+fn listener_pids_for_port(port: u16) -> Vec<u32> {
+    let port_selector = format!("-tiTCP:{}", port);
+    let output = match Command::new("lsof")
+        .args(["-nP", port_selector.as_str(), "-sTCP:LISTEN"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            if line.chars().all(|c| c.is_ascii_digit()) {
+                line.parse::<u32>().ok()
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn process_command_line(pid: u32) -> Option<String> {
+    let pid_text = pid.to_string();
+    let output = Command::new("ps")
+        .args(["-p", pid_text.as_str(), "-o", "command="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let command = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if command.is_empty() {
+        None
+    } else {
+        Some(command)
+    }
+}
+
+fn process_display_name(command: &str) -> String {
+    let first = command.split_whitespace().next().unwrap_or(command);
+    let base = Path::new(first)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(first);
+    if base.is_empty() {
+        "unknown".to_string()
+    } else {
+        base.to_string()
+    }
+}
+
+fn gateway_port_conflict_hint(last_error: &str) -> Option<String> {
+    if !matches!(Platform::detect(), Platform::MacOS) {
+        return None;
+    }
+
+    let text = last_error.to_lowercase();
+    let looks_auth_conflict = text.contains("unauthorized")
+        || text.contains("token mismatch")
+        || text.contains("invalid gateway token")
+        || text.contains("gateway token");
+    if !looks_auth_conflict {
+        return None;
+    }
+
+    for pid in listener_pids_for_port(19789) {
+        let command = match process_command_line(pid) {
+            Some(cmd) => cmd,
+            None => continue,
+        };
+        if command.contains("/.entropic/colima/") || command.contains("/.entropic/colima-dev/") {
+            continue;
+        }
+        if command.contains("/.nova/colima/")
+            || command.contains("/.nova/colima-dev/")
+            || command.contains("colima-nova-vz")
+            || command.contains("colima-nova-qemu")
+        {
+            return Some(format!(
+                "Detected legacy Nova runtime process (PID {}) owning localhost:19789. \
+Entropic is connecting to the wrong gateway instance, which causes gateway token mismatch. \
+Quit Nova.app (or run `kill {}`) and retry Gateway start.",
+                pid, pid
+            ));
+        }
+        let display = process_display_name(&command);
+        return Some(format!(
+            "Port conflict detected: localhost:19789 is owned by PID {} ({}), not Entropic runtime. \
+Stop the conflicting process and retry Gateway start.",
+            pid, display
+        ));
+    }
+
+    None
 }
 
 fn colima_daemon_killed_hint() -> Option<String> {
