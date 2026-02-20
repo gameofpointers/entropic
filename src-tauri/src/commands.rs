@@ -7792,7 +7792,7 @@ pub async fn get_gateway_ws_url() -> Result<String, String> {
 pub async fn get_gateway_auth(app: AppHandle) -> Result<GatewayAuthPayload, String> {
     Ok(GatewayAuthPayload {
         ws_url: gateway_ws_url(),
-        token: effective_gateway_token(&app)?,
+        token: expected_gateway_token(&app)?,
     })
 }
 
@@ -9143,7 +9143,7 @@ pub async fn start_whatsapp_login(
     app: AppHandle,
 ) -> Result<WhatsAppLoginState, String> {
     let _ = timeout_ms;
-    let token = effective_gateway_token(&app)?;
+    let token = expected_gateway_token(&app)?;
     let result = call_whatsapp_qr_endpoint("start", force, &token).await?;
     let state = app.state::<AppState>();
     let mut cache = state.whatsapp_login.lock().map_err(|e| e.to_string())?;
@@ -9182,7 +9182,7 @@ pub async fn wait_whatsapp_login(timeout_ms: Option<u64>) -> Result<WhatsAppLogi
 
 #[tauri::command]
 pub async fn get_whatsapp_login(app: AppHandle) -> Result<WhatsAppLoginState, String> {
-    let token = effective_gateway_token(&app)?;
+    let token = expected_gateway_token(&app)?;
     let result = call_whatsapp_qr_endpoint("status", false, &token).await?;
     let state = app.state::<AppState>();
     let mut cache = state.whatsapp_login.lock().map_err(|e| e.to_string())?;
