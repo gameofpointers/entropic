@@ -405,6 +405,26 @@ fn runtime_release_tar_url() -> String {
     )
 }
 
+fn scanner_release_tar_url() -> String {
+    if let Some(val) = option_env!("ENTROPIC_SCANNER_TAR_URL") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(val) = std::env::var("ENTROPIC_SCANNER_TAR_URL") {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    format!(
+        "https://github.com/{}/releases/download/{}/entropic-skill-scanner.tar.gz",
+        runtime_release_repo(),
+        runtime_release_tag()
+    )
+}
+
 fn runtime_cache_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".entropic").join("cache"))
 }
@@ -1306,6 +1326,86 @@ fn load_scanner_from_tar(tar_path: &Path) -> Result<bool, String> {
     Ok(false)
 }
 
+fn download_scanner_tar_from_release(scanner_image: &str) -> Result<(), String> {
+    let url = scanner_release_tar_url();
+    println!("[Entropic] Downloading scanner image from {}...", url);
+
+    let temp_dir = std::env::temp_dir().join("entropic-scanner-download");
+    fs::create_dir_all(&temp_dir)
+        .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+
+    let temp_tar = temp_dir.join("scanner.tar.gz");
+
+    let download = std::process::Command::new("curl")
+        .args([
+            "-fSL",
+            "--max-time", "300",
+            "-o",
+        ])
+        .arg(&temp_tar)
+        .arg(&url)
+        .output()
+        .map_err(|e| format!("curl failed: {}", e))?;
+
+    if !download.status.success() {
+        let stderr = String::from_utf8_lossy(&download.stderr);
+        return Err(format!("Failed to download scanner tar from {}: {}", url, stderr));
+    }
+
+    println!("[Entropic] Loading scanner image from downloaded tar...");
+    let load = docker_command()
+        .args(["load", "-i"])
+        .arg(&temp_tar)
+        .output()
+        .map_err(|e| format!("docker load failed: {}", e))?;
+
+    let _ = fs::remove_file(&temp_tar);
+    let _ = fs::remove_dir(&temp_dir);
+
+    if !load.status.success() {
+        let stderr = String::from_utf8_lossy(&load.stderr);
+        return Err(format!("Failed to load scanner image: {}", stderr));
+    }
+
+    // Check if the expected image is now present
+    let check = docker_command()
+        .args(["image", "inspect", scanner_image])
+        .output()
+        .map_err(|e| format!("Failed to check scanner image: {}", e))?;
+
+    if check.status.success() {
+        println!("[Entropic] Scanner image downloaded and loaded successfully");
+        return Ok(());
+    }
+
+    // Try tagging from legacy :latest if needed
+    let legacy_latest = format!("{}:latest", SCANNER_IMAGE_REPO);
+    let legacy_check = docker_command()
+        .args(["image", "inspect", &legacy_latest])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false);
+
+    if legacy_check {
+        let _ = docker_command()
+            .args(["tag", &legacy_latest, scanner_image])
+            .output();
+
+        let recheck = docker_command()
+            .args(["image", "inspect", scanner_image])
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+
+        if recheck {
+            println!("[Entropic] Scanner image tagged from legacy :latest");
+            return Ok(());
+        }
+    }
+
+    Err("Scanner image not found after download and load".to_string())
+}
+
 fn ensure_runtime_image() -> Result<(), String> {
     let local_runtime_tar = find_local_runtime_tar();
     let local_image_present = runtime_image_id()?.is_some();
@@ -1469,12 +1569,25 @@ fn ensure_scanner_image() -> Result<(), String> {
                     }
                 }
             }
-            Ok(false) => {} // continue to pull
+            Ok(false) => {} // continue to fallback
             Err(e) => println!("[Entropic] Bundled scanner tar check failed: {}", e),
         }
     }
 
+    // Try downloading from runtime release before building from template.
+    println!("[Entropic] Scanner image not bundled; trying runtime release download...");
+    match download_scanner_tar_from_release(scanner_image.as_str()) {
+        Ok(()) => {
+            println!("[Entropic] Scanner image downloaded from runtime release");
+            return Ok(());
+        }
+        Err(e) => {
+            println!("[Entropic] Scanner download from runtime release failed: {}", e);
+        }
+    }
+
     // Build from template (first-run only) and rely on Docker image cache afterwards.
+    println!("[Entropic] Building scanner image from template...");
     let build_result = build_scanner_image_from_template();
     if build_result.is_ok() {
         return Ok(());

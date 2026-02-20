@@ -124,17 +124,34 @@ jobs:
           ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
         run: ./scripts/bundle-runtime-image.sh
 
+      - name: Build skill scanner image (linux/arm64)
+        working-directory: entropic
+        env:
+          DOCKER_DEFAULT_PLATFORM: linux/arm64
+          ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
+        run: ./scripts/build-skill-scanner.sh
+
+      - name: Bundle scanner image tar
+        working-directory: entropic
+        env:
+          ENTROPIC_BUILD_ALLOW_DOCKER_DESKTOP: 1
+        run: ./scripts/bundle-scanner-image.sh
+
       - name: Prepare runtime release assets
         run: |
           set -euo pipefail
           cp entropic/src-tauri/resources/openclaw-runtime.tar.gz openclaw-runtime.tar.gz
           sha256sum openclaw-runtime.tar.gz > openclaw-runtime.tar.gz.sha256
           RUNTIME_SHA256="$(awk '{print $1}' openclaw-runtime.tar.gz.sha256)"
+          cp entropic/src-tauri/resources/entropic-skill-scanner.tar.gz entropic-skill-scanner.tar.gz
+          sha256sum entropic-skill-scanner.tar.gz > entropic-skill-scanner.tar.gz.sha256
+          SCANNER_SHA256="$(awk '{print $1}' entropic-skill-scanner.tar.gz.sha256)"
           export RUNTIME_VERSION="${{ github.event.inputs.release_tag }}"
           export RUNTIME_RELEASE_REPO="${{ github.event.inputs.release_repo }}"
           export OPENCLAW_COMMIT="${{ steps.refs.outputs.openclaw_commit }}"
           export SKILLS_COMMIT="${{ steps.refs.outputs.skills_commit }}"
           export RUNTIME_SHA256
+          export SCANNER_SHA256
           python3 - <<'PY'
           import json
           import os
@@ -146,6 +163,11 @@ jobs:
                   os.environ["RUNTIME_VERSION"],
               ),
               "sha256": os.environ["RUNTIME_SHA256"],
+              "scanner_url": "https://github.com/{}/releases/download/{}/entropic-skill-scanner.tar.gz".format(
+                  os.environ["RUNTIME_RELEASE_REPO"],
+                  os.environ["RUNTIME_VERSION"],
+              ),
+              "scanner_sha256": os.environ["SCANNER_SHA256"],
               "openclaw_commit": os.environ["OPENCLAW_COMMIT"],
               "entropic_skills_commit": os.environ["SKILLS_COMMIT"],
           }
@@ -176,6 +198,8 @@ jobs:
           path: |
             openclaw-runtime.tar.gz
             openclaw-runtime.tar.gz.sha256
+            entropic-skill-scanner.tar.gz
+            entropic-skill-scanner.tar.gz.sha256
             runtime-manifest.json
             openclaw-runtime-metadata.json
 
@@ -189,6 +213,8 @@ jobs:
           FILES=(
             "openclaw-runtime.tar.gz"
             "openclaw-runtime.tar.gz.sha256"
+            "entropic-skill-scanner.tar.gz"
+            "entropic-skill-scanner.tar.gz.sha256"
             "runtime-manifest.json"
             "openclaw-runtime-metadata.json"
           )

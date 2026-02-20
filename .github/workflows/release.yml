@@ -46,6 +46,29 @@ jobs:
       - name: Bundle runtime (Colima + Lima + Docker CLI)
         run: ./scripts/bundle-runtime.sh
 
+      - name: Download runtime image from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUNTIME_RELEASE_TAG: runtime-latest
+          RUNTIME_RELEASE_REPO: dominant-strategies/entropic-releases
+        run: |
+          set -euo pipefail
+          RESOURCES_DIR="src-tauri/resources"
+          mkdir -p "$RESOURCES_DIR"
+
+          echo "Downloading runtime image from $RUNTIME_RELEASE_REPO release $RUNTIME_RELEASE_TAG..."
+
+          # Download openclaw-runtime.tar.gz
+          gh release download "$RUNTIME_RELEASE_TAG" \
+            --repo "$RUNTIME_RELEASE_REPO" \
+            --pattern "openclaw-runtime.tar.gz" \
+            --dir "$RESOURCES_DIR"
+
+          # Scanner will be downloaded on-demand from runtime release (not bundled in app)
+
+          echo "Runtime image downloaded:"
+          ls -lh "$RESOURCES_DIR"/*.tar.gz
+
       - name: Import Apple signing certificate
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
