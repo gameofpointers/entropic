@@ -250,14 +250,14 @@ export class GatewayClient {
             minProtocol: 3,
             maxProtocol: 3,
             client: {
-              id: "webchat-ui", // Must be a known client ID
+              id: "openclaw-control-ui",
               displayName: "Entropic Desktop",
               version: "0.1.0",
               platform: "desktop",
-              mode: "ui", // Must be: webchat, cli, ui, backend, node, probe, test
+              mode: "ui",
             },
             role: "operator",
-            scopes: ["operator.admin"],
+            scopes: ["operator.read", "operator.write", "operator.admin"],
             auth: { token: this.token },
           });
           this.log("Connected successfully");

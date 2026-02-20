@@ -8,6 +8,7 @@ use base64::{
     Engine as _,
 };
 use futures_util::{SinkExt, StreamExt};
+use http;
 use rand::RngCore;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
@@ -567,7 +568,21 @@ fn ensure_scanner_image() -> Result<(), String> {
 }
 
 async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, String> {
-    let connect = timeout(Duration::from_millis(1200), connect_async(ws_url))
+    // Create WebSocket request with Origin header for gateway origin check
+    let uri: http::Uri = ws_url.parse().map_err(|e| format!("Invalid URL: {}", e))?;
+    let host = uri.host().unwrap_or("localhost").to_string();
+    let request = http::Request::builder()
+        .uri(uri)
+        .header("Host", host)
+        .header("Origin", "http://localhost")
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
+        .body(())
+        .map_err(|e| format!("Failed to build request: {}", e))?;
+
+    let connect = timeout(Duration::from_millis(1200), connect_async(request))
         .await
         .map_err(|_| "WebSocket connect timeout".to_string())?;
     let (mut ws, _) = connect.map_err(|e| format!("WebSocket connect failed: {}", e))?;
@@ -597,8 +612,8 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
                                 "minProtocol": 3,
                                 "maxProtocol": 3,
                                 "client": {
-                                    "id": "openclaw-probe",
-                                    "displayName": "Entropic Health",
+                                    "id": "openclaw-control-ui",
+                                    "displayName": "Entropic Desktop",
                                     "version": "0.1.0",
                                     "platform": "desktop",
                                     "mode": "probe"
@@ -4256,6 +4271,35 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
     {
         set_openclaw_config_value(cfg, &["plugins", "load", "paths"], serde_json::json!([]));
     }
+
+    // Enable control UI access from localhost without device pairing.
+    // This allows the desktop app's health checks and local connections to work
+    // with operator scopes, while still requiring device pairing for remote connections.
+    set_openclaw_config_value(
+        cfg,
+        &["gateway", "controlUi", "allowInsecureAuth"],
+        serde_json::json!(true),
+    );
+
+    // Allow origins for localhost control UI connections.
+    // Includes:
+    // - "null" for native WebSocket clients (Rust health checks)
+    // - http/https localhost for direct browser access
+    // - tauri://localhost for Tauri webview (production builds)
+    // - http://localhost:5174 for Vite dev server
+    set_openclaw_config_value(
+        cfg,
+        &["gateway", "controlUi", "allowedOrigins"],
+        serde_json::json!([
+            "null",
+            "http://localhost",
+            "http://127.0.0.1",
+            "https://localhost",
+            "https://127.0.0.1",
+            "tauri://localhost",
+            "http://localhost:5174"
+        ]),
+    );
 }
 
 fn disable_legacy_messaging_config(cfg: &mut serde_json::Value) {

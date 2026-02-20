@@ -1326,6 +1326,7 @@ dependencies = [
  "cocoa",
  "dirs 5.0.1",
  "futures-util",
+ "http 1.4.0",
  "libc",
  "objc",
  "qrcode",
