@@ -134,7 +134,7 @@ export function Channels() {
         whatsappAllowFrom: "",
       });
       console.log("[Channels] set_channels_config succeeded");
-      setSaveMessage("Telegram setup saved. Restart the app or gateway for changes to take effect.");
+      setSaveMessage("Telegram setup saved.");
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       console.error("[Channels] set_channels_config failed:", detail);
