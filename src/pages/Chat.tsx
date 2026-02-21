@@ -19,7 +19,7 @@ import { open } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
 import clsx from "clsx";
 import { GatewayClient, createGatewayClient, type ChatEvent, type AgentEvent, type GatewayMessage } from "../lib/gateway";
-import { loadOnboardingData, type OnboardingData } from "../lib/profile";
+import { loadOnboardingData, loadProfile, type OnboardingData, type AgentProfile } from "../lib/profile";
 import { SuggestionChip, type SuggestionAction } from "../components/SuggestionChip";
 import { ChannelSetupModal } from "../components/ChannelSetupModal";
 import { MarkdownContent } from "../components/MarkdownContent";
@@ -29,7 +29,7 @@ import { resolveGatewayAuth } from "../lib/gateway-auth";
 import { appendDiagnosticLog } from "../lib/diagnostics";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import { getLocalCreditBalance } from "../lib/localCredits";
-import { signInWithDiscord, signInWithEmail, signInWithGoogle, signUpWithEmail } from "../lib/auth";
+import { signInWithDiscord, signInWithEmail, signInWithGoogle, signUpWithEmail, createCheckout, getBalance } from "../lib/auth";
 import entropicLogo from "../assets/entropic-logo.png";
 import type { Page } from "../components/Layout";
 
@@ -82,6 +82,26 @@ function DiscordIcon({ className }: { className?: string }) {
       <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
     </svg>
   );
+}
+
+// ── Default avatar colors ──────────────────────────────────────
+const AVATAR_COLORS = [
+  "#8b5cf6", "#6366f1", "#3b82f6", "#06b6d4", "#14b8a6",
+  "#10b981", "#f59e0b", "#f97316", "#ef4444", "#ec4899",
+];
+
+function getAvatarColor(name: string): string {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
+}
+
+function getInitials(name: string): string {
+  const parts = name.trim().split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return name.slice(0, 2).toUpperCase();
 }
 
 // ── Local chat persistence ─────────────────────────────────────
@@ -1006,8 +1026,11 @@ export function Chat({
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [onboardingData, setOnboardingData] = useState<OnboardingData | null>(null);
+  const [agentProfile, setAgentProfile] = useState<AgentProfile | null>(null);
   const [showWelcome, setShowWelcome] = useState(true);
   const [lastGatewayError, setLastGatewayError] = useState<string | null>(null);
+  const [showOutOfCreditsModal, setShowOutOfCreditsModal] = useState(false);
+  const [creditsCheckoutLoading, setCreditsCheckoutLoading] = useState(false);
   const [componentMountedAt] = useState(Date.now());
   const runTimingsRef = useRef<Record<string, {
     startedAt: number;
@@ -1061,6 +1084,22 @@ export function Chat({
         detail: { source: "chat-credits" },
       })
     );
+  }
+
+  async function handleQuickAddCredits() {
+    setCreditsCheckoutLoading(true);
+    try {
+      const { checkout_url } = await createCheckout(500);
+      if (checkout_url) {
+        await open(checkout_url);
+        setShowOutOfCreditsModal(false);
+      }
+    } catch (err) {
+      console.error("[Entropic] Quick checkout failed:", err);
+      setError("Failed to start checkout. Try from Billing page.");
+    } finally {
+      setCreditsCheckoutLoading(false);
+    }
   }
 
   async function refreshTrialCredits() {
@@ -1165,6 +1204,37 @@ export function Chat({
     return has401 && looksProxy;
   }
 
+  async function getRecoveryCreditBalanceCents(): Promise<number | null> {
+    if (!isAuthConfigured || useLocalKeys) {
+      return null;
+    }
+
+    if (isAuthenticated) {
+      const balance = await getBalance();
+      return balance.balance_cents;
+    }
+
+    const balance = await getLocalCreditBalance();
+    setLocalCreditsCents(balance.balance_cents);
+    return balance.balance_cents;
+  }
+
+  async function applyProxyRecoveryFailureState(label: string) {
+    try {
+      const balanceCents = await getRecoveryCreditBalanceCents();
+      if (typeof balanceCents === "number" && balanceCents <= 0) {
+        setShowOutOfCreditsModal(true);
+        setError(BILLING_RECOVERY_MESSAGE);
+        addDiag(`${label} caused by exhausted credits`);
+        return;
+      }
+    } catch (err) {
+      addDiag(`${label} balance check failed: ${String(err)}`);
+    }
+
+    setError("Failed to refresh proxy session. Retry from Settings > Gateway.");
+  }
+
   function triggerProxyAuthRecovery(source: string) {
     if (!proxyEnabled || !onRecoverProxyAuth) return;
     const now = Date.now();
@@ -1181,18 +1251,18 @@ export function Chat({
     addDiag(`proxy auth failure detected from ${source}; refreshing gateway token`);
 
     Promise.resolve(onRecoverProxyAuth())
-      .then((ok) => {
+      .then(async (ok) => {
         if (ok) {
           setError("Proxy session refreshed. Please resend your last message.");
           addDiag("proxy auth recovery succeeded");
-        } else {
-          setError("Failed to refresh proxy session. Retry from Settings > Gateway.");
-          addDiag("proxy auth recovery failed");
+          return;
         }
+        addDiag("proxy auth recovery failed; checking credit balance");
+        await applyProxyRecoveryFailureState("proxy auth failure");
       })
-      .catch((err) => {
-        setError("Failed to refresh proxy session. Retry from Settings > Gateway.");
+      .catch(async (err) => {
         addDiag(`proxy auth recovery error: ${String(err)}`);
+        await applyProxyRecoveryFailureState("proxy auth error");
       })
       .finally(() => {
         proxyAuthRecoveryInFlightRef.current = false;
@@ -1456,9 +1526,15 @@ export function Chat({
     currentSessionRef.current = currentSession;
   }, [currentSession]);
 
-  // Load onboarding data for personalized welcome
+  // Load onboarding data + agent profile for personalized welcome & avatars
   useEffect(() => {
     loadOnboardingData().then(setOnboardingData).catch(console.error);
+    loadProfile().then(setAgentProfile).catch(console.error);
+    const onProfileUpdated = () => {
+      loadProfile().then(setAgentProfile).catch(console.error);
+    };
+    window.addEventListener("entropic-profile-updated", onProfileUpdated);
+    return () => window.removeEventListener("entropic-profile-updated", onProfileUpdated);
   }, []);
 
   useEffect(() => {
@@ -1846,6 +1922,7 @@ export function Chat({
       setThinkingStatus(null);
       if (isBillingIssueMessage(text)) {
         setError(BILLING_RECOVERY_MESSAGE);
+        setShowOutOfCreditsModal(true);
       }
       addDiag(`recovered final response from history runId=${runId}`);
     } catch (err) {
@@ -2024,6 +2101,9 @@ export function Chat({
     } else if (event.state === "error") {
       const errorMessage = formatAssistantErrorTextForUi(event.errorMessage || "Chat error");
       setError(errorMessage);
+      if (isBillingIssueMessage(errorMessage)) {
+        setShowOutOfCreditsModal(true);
+      }
       setIsLoading(false);
       if (eventRunId && activeRunIdRef.current === eventRunId) {
         clearActiveRunTracking();
@@ -2851,7 +2931,6 @@ export function Chat({
 
   const renderWelcome = () => {
     const userName = onboardingData?.userName || "there";
-    const agentName = onboardingData?.agentName || "Joulie";
     const hasName = userName !== "there";
     const displayName = hasName ? userName : "My";
     const suggestions = buildSuggestions(displayName, hasName);
@@ -2863,7 +2942,7 @@ export function Chat({
             <Sparkles className="w-8 h-8 text-white" />
           </div>
           <h2 className="text-2xl font-semibold mb-2 text-[var(--text-primary)]">
-            Hello {userName}, I am {agentName}
+            Hello {userName}, welcome to Entropic.
           </h2>
           <p className="text-[var(--text-secondary)] mb-8">
             What would you like me to help you with?
@@ -2997,6 +3076,8 @@ export function Chat({
     error && isBillingIssueMessage(error) && !isAuthenticated && isAuthConfigured
   );
 
+  const chatAgentName = agentProfile?.name || onboardingData?.agentName || "Nova";
+
   // Main Chat UI
   return (
     <div className="h-full flex flex-col bg-transparent" onDragOver={e => { e.preventDefault(); setDragActive(true); }}
@@ -3101,18 +3182,33 @@ export function Chat({
             if (msg.role === "user" && !bodyContent) {
               return null;
             }
+            const isUser = msg.role === "user";
+
             return (
-              <div key={msg.id} className={clsx("flex", msg.role === "user" ? "justify-end" : "justify-start")}>
-                <div className={clsx("max-w-[85%]")}>
+              <div key={msg.id} className={clsx("flex", isUser ? "justify-end" : "justify-start")}>
+                <div className={clsx("max-w-[85%]", !isUser && "relative")}>
                   <div className={clsx("px-4 py-2.5 rounded-2xl",
-                    msg.role === "user" ? "bg-[var(--purple-accent)] text-white" : "bg-[var(--bg-tertiary)] text-[var(--text-primary)]")}>
+                    isUser ? "bg-[var(--purple-accent)] text-white" : "bg-[var(--bg-tertiary)] text-[var(--text-primary)]")}>
                     {msg.role === "assistant" ? renderAssistantContent(msg) : <p className="whitespace-pre-wrap">{bodyContent}</p>}
                   </div>
+                  {!isUser && (
+                    <div
+                      className="absolute -bottom-1.5 -left-2.5 w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-semibold text-white overflow-hidden ring-2 ring-[var(--bg-primary)]"
+                      title={chatAgentName}
+                      style={agentProfile?.avatarDataUrl ? undefined : { background: getAvatarColor(chatAgentName) }}
+                    >
+                      {agentProfile?.avatarDataUrl ? (
+                        <img src={agentProfile.avatarDataUrl} alt="" className="w-full h-full object-cover" />
+                      ) : (
+                        getInitials(chatAgentName)
+                      )}
+                    </div>
+                  )}
                   {messageTime ? (
                     <div
                       className={clsx(
                         "mt-1 px-1 text-[11px] text-[var(--text-tertiary)]",
-                        msg.role === "user" ? "text-right" : "text-left"
+                        isUser ? "text-right" : "text-left pl-5"
                       )}
                     >
                       {messageTime}
@@ -3171,6 +3267,66 @@ export function Chat({
           </div>
         )}
       </div>
+
+      {/* Out of Credits Modal */}
+      {showOutOfCreditsModal && (
+        <div
+          className="fixed inset-0 bg-black/20 flex items-center justify-center z-50"
+          onClick={() => setShowOutOfCreditsModal(false)}
+        >
+          <div
+            className="bg-white w-full max-w-sm m-4 rounded-2xl shadow-xl border border-[var(--border-subtle)] p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-purple-100 flex items-center justify-center">
+                  <Sparkles className="w-5 h-5 text-purple-600" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-[var(--text-primary)]">Out of credits</h3>
+                  <p className="text-sm text-[var(--text-tertiary)]">Add credits to continue</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowOutOfCreditsModal(false)}
+                className="p-1.5 text-[var(--text-tertiary)] hover:text-[var(--text-primary)] rounded-md hover:bg-black/5"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-sm text-[var(--text-secondary)] mb-5">
+              Your agent needs credits to keep running. Add funds to continue your conversation.
+            </p>
+
+            <div className="flex flex-col items-center gap-2">
+              <button
+                onClick={handleQuickAddCredits}
+                disabled={creditsCheckoutLoading}
+                className="btn btn-primary !bg-[var(--purple-accent)] hover:!bg-purple-700 text-white flex items-center gap-2 mx-auto"
+              >
+                {creditsCheckoutLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  "Add $5 Credits"
+                )}
+              </button>
+              {onNavigate && (
+                <button
+                  onClick={() => {
+                    setShowOutOfCreditsModal(false);
+                    onNavigate("billing");
+                  }}
+                  className="text-xs text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] underline underline-offset-2"
+                >
+                  Go to billing page
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Channel Setup Modal */}
       <ChannelSetupModal

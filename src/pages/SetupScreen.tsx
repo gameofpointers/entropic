@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Shield, Loader2, CheckCircle2, XCircle, AlertTriangle, Copy } from "lucide-react";
+import { Loader2, CheckCircle2, XCircle, AlertTriangle, Copy } from "lucide-react";
+import entropicLogo from "../assets/entropic-logo.png";
 import quaiLogo from "../assets/quai-logo.svg";
 
 type SetupProgress = {
@@ -175,8 +176,8 @@ export function SetupScreen({ onComplete }: Props) {
 
       {/* Logo and Title */}
       <div className="mb-12 text-center">
-        <div className="w-20 h-20 bg-gradient-to-br from-violet-500 to-purple-600 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg">
-          <Shield className="w-10 h-10 text-white" />
+        <div className="w-20 h-20 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg overflow-hidden bg-white border border-gray-100">
+          <img src={entropicLogo} alt="Entropic" className="w-full h-full object-cover" />
         </div>
         <h1 className="text-3xl font-semibold text-gray-900 mb-2">
           Welcome to Entropic
