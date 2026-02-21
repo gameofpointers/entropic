@@ -1307,13 +1307,15 @@ export function Chat({
     const text = message.toLowerCase();
     if (text.includes("invalid gateway token")) return true;
     if (text.includes("gateway token validation failed")) return true;
+    if (text.includes("gateway token mismatch")) return true;
     if (text.includes("ai provider error: 401")) return true;
     if (text.includes("no cookie auth credentials found")) return true;
     const has401 = text.includes("401") || text.includes("unauthorized");
     const looksProxy =
       text.includes("chat/completions") ||
       text.includes("ai provider") ||
-      text.includes("cookie auth credentials");
+      text.includes("cookie auth credentials") ||
+      text.includes("gateway token");
     return has401 && looksProxy;
   }
 
@@ -1787,7 +1789,7 @@ export function Chat({
   // retry connectToGateway() every 3 s rather than waiting for a dep change.
   useEffect(() => {
     const shouldPoll =
-      gatewayRunning && !gatewayStarting && !connected && (connectedProvider || proxyEnabled);
+      gatewayRunning && !gatewayStarting && !connected && !showOutOfCreditsModal && (connectedProvider || proxyEnabled);
     if (!shouldPoll) return;
     const id = window.setInterval(() => {
       if (!connectInFlightRef.current && !clientRef.current?.isConnected()) {
@@ -1795,7 +1797,7 @@ export function Chat({
       }
     }, 3000);
     return () => window.clearInterval(id);
-  }, [gatewayRunning, gatewayStarting, connected, connectedProvider, proxyEnabled]);
+  }, [gatewayRunning, gatewayStarting, connected, connectedProvider, proxyEnabled, showOutOfCreditsModal]);
 
   useEffect(() => {
     return () => {
@@ -1834,7 +1836,7 @@ export function Chat({
   }, [connected]);
 
   async function connectToGateway() {
-    if (connectInFlightRef.current) return;
+    if (connectInFlightRef.current || showOutOfCreditsModal) return;
     connectInFlightRef.current = true;
     setIsConnecting(true);
     setError(null);
@@ -1900,9 +1902,17 @@ export function Chat({
         if (!client.isConnected()) {
           setConnected(false);
         }
-        if (!suppressError) {
+
+        // Intercept proxy auth failures at the gateway level — show modal instead of raw banner
+        if (isProxyAuthFailure(normalizedError)) {
+          if (!proxyAuthRecoveryInFlightRef.current) {
+            triggerProxyAuthRecovery("gateway error");
+          }
+          addDiag(`gateway error (proxy auth intercepted): ${normalizedError}`);
+        } else if (!suppressError) {
           setError(normalizedError);
         }
+
         setIsConnecting(false);
         if (activeRunIdRef.current) {
           setIsLoading(false);
@@ -1910,7 +1920,9 @@ export function Chat({
           clearActiveRunTracking();
         }
         setLastGatewayError(normalizedError);
-        addDiag(`gateway error: ${normalizedError}${inStartupGracePeriod ? ' (suppressed: startup grace period)' : ''}`);
+        if (!isProxyAuthFailure(normalizedError)) {
+          addDiag(`gateway error: ${normalizedError}${inStartupGracePeriod ? ' (suppressed: startup grace period)' : ''}`);
+        }
       };
       client.on("connected", onConnected);
       client.on("disconnected", onDisconnected);
