@@ -2770,6 +2770,10 @@ export function Chat({
 
     if (!content && sendSession) {
       setDraftsBySession((prev) => ({ ...prev, [sendSession]: "" }));
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+        textareaRef.current.style.overflowY = 'hidden';
+      }
     }
     setShowWelcome(false);
     setIsLoading(true);
@@ -4102,10 +4106,17 @@ export function Chat({
                   if ((prev[sessionKey] || "") === nextValue) return prev;
                   return { ...prev, [sessionKey]: nextValue };
                 });
+                const ta = e.target;
+                ta.style.height = 'auto';
+                const lineHeight = parseInt(getComputedStyle(ta).lineHeight) || 20;
+                const maxHeight = lineHeight * 5;
+                ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
+                ta.style.overflowY = ta.scrollHeight > maxHeight ? 'auto' : 'hidden';
               }}
               onKeyDown={e => {if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }}}
               placeholder="Message your assistant..." rows={1}
               className="form-input flex-1 resize-none leading-tight"
+              style={{ overflow: 'hidden' }}
             />
             <button
               onClick={() => handleSend()}
