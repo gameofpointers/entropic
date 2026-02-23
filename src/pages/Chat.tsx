@@ -4352,11 +4352,6 @@ export function Chat({
         </div>
       )}
 
-      {integrationsMissing && !integrationsSyncing && (
-        <div className="p-2 text-center text-sm bg-amber-500/10 text-amber-700">
-          Integrations need reconnect. Use a quick action below and complete reconnect in-chat.
-        </div>
-      )}
 
       {!gatewayRunning && !gatewayStarting && !autoStartExpected && (
         <div className="p-2 text-center text-sm bg-amber-500/10 text-amber-600 flex items-center justify-center gap-3">

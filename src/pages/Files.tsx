@@ -1241,7 +1241,6 @@ export function Files({
             >
               <Suspense fallback={PANEL_FALLBACK}>
                 <PluginStore
-                  view="plugins"
                   integrationsSyncing={integrationsSyncing}
                   integrationsMissing={integrationsMissing}
                 />
@@ -1265,7 +1264,6 @@ export function Files({
             >
               <Suspense fallback={PANEL_FALLBACK}>
                 <SkillsStore
-                  view="skills"
                   integrationsSyncing={integrationsSyncing}
                   integrationsMissing={integrationsMissing}
                 />

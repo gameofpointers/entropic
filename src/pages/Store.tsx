@@ -271,12 +271,10 @@ function scanBadge(result: PluginScanResult | null) {
 export function Store({
   integrationsSyncing,
   integrationsMissing,
-  view = "plugins",
   onNavigate,
 }: {
   integrationsSyncing?: boolean;
   integrationsMissing?: boolean;
-  view?: "plugins" | "skills";
   onNavigate?: (page: "channels") => void;
 }) {
   const [plugins, setPlugins] = useState<Plugin[]>([]);
@@ -316,9 +314,7 @@ export function Store({
   const [gatewayRestarting, setGatewayRestarting] = useState(false);
   const syncedIntegrationsRef = useRef<Set<string>>(new Set());
 
-  // Redesign state
-  const [activeTab, setActiveTab] = useState<"plugins" | "skills">(view);
-  const [skillsSubTab, setSkillsSubTab] = useState<"market" | "installed">("market");
+  // Redesign state - sub-tab removed, single unified view
 
   useEffect(() => {
     refreshPlugins();
@@ -337,9 +333,6 @@ export function Store({
     };
   }, []);
 
-  useEffect(() => {
-    setActiveTab(view);
-  }, [view]);
 
   useEffect(() => {
     const handleIntegrationUpdate = () => {
@@ -506,12 +499,11 @@ export function Store({
   }, [setupProvider]);
 
   useEffect(() => {
-    if (activeTab !== "skills") return;
     const timer = window.setTimeout(() => {
       refreshClawhubCatalog();
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [activeTab, skillQuery, clawhubSort]);
+  }, [skillQuery, clawhubSort]);
 
   useEffect(() => {
     if (!setupProvider) return;
@@ -921,33 +913,29 @@ export function Store({
       <div className="mb-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold" style={{ color: "var(--text-primary)" }}>
-            {activeTab === "skills" ? "Skills" : "Integrations"}
+            Skills
           </h1>
           <p className="text-sm" style={{ color: "var(--text-tertiary)" }}>
-            {activeTab === "skills"
-              ? "Enhance your AI with new capabilities."
-              : "Manage tools and connected services."}
+            Enhance your AI with new capabilities.
           </p>
         </div>
-        {activeTab === "skills" && (
-          <div className="flex items-center gap-3">
-            {integrationsSyncing && (
-              <div className="flex items-center gap-2 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-[var(--system-blue)]/10 text-[var(--system-blue)]">
-                <Loader2 className="w-3 h-3 animate-spin" />
-                Syncing
-              </div>
-            )}
-            <div className="relative group">
-              <Search className="w-4 h-4 text-[var(--text-tertiary)] absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                value={skillQuery}
-                onChange={(e) => setSkillQuery(e.target.value)}
-                className="w-full sm:w-[260px] pl-9 pr-3 py-2.5 rounded-lg border border-[var(--border-default)] bg-white text-sm focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
-                placeholder="Search skills..."
-              />
+        <div className="flex items-center gap-3">
+          {integrationsSyncing && (
+            <div className="flex items-center gap-2 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide bg-[var(--system-blue)]/10 text-[var(--system-blue)]">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              Syncing
             </div>
+          )}
+          <div className="relative group">
+            <Search className="w-4 h-4 text-[var(--text-tertiary)] absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              value={skillQuery}
+              onChange={(e) => setSkillQuery(e.target.value)}
+              className="w-full sm:w-[260px] pl-9 pr-3 py-2.5 rounded-lg border border-[var(--border-default)] bg-white text-sm focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/20"
+              placeholder="Search skills..."
+            />
           </div>
-        )}
+        </div>
       </div>
 
       {gatewayRestarting && (
@@ -957,52 +945,88 @@ export function Store({
         </div>
       )}
       <div className="flex-1 overflow-auto max-w-6xl w-full mx-auto">
-        {activeTab === "plugins" ? (
           <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-            {/* Google Services Section */}
-            {googleIntegrations.length > 0 && (
-              <div className="mb-6">
-                <h2 className="text-[13px] font-medium uppercase tracking-wide mb-3 px-1 text-[var(--text-secondary)]">
-                  Google Workspace
-                </h2>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {googleIntegrations.map((integration) => {
-                    const effectivelyConnected = integration.connected && !integration.stale;
+            {/* Installed Skills */}
+            {installedSkillCards.length > 0 && (
+              <div className="mb-8">
+                <h2 className="text-[13px] font-medium uppercase tracking-wide mb-4 text-[var(--text-secondary)]">My Skills</h2>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                  {installedSkillCards.map((skill) => {
+                    const badge = skill.managed
+                      ? { label: "Managed", className: "bg-blue-50 text-blue-600 border-blue-100" }
+                      : scanBadge(skillScanResults[skill.id] || null);
+                    const Icon = skill.pluginId ? PLUGIN_ICONS[skill.pluginId] : null;
+                    const integrationEntry = skill.integrationProvider
+                      ? integrations.find((entry) => entry.provider === skill.integrationProvider)
+                      : null;
+                    const integrationConnected = Boolean(
+                      skill.integrationProvider &&
+                      integrationEntry &&
+                      integrationEntry.connected &&
+                      !integrationEntry.stale
+                    );
+
                     return (
-                      <div key={integration.id} className="bg-white rounded-xl p-4 shadow-sm border border-[var(--border-subtle)] flex items-center justify-between">
-                        <div className="flex items-center gap-4">
-                          <div className="w-12 h-12 rounded-xl bg-[var(--system-gray-6)] border border-[var(--border-subtle)] flex items-center justify-center">
-                            <integration.icon className="w-7 h-7" />
-                          </div>
-                          <div>
-                            <div className="font-semibold text-[var(--text-primary)] text-sm">{integration.name}</div>
-                            <div className="text-xs text-[var(--text-secondary)]">
-                              {integration.email || integration.description}
+                      <div key={skill.id} className="bg-white rounded-xl p-4 shadow-sm border border-[var(--border-subtle)] hover:shadow-md transition-all duration-300 flex flex-col">
+                        <div className="flex items-start gap-4 mb-4">
+                          {Icon && (
+                              <div className="w-12 h-12 rounded-xl bg-[var(--system-gray-6)] flex items-center justify-center shrink-0 border border-[var(--border-subtle)]">
+                              <Icon className="w-7 h-7" />
+                            </div>
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <h3 className="font-semibold text-[var(--text-primary)] text-sm truncate">{skill.name}</h3>
+                            <div className="flex flex-wrap items-center gap-2 mt-1">
+                              <span className={clsx("px-2 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-widest border", badge.className)}>
+                                {badge.label}
+                              </span>
                             </div>
                           </div>
                         </div>
-                        <button
-                          onClick={() =>
-                            effectivelyConnected
-                              ? handleDisconnectIntegration(integration.id)
-                              : handleConnectIntegration(integration.id)
-                          }
-                          disabled={connecting === integration.id}
-                          className={clsx(
-                            "px-4 py-1.5 rounded-full text-[11px] font-semibold uppercase tracking-wide transition-all",
-                            effectivelyConnected
-                              ? "bg-[var(--system-gray-6)] text-[var(--text-secondary)] hover:bg-red-50 hover:text-red-600"
-                              : "bg-[var(--system-blue)] text-white hover:opacity-90"
+                        <p className="text-sm text-[var(--text-secondary)] leading-relaxed line-clamp-3 mb-4 flex-1">{skill.description}</p>
+
+                        <div className="flex flex-col gap-2 mt-auto">
+                          {!skill.managed && (
+                            <button
+                              onClick={() => handleAuditSkill(skill)}
+                              className="w-full py-2 bg-gray-50 text-gray-600 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-gray-100 transition-colors border border-gray-100"
+                            >
+                              Audit
+                            </button>
                           )}
-                        >
-                          {connecting === integration.id
-                            ? "..."
-                            : effectivelyConnected
-                              ? "Disconnect"
-                              : integration.connected && integration.stale
-                                ? "Reconnect"
-                                : "Connect"}
-                        </button>
+                          {skill.integrationProvider ? (
+                            <button
+                              onClick={() =>
+                                integrationConnected
+                                  ? handleDisconnectIntegration(skill.integrationProvider as IntegrationProvider)
+                                  : handleConnectIntegration(skill.integrationProvider as IntegrationProvider)
+                              }
+                              disabled={connecting === skill.integrationProvider}
+                              className={clsx(
+                                "w-full py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-all",
+                                integrationConnected
+                                  ? "bg-green-50 text-green-600"
+                                  : "bg-blue-600 text-white shadow-lg shadow-blue-100"
+                              )}
+                            >
+                              {connecting === skill.integrationProvider
+                                ? "..."
+                                : integrationConnected
+                                  ? "Connected"
+                                  : integrationEntry?.connected && integrationEntry.stale
+                                    ? "Reconnect"
+                                    : "Setup"}
+                            </button>
+                          ) : skill.workspaceSkillId ? (
+                            <button
+                              onClick={() => handleRemoveWorkspaceSkill(skill.workspaceSkillId as string)}
+                              disabled={removingSkill === skill.workspaceSkillId}
+                              className="w-full py-2 bg-red-50 text-red-600 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-red-100 transition-colors border border-red-100"
+                            >
+                              Remove
+                            </button>
+                          ) : null}
+                        </div>
                       </div>
                     );
                   })}
@@ -1010,194 +1034,77 @@ export function Store({
               </div>
             )}
 
-            {/* Coming Soon Message */}
-            <div className="text-center py-8">
-              <p className="text-sm text-[var(--text-secondary)]">
-                More plugins will be added soon.
-              </p>
-            </div>
-          </div>
-        ) : (
-          <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-            {/* Skills Content Tabs */}
-            <div className="flex items-center gap-6 py-4 border-b border-[var(--border-subtle)] mb-6 overflow-x-auto no-scrollbar">
-              <button
-                onClick={() => setSkillsSubTab("market")}
-                className={clsx(
-                  "pb-2 text-sm font-semibold transition-all relative whitespace-nowrap",
-                  skillsSubTab === "market" ? "text-[var(--system-blue)]" : "text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]"
-                )}
-              >
-                Marketplace
-                {skillsSubTab === "market" && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[var(--system-blue)] rounded-full" />}
-              </button>
-              <button
-                onClick={() => setSkillsSubTab("installed")}
-                className={clsx(
-                  "pb-2 text-sm font-semibold transition-all relative whitespace-nowrap",
-                  skillsSubTab === "installed" ? "text-[var(--system-blue)]" : "text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]"
-                )}
-              >
-                My Skills ({installedSkillCards.length})
-                {skillsSubTab === "installed" && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[var(--system-blue)] rounded-full" />}
-              </button>
-            </div>
+            {/* Marketplace */}
+            <div className="rounded-2xl border border-blue-100 bg-gradient-to-b from-blue-50/60 via-white to-white p-4 md:p-6">
+              {/* Security Banner */}
+              <div className="relative overflow-hidden bg-white border border-[var(--border-subtle)] rounded-xl p-5 mb-8 shadow-sm">
+                <div className="relative z-10 flex flex-col md:flex-row md:items-center gap-6">
+                  <div className="w-12 h-12 rounded-xl bg-[var(--system-blue)] flex items-center justify-center shrink-0">
+                    <ShieldCheck className="w-6 h-6 text-white" strokeWidth={2.5} />
+                  </div>
+                  <div className="flex-1">
+                    <h2 className="text-sm font-semibold text-[var(--text-primary)] mb-1">Verified by Cisco AI Defense</h2>
+                    <p className="text-sm text-[var(--text-secondary)] leading-snug max-w-2xl">
+                      All skills on ClawHub are automatically audited for security and behavioral risks by Cisco's industry-leading scanner.
+                    </p>
+                  </div>
+                  <a
+                    href="https://github.com/cisco-ai-defense/skill-scanner"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-4 py-2 bg-white rounded-lg text-xs font-semibold border border-[var(--border-default)] hover:bg-[var(--system-gray-6)] transition-all flex items-center gap-2 shrink-0"
+                  >
+                    <Info className="w-4 h-4 text-[var(--system-blue)]" />
+                    Scanner Specs
+                  </a>
+                </div>
+              </div>
 
-            {skillsSubTab === "market" ? (
-              <div className="rounded-2xl border border-blue-100 bg-gradient-to-b from-blue-50/60 via-white to-white p-4 md:p-6">
-                {/* Security Banner */}
-                <div className="relative overflow-hidden bg-white border border-[var(--border-subtle)] rounded-xl p-5 mb-8 shadow-sm">
-                  <div className="relative z-10 flex flex-col md:flex-row md:items-center gap-6">
-                    <div className="w-12 h-12 rounded-xl bg-[var(--system-blue)] flex items-center justify-center shrink-0">
-                      <ShieldCheck className="w-6 h-6 text-white" strokeWidth={2.5} />
-                    </div>
-                    <div className="flex-1">
-                      <h2 className="text-sm font-semibold text-[var(--text-primary)] mb-1">Verified by Cisco AI Defense</h2>
-                      <p className="text-sm text-[var(--text-secondary)] leading-snug max-w-2xl">
-                        All skills on ClawHub are automatically audited for security and behavioral risks by Cisco's industry-leading scanner.
-                      </p>
-                    </div>
-                    <a
-                      href="https://github.com/cisco-ai-defense/skill-scanner"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="px-4 py-2 bg-white rounded-lg text-xs font-semibold border border-[var(--border-default)] hover:bg-[var(--system-gray-6)] transition-all flex items-center gap-2 shrink-0"
+              <div className="mb-10">
+                <div className="flex items-center gap-4 mb-4">
+                  <h2 className="text-[13px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">Featured Skills</h2>
+                  <div className="px-2.5 py-0.5 bg-amber-50 text-amber-600 rounded-full text-[10px] font-bold uppercase tracking-widest border border-amber-100">Editor's Choice</div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {featuredSkills.map((skill) => renderClawhubSkillCard(skill))}
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-[13px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">Explore ClawHub</h2>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-[var(--text-tertiary)] uppercase tracking-wide">Sort:</span>
+                    <select
+                      value={clawhubSort}
+                      onChange={(e) => setClawhubSort(e.target.value as ClawhubSort)}
+                      className="bg-transparent border-none text-xs font-semibold text-[var(--system-blue)] focus:ring-0 cursor-pointer"
                     >
-                      <Info className="w-4 h-4 text-[var(--system-blue)]" />
-                      Scanner Specs
-                    </a>
+                      <option value="stars">Most Stars</option>
+                      <option value="downloads">Most Popular</option>
+                      <option value="installs">Trending</option>
+                      <option value="newest">Newest</option>
+                    </select>
                   </div>
                 </div>
 
-                <div className="mb-10">
-                  <div className="flex items-center gap-4 mb-4">
-                    <h2 className="text-[13px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">Featured Skills</h2>
-                    <div className="px-2.5 py-0.5 bg-amber-50 text-amber-600 rounded-full text-[10px] font-bold uppercase tracking-widest border border-amber-100">Editor's Choice</div>
+                {clawhubLoading ? (
+                  <div className="py-24 flex flex-col items-center gap-4">
+                    <Loader2 className="w-8 h-8 animate-spin text-[var(--system-blue)]" />
+                    <p className="text-[var(--text-tertiary)] font-semibold uppercase tracking-wide text-[10px]">Loading catalog...</p>
                   </div>
+                ) : clawhubLookupError ? (
+                  <div className="bg-red-50 border border-red-100 rounded-xl p-8 text-center text-red-600">
+                    <p className="font-semibold">{clawhubLookupError}</p>
+                  </div>
+                ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {featuredSkills.map((skill) => renderClawhubSkillCard(skill))}
+                    {browseSkills.map((skill) => renderClawhubSkillCard(skill))}
                   </div>
-                </div>
-
-                <div>
-                  <div className="flex items-center justify-between mb-4">
-                    <h2 className="text-[13px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">Explore ClawHub</h2>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-semibold text-[var(--text-tertiary)] uppercase tracking-wide">Sort:</span>
-                      <select
-                        value={clawhubSort}
-                        onChange={(e) => setClawhubSort(e.target.value as ClawhubSort)}
-                        className="bg-transparent border-none text-xs font-semibold text-[var(--system-blue)] focus:ring-0 cursor-pointer"
-                      >
-                        <option value="stars">Most Stars</option>
-                        <option value="downloads">Most Popular</option>
-                        <option value="installs">Trending</option>
-                        <option value="newest">Newest</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  {clawhubLoading ? (
-                    <div className="py-24 flex flex-col items-center gap-4">
-                      <Loader2 className="w-8 h-8 animate-spin text-[var(--system-blue)]" />
-                      <p className="text-[var(--text-tertiary)] font-semibold uppercase tracking-wide text-[10px]">Loading catalog...</p>
-                    </div>
-                  ) : clawhubLookupError ? (
-                    <div className="bg-red-50 border border-red-100 rounded-xl p-8 text-center text-red-600">
-                      <p className="font-semibold">{clawhubLookupError}</p>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                      {browseSkills.map((skill) => renderClawhubSkillCard(skill))}
-                    </div>
-                  )}
-                </div>
+                )}
               </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                {installedSkillCards.map((skill) => {
-                  const badge = skill.managed
-                    ? { label: "Managed", className: "bg-blue-50 text-blue-600 border-blue-100" }
-                    : scanBadge(skillScanResults[skill.id] || null);
-                  const Icon = skill.pluginId ? PLUGIN_ICONS[skill.pluginId] : null;
-                  const integrationEntry = skill.integrationProvider
-                    ? integrations.find((entry) => entry.provider === skill.integrationProvider)
-                    : null;
-                  const integrationConnected = Boolean(
-                    skill.integrationProvider &&
-                    integrationEntry &&
-                    integrationEntry.connected &&
-                    !integrationEntry.stale
-                  );
-
-                  return (
-                    <div key={skill.id} className="bg-white rounded-xl p-4 shadow-sm border border-[var(--border-subtle)] hover:shadow-md transition-all duration-300 flex flex-col">
-                      <div className="flex items-start gap-4 mb-4">
-                        {Icon && (
-                            <div className="w-12 h-12 rounded-xl bg-[var(--system-gray-6)] flex items-center justify-center shrink-0 border border-[var(--border-subtle)]">
-                            <Icon className="w-7 h-7" />
-                          </div>
-                        )}
-                        <div className="min-w-0 flex-1">
-                          <h3 className="font-semibold text-[var(--text-primary)] text-sm truncate">{skill.name}</h3>
-                          <div className="flex flex-wrap items-center gap-2 mt-1">
-                            <span className={clsx("px-2 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-widest border", badge.className)}>
-                              {badge.label}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                      <p className="text-sm text-[var(--text-secondary)] leading-relaxed line-clamp-3 mb-4 flex-1">{skill.description}</p>
-                      
-                      <div className="flex flex-col gap-2 mt-auto">
-                        {!skill.managed && (
-                          <button
-                            onClick={() => handleAuditSkill(skill)}
-                            className="w-full py-2 bg-gray-50 text-gray-600 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-gray-100 transition-colors border border-gray-100"
-                          >
-                            Audit
-                          </button>
-                        )}
-                        {skill.integrationProvider ? (
-                          <button
-                            onClick={() =>
-                              integrationConnected
-                                ? handleDisconnectIntegration(skill.integrationProvider as IntegrationProvider)
-                                : handleConnectIntegration(skill.integrationProvider as IntegrationProvider)
-                            }
-                            disabled={connecting === skill.integrationProvider}
-                            className={clsx(
-                              "w-full py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-all",
-                              integrationConnected
-                                ? "bg-green-50 text-green-600"
-                                : "bg-blue-600 text-white shadow-lg shadow-blue-100"
-                            )}
-                          >
-                            {connecting === skill.integrationProvider
-                              ? "..."
-                              : integrationConnected
-                                ? "Connected"
-                                : integrationEntry?.connected && integrationEntry.stale
-                                  ? "Reconnect"
-                                  : "Setup"}
-                          </button>
-                        ) : skill.workspaceSkillId ? (
-                          <button
-                            onClick={() => handleRemoveWorkspaceSkill(skill.workspaceSkillId as string)}
-                            disabled={removingSkill === skill.workspaceSkillId}
-                            className="w-full py-2 bg-red-50 text-red-600 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-red-100 transition-colors border border-red-100"
-                          >
-                            Remove
-                          </button>
-                        ) : null}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+            </div>
           </div>
-        )}
       </div>
 
       <ScanResultModal
