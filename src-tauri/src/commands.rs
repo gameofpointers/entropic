@@ -4030,7 +4030,15 @@ fn resolve_managed_plugin_id(primary: &'static str, legacy: &'static str) -> Opt
 
 fn write_openclaw_config(value: &serde_json::Value) -> Result<(), String> {
     let payload = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-    write_container_file(&state_file("openclaw.json"), &payload)
+    let config_path = state_file("openclaw.json");
+    // Only write if the content actually changed to avoid triggering the
+    // gateway's config file watcher and causing unnecessary SIGUSR1 restarts.
+    if let Some(existing) = read_container_file(&config_path) {
+        if existing.trim() == payload.trim() {
+            return Ok(());
+        }
+    }
+    write_container_file(&config_path, &payload)
 }
 
 fn set_openclaw_config_value(cfg: &mut serde_json::Value, path: &[&str], value: serde_json::Value) {
