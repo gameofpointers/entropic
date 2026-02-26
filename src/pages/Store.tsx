@@ -291,6 +291,7 @@ export function Store({
   const [setupLaunchUrl, setSetupLaunchUrl] = useState<string | null>(null);
   const [setupError, setSetupError] = useState<string | null>(null);
   const [setupVerifying, setSetupVerifying] = useState(false);
+  const [setupUrlCopied, setSetupUrlCopied] = useState(false);
   const [scanModalOpen, setScanModalOpen] = useState(false);
   const [scanPluginId, setScanPluginId] = useState<string | null>(null);
   const [scanResult, setScanResult] = useState<PluginScanResult | null>(null);
@@ -1380,7 +1381,7 @@ export function Store({
               </p>
               {setupTimedOut && (
                 <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 mb-3 w-full">
-                  This is taking longer than expected. If your browser didn&apos;t open, retry launching authorization.
+                  This is taking longer than expected. If your browser didn&apos;t open, use the buttons below to open or copy the link manually.
                 </p>
               )}
               {setupError && (
@@ -1401,13 +1402,16 @@ export function Store({
                     Open in Browser
                   </button>
                   <button
-                    className="w-full py-2 bg-gray-50 border border-gray-200 text-gray-600 rounded-2xl text-[12px] font-medium hover:bg-gray-100 transition-colors truncate px-3"
+                    className="w-full py-2 bg-gray-50 border border-gray-200 text-gray-600 rounded-2xl text-[12px] font-medium hover:bg-gray-100 transition-colors px-3"
                     title={setupLaunchUrl}
                     onClick={() => {
-                      void navigator.clipboard.writeText(setupLaunchUrl);
+                      void navigator.clipboard.writeText(setupLaunchUrl).then(() => {
+                        setSetupUrlCopied(true);
+                        setTimeout(() => setSetupUrlCopied(false), 2000);
+                      });
                     }}
                   >
-                    Copy link to open manually
+                    {setupUrlCopied ? "Copied!" : "Copy link to open manually"}
                   </button>
                 </div>
               )}
@@ -1428,6 +1432,7 @@ export function Store({
                   setSetupLaunchUrl(null);
                   setSetupError(null);
                   setSetupVerifying(false);
+                  setSetupUrlCopied(false);
                 }}
                 disabled={setupVerifying}
               >
