@@ -15,6 +15,7 @@ import {
   IntegrationProvider,
 } from "../lib/integrations";
 import { ScanResultModal, type PluginScanResult } from "../components/ScanResultModal";
+import { useAuth } from "../contexts/AuthContext";
 
 // Module-level cache for the ClawHub catalog — survives page navigation.
 // Keyed by "sort:query" so different sort/search results are cached independently.
@@ -287,6 +288,7 @@ export function Store({
   integrationsMissing?: boolean;
   onNavigate?: (page: "channels") => void;
 }) {
+  const { isAuthenticated, isAuthConfigured } = useAuth();
   const [plugins, setPlugins] = useState<Plugin[]>([]);
   const [workspaceSkills, setWorkspaceSkills] = useState<WorkspaceSkill[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
@@ -1431,11 +1433,33 @@ export function Store({
                   This is taking longer than expected. If your browser didn&apos;t open, use the buttons below to open or copy the link manually.
                 </p>
               )}
-              {setupError && (
-                <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2 mb-3 w-full">
-                  {setupError}
-                </p>
-              )}
+              {setupError && (() => {
+                const isAuthError = isAuthConfigured && !isAuthenticated ||
+                  /not authenticated|session expired|unauthorized/i.test(setupError);
+                return isAuthError ? (
+                  <div className="w-full mb-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-left">
+                    <p className="text-xs font-semibold text-amber-800 mb-1">Sign in required</p>
+                    <p className="text-xs text-amber-700 mb-3 leading-relaxed">
+                      You need an Entropic account to connect X (Twitter). Sign in or create a free account to continue.
+                    </p>
+                    <button
+                      className="w-full py-2 bg-amber-600 text-white rounded-xl text-[12px] font-bold hover:bg-amber-700 transition-colors"
+                      onClick={() => {
+                        setSetupProvider(null);
+                        setSetupError(null);
+                        setSetupTimedOut(false);
+                        window.dispatchEvent(new CustomEvent("entropic-open-page", { detail: { page: "billing" } }));
+                      }}
+                    >
+                      Go to Billing &amp; Sign In
+                    </button>
+                  </div>
+                ) : (
+                  <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2 mb-3 w-full">
+                    {setupError}
+                  </p>
+                );
+              })()}
               {setupProvider === "x" && setupLaunchUrl && (
                 <div className="w-full mb-3 flex flex-col gap-2">
                   <button

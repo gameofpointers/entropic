@@ -195,6 +195,15 @@ export function Settings({
   const [wallpaperPickerOpen, setWallpaperPickerOpen] = useState(false);
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
 
+  // Keep profile name in sync when Chat (or any other page) updates it
+  useEffect(() => {
+    const onProfileUpdated = () => {
+      loadProfile().then(setProfile).catch(() => {});
+    };
+    window.addEventListener("entropic-profile-updated", onProfileUpdated);
+    return () => window.removeEventListener("entropic-profile-updated", onProfileUpdated);
+  }, []);
+
   // Load initial state
   useEffect(() => {
     loadProfile().then(setProfile).catch(() => {});
