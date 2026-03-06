@@ -458,6 +458,13 @@ export interface Model {
   tier: string;
 }
 
+export interface LocalModelConfig {
+  enabled: boolean;
+  baseUrl: string;
+  apiKey: string;
+  modelName: string;
+}
+
 /**
  * Make authenticated API request
  */

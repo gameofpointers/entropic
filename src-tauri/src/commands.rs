@@ -5943,6 +5943,35 @@ fn get_embedded_preview_webview(app: &AppHandle) -> Result<Webview, String> {
         .ok_or_else(|| "Embedded preview is not active.".to_string())
 }
 
+fn main_agent_auth_profile_paths() -> [&'static str; 2] {
+    [
+        "/home/node/.openclaw/agents/main/agent/auth-profiles.json",
+        "/data/.openclaw/agents/main/agent/auth-profiles.json",
+    ]
+}
+
+fn read_main_agent_auth_profiles() -> serde_json::Value {
+    for path in main_agent_auth_profile_paths() {
+        if let Some(existing) = read_container_file(path) {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&existing) {
+                return parsed;
+            }
+        }
+    }
+    serde_json::json!({ "version": 1, "profiles": {} })
+}
+
+fn write_main_agent_auth_profiles(payload: &str) {
+    for path in main_agent_auth_profile_paths() {
+        if let Err(e) = write_container_file(path, payload) {
+            println!(
+                "[Entropic] Failed to write auth-profiles.json at {}: {}",
+                path, e
+            );
+        }
+    }
+}
+
 struct ContainerFileWrite<'a> {
     path: &'a str,
     content: &'a str,
@@ -7028,10 +7057,38 @@ Use it for durable decisions, preferences, and facts that should persist across 
             );
         }
     } else {
-        // Non-proxy mode: remove openrouter config to avoid validation errors
-        // (an empty models.providers.openrouter object causes "baseUrl required" validation failure)
-        remove_openclaw_config_value(&mut cfg, &["models", "providers", "openrouter"]);
+        // Non-proxy mode: check if local model is configured (also uses openrouter provider name)
+        let local_base_url = read_container_env("ENTROPIC_LOCAL_MODEL_BASE_URL");
+        let local_model_name = read_container_env("ENTROPIC_LOCAL_MODEL_NAME");
+        if let (Some(base_url), Some(model_name)) = (&local_base_url, &local_model_name) {
+            if !model_name.is_empty() && !base_url.is_empty() {
+                // Use 'openrouter' as provider name — OpenClaw only recognizes built-in providers
+                set_openclaw_config_value(
+                    &mut cfg,
+                    &["models", "providers", "ollama"],
+                    serde_json::json!({
+                        "baseUrl": base_url,
+                        "api": "ollama",
+                        "models": [{
+                            "id": model_name,
+                            "name": model_name,
+                            "input": ["text"],
+                            "reasoning": false,
+                            "contextWindow": 128000,
+                            "maxTokens": 4096,
+                            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+                        }]
+                    }),
+                );
+            } else {
+                remove_openclaw_config_value(&mut cfg, &["models", "providers", "ollama"]);
+            }
+        } else {
+            // No proxy and no local model: remove ollama config to avoid validation errors
+            remove_openclaw_config_value(&mut cfg, &["models", "providers", "ollama"]);
+        }
     }
+
     let memory_enabled = settings.memory_enabled;
     let memory_slot = if !memory_enabled {
         "none"
@@ -7580,12 +7637,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
             "profiles": serde_json::Value::Object(profiles)
         });
         let payload = serde_json::to_string_pretty(&auth_profiles).map_err(|e| e.to_string())?;
-        if let Err(e) = write_container_file(
-            "/home/node/.openclaw/agents/main/agent/auth-profiles.json",
-            &payload,
-        ) {
-            println!("[Entropic] Failed to write auth-profiles.json: {}", e);
-        }
+        write_main_agent_auth_profiles(&payload);
     }
 
     // Write OpenRouter proxy credentials to auth-profiles.json if in proxy mode
@@ -7618,12 +7670,39 @@ Use it for durable decisions, preferences, and facts that should persist across 
             });
             let payload =
                 serde_json::to_string_pretty(&auth_profiles).map_err(|e| e.to_string())?;
-            if let Err(e) = write_container_file(
-                "/home/node/.openclaw/agents/main/agent/auth-profiles.json",
-                &payload,
-            ) {
-                println!("[Entropic] Failed to write proxy auth-profiles.json: {}", e);
+            write_main_agent_auth_profiles(&payload);
+        }
+    }
+
+    // Ensure ollama:default auth profile exists for local models.
+    // Previous blocks (Codex OAuth, proxy) may have overwritten auth-profiles.json.
+    {
+        let local_base_url = read_container_env("ENTROPIC_LOCAL_MODEL_BASE_URL");
+        let local_model_name = read_container_env("ENTROPIC_LOCAL_MODEL_NAME");
+        if local_base_url.is_some() && local_model_name.as_deref().map_or(false, |n| !n.is_empty())
+        {
+            let local_api_key = read_container_env("ENTROPIC_LOCAL_MODEL_API_KEY")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "local-placeholder".to_string());
+            // Read existing auth-profiles.json and merge in the openrouter:default entry
+            let mut auth_json = read_main_agent_auth_profiles();
+            if let Some(profiles) = auth_json.get_mut("profiles").and_then(|p| p.as_object_mut()) {
+                profiles.insert(
+                    "ollama:default".to_string(),
+                    serde_json::json!({
+                        "type": "api_key",
+                        "provider": "ollama",
+                        "key": local_api_key
+                    }),
+                );
             }
+            let payload =
+                serde_json::to_string_pretty(&auth_json).map_err(|e| e.to_string())?;
+            println!(
+                "[Entropic] Writing ollama:default auth profile for local model (key len={})",
+                local_api_key.len()
+            );
+            write_main_agent_auth_profiles(&payload);
         }
     }
 
@@ -9435,7 +9514,9 @@ pub async fn start_gateway(
 
     let gateway_token = expected_gateway_token(&app)?;
 
-    let has_any_local_api_key = has_configured_provider_key(&api_keys, "anthropic")
+    let is_local_model = model.as_deref().map_or(false, |m| m.starts_with("local/"));
+    let has_any_local_api_key = is_local_model
+        || has_configured_provider_key(&api_keys, "anthropic")
         || has_configured_provider_key(&api_keys, "openai")
         || has_configured_provider_key(&api_keys, "google");
     if !has_any_local_api_key {
@@ -9461,9 +9542,11 @@ pub async fn start_gateway(
         );
     }
 
-    // Parse model string: "provider/model-id:param" -> base model + optional params
-    // Supported suffixes: ":thinking" (Anthropic), ":reasoning=level" (OpenAI)
-    let (base_model, model_params) = if let Some(colon_pos) = model_full.find(':') {
+    // Parse model string while preserving colon tags for local models like
+    // llama3.2:3b. Suffix parsing only applies to non-local providers.
+    let (base_model, model_params) = if model_full.starts_with("local/") {
+        (model_full.as_str(), None)
+    } else if let Some(colon_pos) = model_full.find(':') {
         (&model_full[..colon_pos], Some(&model_full[colon_pos + 1..]))
     } else {
         (model_full.as_str(), None)
@@ -9474,6 +9557,20 @@ pub async fn start_gateway(
     let reasoning_effort = model_params
         .and_then(|p| p.strip_prefix("reasoning="))
         .unwrap_or("");
+
+    // Local models use OpenClaw's native Ollama provider.
+    let openclaw_model = if base_model.starts_with("local/") {
+        format!("ollama/{}", &base_model[6..])
+    } else {
+        base_model.to_string()
+    };
+    let expected_local_model_config = if base_model.starts_with("local/") {
+        read_local_model_config(&app).map(|(base_url, api_key, model_name)| {
+            (rewrite_localhost_for_docker(&base_url), api_key, model_name)
+        })
+    } else {
+        None
+    };
 
     cleanup_legacy_gateway_artifacts();
 
@@ -9491,6 +9588,9 @@ pub async fn start_gateway(
         let current_container_image_id = container_image_id(OPENCLAW_CONTAINER);
         let latest_runtime_image_id = image_id("openclaw-runtime:latest");
         let current_proxy_mode = read_container_env("ENTROPIC_PROXY_MODE");
+        let current_local_base_url = read_container_env("ENTROPIC_LOCAL_MODEL_BASE_URL");
+        let current_local_api_key = read_container_env("ENTROPIC_LOCAL_MODEL_API_KEY");
+        let current_local_model_name = read_container_env("ENTROPIC_LOCAL_MODEL_NAME");
         // Check legacy environment variable for backward compatibility during migration
         let legacy_proxy_mode = read_container_env("NOVA_PROXY_MODE");
         // Check if the Anthropic auth type matches (OAuth token vs API key)
@@ -9511,11 +9611,22 @@ pub async fn start_gateway(
             (Some(current), Some(latest)) => current == latest,
             _ => true,
         };
+        let local_config_matches = if let Some((expected_base_url, expected_api_key, expected_model_name)) =
+            &expected_local_model_config
+        {
+            current_local_base_url.as_deref() == Some(expected_base_url.as_str())
+                && current_local_model_name.as_deref() == Some(expected_model_name.as_str())
+                && current_local_api_key.as_deref().unwrap_or("") == expected_api_key.as_str()
+        } else {
+            current_local_base_url.is_none()
+                && current_local_api_key.is_none()
+                && current_local_model_name.is_none()
+        };
         if !is_proxy_container
             && auth_type_matches
             && current_gateway_token.as_deref() == Some(gateway_token.as_str())
             && current_schema.as_deref() == Some(ENTROPIC_GATEWAY_SCHEMA_VERSION)
-            && current_model.as_deref() == Some(base_model)
+            && current_model.as_deref() == Some(openclaw_model.as_str())
             && current_browser_host_port.as_deref() == Some(BROWSER_SERVICE_HOST_PORT)
             && current_browser_headful.as_deref() == Some("1")
             && current_browser_allow_unsafe_no_sandbox.as_deref()
@@ -9523,6 +9634,7 @@ pub async fn start_gateway(
             && current_browser_allow_insecure_secure_contexts.as_deref()
                 == Some(BROWSER_ALLOW_INSECURE_SECURE_CONTEXTS)
             && image_matches_latest
+            && local_config_matches
         {
             apply_agent_settings(&app, &state)?;
             match wait_for_gateway_health_strict(&gateway_token, 6).await {
@@ -9586,7 +9698,7 @@ pub async fn start_gateway(
         ),
         // OPENCLAW_MODEL is read by apply_agent_settings to write openclaw.json config.
         // Keep base model and pass reasoning/thinking separately.
-        ("OPENCLAW_MODEL", base_model),
+        ("OPENCLAW_MODEL", &openclaw_model),
         ("OPENCLAW_MEMORY_SLOT", memory_slot),
         // ENTROPIC_THINKING_LEVEL is read by apply_agent_settings to set thinkingDefault in config
         ("ENTROPIC_THINKING_LEVEL", thinking_level),
@@ -9643,6 +9755,28 @@ pub async fn start_gateway(
     }
     if let Some(base) = web_base_url.as_deref() {
         env_entries.push(("ENTROPIC_WEB_BASE_URL", base));
+    }
+
+    // Local model support: pass base URL, API key, and model name to container
+    let local_model_config = expected_local_model_config.clone();
+    let local_base_url_docker: String;
+    let local_api_key: String;
+    let local_model_name_str: String;
+    if let Some((base_url, api_key, model_name)) = &local_model_config {
+        local_base_url_docker = rewrite_localhost_for_docker(base_url)
+            .trim_end_matches('/')
+            .trim_end_matches("/v1")
+            .to_string();
+        local_api_key = if api_key.is_empty() {
+            "local-placeholder".to_string()
+        } else {
+            api_key.clone()
+        };
+        local_model_name_str = model_name.clone();
+        env_entries.push(("ENTROPIC_LOCAL_MODEL_BASE_URL", &local_base_url_docker));
+        env_entries.push(("ENTROPIC_LOCAL_MODEL_API_KEY", &local_api_key));
+        env_entries.push(("OLLAMA_API_KEY", &local_api_key));
+        env_entries.push(("ENTROPIC_LOCAL_MODEL_NAME", &local_model_name_str));
     }
 
     let env_file = gateway_env_file(&env_entries)?;
@@ -10176,17 +10310,22 @@ pub async fn start_gateway_with_proxy(
 /// Only works for same-provider changes (API keys stay the same).
 #[tauri::command]
 pub fn update_gateway_model(model: String) -> Result<(), String> {
-    let base_model = model.split(':').next().unwrap_or(&model);
-    let thinking_enabled = model.contains(":thinking");
-    let reasoning_effort = model
-        .split(':')
-        .find_map(|s| s.strip_prefix("reasoning="))
-        .unwrap_or("");
+    let (base_model, thinking_enabled, reasoning_effort) = if model.starts_with("local/") {
+        (format!("ollama/{}", &model[6..]), false, String::new())
+    } else {
+        let base_model = model.split(':').next().unwrap_or(&model);
+        let thinking_enabled = model.contains(":thinking");
+        let reasoning_effort = model
+            .split(':')
+            .find_map(|s| s.strip_prefix("reasoning="))
+            .unwrap_or("");
+        (base_model.to_string(), thinking_enabled, reasoning_effort.to_string())
+    };
 
     let thinking_level = if thinking_enabled {
         "high"
     } else if !reasoning_effort.is_empty() {
-        reasoning_effort
+        reasoning_effort.as_str()
     } else {
         "off"
     };
@@ -10303,6 +10442,110 @@ pub async fn get_gateway_auth(app: AppHandle) -> Result<GatewayAuthPayload, Stri
         ws_url: gateway_ws_url(),
         token: effective_gateway_token(&app)?,
     })
+}
+
+fn read_local_model_config(app: &AppHandle) -> Option<(String, String, String)> {
+    let store_path = app
+        .path()
+        .app_data_dir()
+        .ok()?
+        .join("entropic-settings.json");
+    let content = fs::read_to_string(&store_path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let config = json.get("localModelConfig")?;
+    let enabled = config.get("enabled")?.as_bool()?;
+    if !enabled {
+        return None;
+    }
+    let base_url = config.get("baseUrl")?.as_str()?.to_string();
+    let api_key = config
+        .get("apiKey")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let model_name = config.get("modelName")?.as_str()?.to_string();
+    if model_name.is_empty() || base_url.is_empty() {
+        return None;
+    }
+    Some((base_url, api_key, model_name))
+}
+
+fn rewrite_localhost_for_docker(url: &str) -> String {
+    url.replace("localhost", "host.docker.internal")
+        .replace("127.0.0.1", "host.docker.internal")
+}
+
+#[tauri::command]
+pub async fn test_local_model_connection(
+    base_url: String,
+    api_key: Option<String>,
+    model_name: String,
+) -> Result<(), String> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let mut req = client.get(&url);
+    if let Some(key) = &api_key {
+        if !key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", key));
+        }
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Connection failed: {}. Is your model server running?", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Server returned status {}", resp.status()));
+    }
+
+    // Check if the specified model exists in the response
+    if let Ok(body) = resp.json::<serde_json::Value>().await {
+        if let Some(models) = body.get("data").and_then(|d| d.as_array()) {
+            let found = models.iter().any(|m| {
+                m.get("id")
+                    .and_then(|id| id.as_str())
+                    .map(|id| id == model_name)
+                    .unwrap_or(false)
+            });
+            if !found && !models.is_empty() {
+                let available: Vec<String> = models
+                    .iter()
+                    .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(String::from))
+                    .take(5)
+                    .collect();
+                return Err(format!(
+                    "Model '{}' not found. Available: {}",
+                    model_name,
+                    available.join(", ")
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_gateway_config() -> Result<String, String> {
+    let cfg = read_openclaw_config();
+    serde_json::to_string_pretty(&cfg).map_err(|e| format!("Failed to serialize config: {}", e))
+}
+
+#[tauri::command]
+pub fn get_gateway_logs(tail: Option<u32>) -> Result<String, String> {
+    let n = tail.unwrap_or(100).to_string();
+    let output = docker_command()
+        .args(["logs", "--tail", &n, OPENCLAW_CONTAINER])
+        .output()
+        .map_err(|e| format!("Failed to get logs: {}", e))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Ok(format!("{}{}", stdout, stderr))
 }
 
 #[tauri::command]

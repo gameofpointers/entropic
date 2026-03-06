@@ -76,6 +76,7 @@ import {
   syncEmbeddedPreviewWebview,
 } from "../lib/nativePreview";
 import { hostedFeaturesEnabled } from "../lib/buildProfile";
+import type { LocalModelConfig, Model } from "../lib/auth";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -104,6 +105,9 @@ type Props = {
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
   onImageModelChange: (model: string) => void;
+  localModelConfig: LocalModelConfig;
+  onLocalModelConfigChange: (config: LocalModelConfig) => void;
+  localModel?: Model | null;
 };
 type ViewMode = "grid" | "list";
 type DesktopIcon = { id: string; x: number; y: number };
@@ -808,6 +812,9 @@ export function Files({
   onCodeModelChange,
   onImageGenerationModelChange,
   onImageModelChange,
+  localModelConfig,
+  onLocalModelConfigChange,
+  localModel,
 }: Props) {
   const { balance, isAuthenticated, isAuthConfigured } = useAuth();
   const billingEnabled = hostedFeaturesEnabled;
@@ -4414,6 +4421,9 @@ export function Files({
                   onCodeModelChange={onCodeModelChange}
                   onImageGenerationModelChange={onImageGenerationModelChange}
                   onImageModelChange={onImageModelChange}
+                  localModelConfig={localModelConfig}
+                  onLocalModelConfigChange={onLocalModelConfigChange}
+                  localModel={localModel}
                 />
               </Suspense>
             </AppWindow>

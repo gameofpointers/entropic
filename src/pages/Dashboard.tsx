@@ -32,7 +32,10 @@ import {
   LOCAL_MODEL_IDS,
   PROXY_IMAGE_GENERATION_MODEL_IDS,
   PROXY_MODEL_IDS,
+  isLocalModelId,
+  sanitizeLocalModelId,
 } from "../components/ModelSelector";
+import type { LocalModelConfig, Model } from "../lib/auth";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import { hideEmbeddedPreviewWebview } from "../lib/nativePreview";
 import {
@@ -61,6 +64,7 @@ const DEFAULT_LOCAL_MODEL = "anthropic/claude-opus-4-6:thinking";
 const DEFAULT_PROXY_IMAGE_GENERATION_MODEL = "google/gemini-3.1-flash-image-preview";
 const DEFAULT_LOCAL_OPENAI_IMAGE_GENERATION_MODEL = "openai/gpt-image-1";
 const DEFAULT_LOCAL_GOOGLE_IMAGE_GENERATION_MODEL = "google/gemini-3.1-flash-image-preview";
+const DEFAULT_LOCAL_MODEL_API_KEY = "local-placeholder";
 const GATEWAY_FAILURE_THRESHOLD = 3;
 const FEEDBACK_FORM_URL = entropicSitePath("/feedback");
 
@@ -80,6 +84,10 @@ function defaultLocalImageGenerationModel(primaryModel?: string) {
 }
 
 function remapModelForMode(model: string, useLocalKeys: boolean): string {
+  if (isLocalModelId(model)) {
+    return sanitizeLocalModelId(model);
+  }
+
   if (useLocalKeys) {
     if (LOCAL_MODEL_IDS.has(model)) {
       return model;
@@ -205,6 +213,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       ? defaultLocalImageGenerationModel(DEFAULT_LOCAL_MODEL)
       : DEFAULT_PROXY_IMAGE_GENERATION_MODEL,
   );
+  const [localModelConfig, setLocalModelConfig] = useState<LocalModelConfig>({
+    enabled: false,
+    baseUrl: "http://localhost:11434/v1",
+    apiKey: DEFAULT_LOCAL_MODEL_API_KEY,
+    modelName: "",
+  });
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [currentChatSession, setCurrentChatSession] = useState<string | null>(null);
   const [pendingChatSession, setPendingChatSession] = useState<string | null>(null);
@@ -288,9 +302,28 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           : defaultUseLocalKeys;
         setUseLocalKeys(isLocal);
 
+        const lmc = await store.get("localModelConfig") as LocalModelConfig | null;
+        const normalizedLocalModelConfig = lmc
+          ? {
+              ...lmc,
+              apiKey: lmc.apiKey?.trim() ? lmc.apiKey : DEFAULT_LOCAL_MODEL_API_KEY,
+            }
+          : null;
+        if (normalizedLocalModelConfig) {
+          setLocalModelConfig(normalizedLocalModelConfig);
+          if (normalizedLocalModelConfig.apiKey !== lmc?.apiKey) {
+            await store.set("localModelConfig", normalizedLocalModelConfig);
+            await store.save();
+          }
+        }
+
         const saved = await store.get("selectedModel") as string | null;
         const nextSelectedModel = saved
-          ? remapModelForMode(saved, isLocal)
+          ? isLocalModelId(saved)
+            ? normalizedLocalModelConfig?.enabled && normalizedLocalModelConfig.modelName
+              ? `local/${normalizedLocalModelConfig.modelName}`
+              : sanitizeLocalModelId(saved)
+            : remapModelForMode(saved, isLocal)
           : isLocal
             ? DEFAULT_LOCAL_MODEL
             : DEFAULT_PROXY_MODEL;
@@ -528,6 +561,21 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     return model.startsWith("openrouter/") ? model : `openrouter/${model}`;
   }
 
+  async function persistLocalModelConfig(config: LocalModelConfig) {
+    const normalizedConfig = {
+      ...config,
+      apiKey: config.apiKey?.trim() ? config.apiKey : DEFAULT_LOCAL_MODEL_API_KEY,
+    };
+    setLocalModelConfig(normalizedConfig);
+    try {
+      const store = await TauriStore.load("entropic-settings.json");
+      await store.set("localModelConfig", normalizedConfig);
+      await store.save();
+    } catch (error) {
+      console.error("[Entropic] Failed to save localModelConfig:", error);
+    }
+  }
+
   function extractGatewayStartError(error: unknown): string {
     if (error instanceof Error) {
       return error.message || "Failed to start gateway";
@@ -681,6 +729,31 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     if (!isAuthConfigured || useLocalKeys) {
       console.log("[Entropic] Skipping proxy flow - proxy mode disabled");
       return false;
+    }
+
+    // Local models bypass proxy — start gateway directly
+    if (isLocalModelId(model)) {
+      console.log("[Entropic] Local model detected, bypassing proxy flow");
+      setShowGatewayStartup(true);
+      setGatewayStartupStage("launch");
+      try {
+        if (stopFirst) {
+          await invoke("restart_gateway", { model });
+        } else {
+          await invoke("start_gateway", { model });
+        }
+        setGatewayStartupStage("health");
+        await new Promise((r) => setTimeout(r, 2000));
+        await checkGateway();
+        return true;
+      } catch (error) {
+        console.error("[Entropic] Failed to start gateway with local model:", error);
+        setStartupError({ message: extractGatewayStartError(error) });
+        return false;
+      } finally {
+        setIsTogglingGateway(false);
+        setShowGatewayStartup(false);
+      }
     }
 
     let anonymousBalanceCents = localCreditBalanceCents ?? 0;
@@ -1187,6 +1260,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
         if (proxyEnabled) {
           // If proxy mode is available, start with proxy flow.
+          // (startGatewayProxyFlow handles local models internally by bypassing proxy)
           const started = await startGatewayProxyFlow({
             model: selectedModel,
             image: imageModel,
@@ -1343,6 +1417,11 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
   // Handle model change - restart gateway with new model
   function handleModelChange(newModel: string) {
+    // Local model — always restart gateway
+    if (isLocalModelId(newModel)) {
+      executeModelChange(newModel);
+      return;
+    }
     // In local-keys mode, warn if switching providers (container restart interrupts running tasks)
     if (useLocalKeys && gatewayRunning) {
       const oldProvider = selectedModel.split("/")[0];
@@ -1358,18 +1437,39 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   // Handle confirmed provider switch (called from confirmation modal)
   async function executeModelChange(newModel: string) {
     setProviderSwitchConfirm(null);
-    setSelectedModel(newModel);
+    const sanitized = sanitizeLocalModelId(newModel);
+    setSelectedModel(sanitized);
 
     // Save preference
     try {
       const store = await TauriStore.load("entropic-settings.json");
-      await store.set("selectedModel", newModel);
+      await store.set("selectedModel", sanitized);
       await store.save();
     } catch (error) {
       console.error("[Entropic] Failed to save model preference:", error);
     }
 
     if (!gatewayRunning) return;
+
+    // Local model — full container restart with local model env vars
+    if (isLocalModelId(newModel)) {
+      console.log("[Entropic] Switching to local model, restarting gateway:", newModel);
+      setShowGatewayStartup(true);
+      setGatewayStartupStage("launch");
+      setIsTogglingGateway(true);
+      try {
+        await invoke("restart_gateway", { model: newModel });
+        setGatewayStartupStage("health");
+        await new Promise((r) => setTimeout(r, 2000));
+        await checkGateway();
+      } catch (error) {
+        console.error("[Entropic] Failed to restart gateway with local model:", error);
+      } finally {
+        setIsTogglingGateway(false);
+        setShowGatewayStartup(false);
+      }
+      return;
+    }
 
     if (
       isAuthConfigured &&
@@ -1441,6 +1541,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         onRecoverProxyAuth={recoverProxyAuthFromChat}
         useLocalKeys={useLocalKeys}
         selectedModel={selectedModel}
+        localModelConfig={localModelConfig}
         onModelChange={handleModelChange}
         imageModel={imageModel}
         imageGenerationModel={imageGenerationModel}
@@ -1507,6 +1608,18 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             onCodeModelChange={setCodeModel}
             onImageGenerationModelChange={setImageGenerationModel}
             onImageModelChange={setImageModel}
+            localModelConfig={localModelConfig}
+            onLocalModelConfigChange={persistLocalModelConfig}
+            localModel={
+              localModelConfig.enabled && localModelConfig.modelName
+                ? {
+                    id: `local/${localModelConfig.modelName}`,
+                    name: `${localModelConfig.modelName} (Local)`,
+                    provider: "Local",
+                    tier: "fast",
+                  }
+                : null
+            }
           />
         );
       case "tasks":
@@ -1515,7 +1628,15 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         return <Jobs gatewayRunning={gatewayRunning} />;
       case "billing":
         return <BillingPage />;
-      case "settings":
+      case "settings": {
+        const localModel: Model | null = localModelConfig.enabled && localModelConfig.modelName
+          ? {
+              id: `local/${localModelConfig.modelName}`,
+              name: `${localModelConfig.modelName} (Local)`,
+              provider: "Local",
+              tier: "fast",
+            }
+          : null;
         return (
           <Settings
             gatewayRunning={gatewayRunning}
@@ -1623,8 +1744,12 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
                 }
               }
             }}
+            localModelConfig={localModelConfig}
+            onLocalModelConfigChange={persistLocalModelConfig}
+            localModel={localModel}
           />
         );
+      }
       default:
         return null;
     }
