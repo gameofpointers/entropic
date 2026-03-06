@@ -19,7 +19,7 @@ import {
   PROXY_IMAGE_GENERATION_MODELS,
 } from "../components/ModelSelector";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
-import { getProxyUrl, signOut as authSignOut } from "../lib/auth";
+import { getProxyUrl, signOut as authSignOut, type LocalModelConfig } from "../lib/auth";
 import { disconnectIntegration, resetIntegrationState } from "../lib/integrations";
 import { resetIntegrationVaultSession } from "../lib/vault";
 import { Logs } from "./Logs";
@@ -53,6 +53,9 @@ type Props = {
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
   onImageModelChange: (model: string) => void;
+  localModelConfig: LocalModelConfig;
+  onLocalModelConfigChange: (config: LocalModelConfig) => void;
+  localModel?: import("../lib/auth").Model | null;
 };
 
 type GatewayConfigHealth = {
@@ -206,6 +209,9 @@ export function Settings({
   onCodeModelChange,
   onImageGenerationModelChange,
   onImageModelChange,
+  localModelConfig,
+  onLocalModelConfigChange,
+  localModel,
 }: Props) {
   const cachedWarmState = getCachedSettingsWarmState();
   const cachedAgentProfileState = cachedWarmState?.agentProfileState;
@@ -327,6 +333,10 @@ export function Settings({
     }
     // "system" uses neither class — CSS media query handles it
   }
+
+  // Local model test state
+  const [localModelTestStatus, setLocalModelTestStatus] = useState<"idle" | "testing" | "success" | "error">("idle");
+  const [localModelTestError, setLocalModelTestError] = useState<string | null>(null);
 
   // Wallpaper state
   const [wallpaperId, setWallpaperId] = useState(DEFAULT_WALLPAPER_ID);
@@ -1217,7 +1227,7 @@ export function Settings({
         <SettingsGroup title="Intelligence">
           <SettingsRow label="Primary Model" icon={Cpu}>
             <div className="w-80">
-              <ModelSelector selectedModel={selectedModel} onModelChange={onModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} />
+              <ModelSelector selectedModel={selectedModel} onModelChange={onModelChange} useLocalKeys={useLocalKeys} connectedProviders={useLocalKeys ? connectedProviders : undefined} localModel={localModel} />
             </div>
           </SettingsRow>
           {!useLocalKeys && (
@@ -1393,6 +1403,85 @@ export function Settings({
         )}
         {gatewayConfigNotice && (
           <div className="px-4 pb-4 pt-2 text-xs text-green-500">{gatewayConfigNotice}</div>
+        )}
+      </SettingsGroup>
+
+      <SettingsGroup title="Local Model">
+        <SettingsRow
+          label="Enable Local Model"
+          icon={Cpu}
+          description="Connect to an OpenAI-compatible local server (Ollama, LM Studio, etc.)"
+        >
+          <button
+            onClick={() => onLocalModelConfigChange({ ...localModelConfig, enabled: !localModelConfig.enabled })}
+            className={clsx(
+              "relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
+              localModelConfig.enabled ? "bg-[var(--system-blue)]" : "bg-[var(--system-gray-4)]"
+            )}
+          >
+            <span className={clsx(
+              "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+              localModelConfig.enabled ? "translate-x-5" : "translate-x-0"
+            )} />
+          </button>
+        </SettingsRow>
+        {localModelConfig.enabled && (
+          <>
+            <SettingsRow label="Base URL" icon={Key} description="e.g. http://localhost:11434/v1">
+              <input
+                type="text"
+                value={localModelConfig.baseUrl}
+                onChange={(e) => onLocalModelConfigChange({ ...localModelConfig, baseUrl: e.target.value })}
+                className="w-80 px-3 py-2 text-sm bg-white border border-[var(--border-subtle)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/30"
+                placeholder="http://localhost:11434/v1"
+              />
+            </SettingsRow>
+            <SettingsRow label="API Key (optional)" icon={Key} description="Defaults to local-placeholder for local servers">
+              <input
+                type="password"
+                value={localModelConfig.apiKey}
+                onChange={(e) => onLocalModelConfigChange({ ...localModelConfig, apiKey: e.target.value })}
+                className="w-80 px-3 py-2 text-sm bg-white border border-[var(--border-subtle)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/30"
+                placeholder="local-placeholder"
+              />
+            </SettingsRow>
+            <SettingsRow label="Model Name" icon={Cpu} description="e.g. llama3.2, mistral, codestral">
+              <input
+                type="text"
+                value={localModelConfig.modelName}
+                onChange={(e) => onLocalModelConfigChange({ ...localModelConfig, modelName: e.target.value })}
+                className="w-80 px-3 py-2 text-sm bg-white border border-[var(--border-subtle)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/30"
+                placeholder="llama3.2"
+              />
+            </SettingsRow>
+            <SettingsRow label="Test Connection" icon={Shield}>
+              <div className="flex items-center gap-3">
+                {localModelTestStatus === "success" && <span className="text-green-600 text-sm font-medium">Connected</span>}
+                {localModelTestStatus === "error" && <span className="text-red-500 text-sm max-w-[200px] truncate" title={localModelTestError || undefined}>{localModelTestError}</span>}
+                <button
+                  onClick={async () => {
+                    setLocalModelTestStatus("testing");
+                    setLocalModelTestError(null);
+                    try {
+                      await invoke("test_local_model_connection", {
+                        baseUrl: localModelConfig.baseUrl,
+                        apiKey: localModelConfig.apiKey || null,
+                        modelName: localModelConfig.modelName,
+                      });
+                      setLocalModelTestStatus("success");
+                    } catch (error: any) {
+                      setLocalModelTestStatus("error");
+                      setLocalModelTestError(String(error));
+                    }
+                  }}
+                  disabled={localModelTestStatus === "testing" || !localModelConfig.modelName || !localModelConfig.baseUrl}
+                  className="px-4 py-2 text-sm font-medium rounded-lg bg-[var(--system-blue)] text-white hover:opacity-90 disabled:opacity-50 transition-opacity"
+                >
+                  {localModelTestStatus === "testing" ? "Testing..." : "Test"}
+                </button>
+              </div>
+            </SettingsRow>
+          </>
         )}
       </SettingsGroup>
 

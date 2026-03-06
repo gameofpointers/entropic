@@ -116,6 +116,16 @@ fi
 if [ -n "$GEMINI_API_KEY" ]; then
     append_auth_profile "google:default" "google" "$(json_escape "${GEMINI_API_KEY}")"
 fi
+# Register openrouter auth profile for local models (uses openrouter provider name).
+# OpenClaw requires an auth profile entry to route API calls and rejects empty keys,
+# even when the upstream local server ignores authentication.
+if [ -n "${ENTROPIC_LOCAL_MODEL_NAME:-}" ] && [ -z "${OPENROUTER_API_KEY:-}" ]; then
+    LOCAL_OPENROUTER_KEY="${ENTROPIC_LOCAL_MODEL_API_KEY:-local-placeholder}"
+    if [ -z "${LOCAL_OPENROUTER_KEY}" ]; then
+        LOCAL_OPENROUTER_KEY="local-placeholder"
+    fi
+    append_auth_profile "openrouter:default" "openrouter" "$(json_escape "${LOCAL_OPENROUTER_KEY}")"
+fi
 
 cat > "$AUTH_DIR/auth-profiles.json" << EOF
 {
@@ -411,6 +421,25 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
         \"models\": [
           { \"id\": \"${MODEL_ID_ESC}\", \"name\": \"${MODEL_ID_ESC}\" }${IMAGE_MODEL_ID_ESC:+,
           { \"id\": \"${IMAGE_MODEL_ID_ESC}\", \"name\": \"${IMAGE_MODEL_ID_ESC}\" }}
+        ]
+      }
+    }
+  }"
+    elif [ -n "${ENTROPIC_LOCAL_MODEL_BASE_URL:-}" ] && [ -n "${ENTROPIC_LOCAL_MODEL_NAME:-}" ]; then
+        LOCAL_BASE_URL_ESC="$(json_escape "${ENTROPIC_LOCAL_MODEL_BASE_URL}")"
+        # Strip colon-based tags (e.g. :7b) — OpenClaw uses colons as parameter separators
+        LOCAL_MODEL_ID="${ENTROPIC_LOCAL_MODEL_NAME%%:*}"
+        LOCAL_MODEL_ID_ESC="$(json_escape "${LOCAL_MODEL_ID}")"
+        # Use 'openrouter' as the provider name — OpenClaw only recognizes built-in providers.
+        # This is safe because local model mode and proxy mode are mutually exclusive in the if/elif chain.
+        MODELS_BLOCK=",
+  \"models\": {
+    \"providers\": {
+      \"openrouter\": {
+        \"baseUrl\": \"${LOCAL_BASE_URL_ESC}\",
+        \"api\": \"openai-completions\",
+        \"models\": [
+          { \"id\": \"${LOCAL_MODEL_ID_ESC}\", \"name\": \"${LOCAL_MODEL_ID_ESC}\", \"input\": [\"text\"], \"reasoning\": false, \"contextWindow\": 128000, \"maxTokens\": 4096, \"cost\": { \"input\": 0, \"output\": 0, \"cacheRead\": 0, \"cacheWrite\": 0 } }
         ]
       }
     }

@@ -75,7 +75,15 @@ import {
 } from "../lib/nativePreview";
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import { getLocalCreditBalance } from "../lib/localCredits";
-import { signInWithDiscord, signInWithEmail, signInWithGoogle, signUpWithEmail, createCheckout, getBalance } from "../lib/auth";
+import {
+  signInWithDiscord,
+  signInWithEmail,
+  signInWithGoogle,
+  signUpWithEmail,
+  createCheckout,
+  getBalance,
+  type LocalModelConfig,
+} from "../lib/auth";
 import entropicLogo from "../assets/entropic-logo.png";
 import type { Page } from "../components/Layout";
 import {
@@ -642,6 +650,93 @@ async function loadPersistedChatData(): Promise<PersistedChatData | null> {
 
 // Message parsing/sanitization functions imported from ../lib/chatMessageUtils
 
+function summarizeGatewayMessageForDiag(message: GatewayMessage | null | undefined): string {
+  if (!message || typeof message !== "object") return "null";
+  try {
+    const summary = {
+      role: typeof message.role === "string" ? message.role : null,
+      type: typeof message.type === "string" ? message.type : null,
+      stopReason: typeof message.stopReason === "string" ? message.stopReason : null,
+      errorMessage: typeof message.errorMessage === "string" ? message.errorMessage : null,
+      contentType: Array.isArray(message.content) ? "array" : typeof message.content,
+      contentPreview:
+        typeof message.content === "string"
+          ? message.content.slice(0, 200)
+          : Array.isArray(message.content)
+            ? message.content.slice(0, 2)
+            : null,
+      textPreview: typeof message.text === "string" ? message.text.slice(0, 200) : null,
+      messageKeys: message.message && typeof message.message === "object" ? Object.keys(message.message as object).slice(0, 10) : null,
+      outputKeys: message.output && typeof message.output === "object" ? Object.keys(message.output as object).slice(0, 10) : null,
+      responseKeys: message.response && typeof message.response === "object" ? Object.keys(message.response as object).slice(0, 10) : null,
+      choiceKeys:
+        Array.isArray(message.choices) && message.choices[0] && typeof message.choices[0] === "object"
+          ? Object.keys(message.choices[0] as object).slice(0, 10)
+          : null,
+      keys: Object.keys(message).slice(0, 20),
+    };
+    return JSON.stringify(summary);
+  } catch {
+    return "[unserializable gateway message]";
+  }
+}
+
+const SILENT_REPLY_PATTERN = /^\s*NO_REPLY\s*$/i;
+
+function isSilentReplyText(value: string): boolean {
+  return SILENT_REPLY_PATTERN.test(value);
+}
+
+function normalizeLocalBaseUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+}
+
+type LocalChatMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
+};
+
+async function sendDirectLocalChat(params: {
+  config: LocalModelConfig;
+  messages: LocalChatMessage[];
+}): Promise<string> {
+  const response = await fetch(`${normalizeLocalBaseUrl(params.config.baseUrl)}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(params.config.apiKey.trim()
+        ? { Authorization: `Bearer ${params.config.apiKey.trim()}` }
+        : {}),
+    },
+    body: JSON.stringify({
+      model: params.config.modelName.trim(),
+      messages: params.messages,
+      stream: false,
+    }),
+  });
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      detail = await response.text();
+    } catch {
+      // ignore
+    }
+    const suffix = detail ? ` ${detail}` : "";
+    throw new Error(`Local model request failed: HTTP ${response.status}.${suffix}`.trim());
+  }
+
+  const data = await response.json();
+  const content =
+    data?.choices?.[0]?.message?.content ??
+    data?.message?.content ??
+    data?.response ??
+    data?.output_text ??
+    "";
+  return typeof content === "string" ? content.trim() : "";
+}
+
 const PROVIDERS: Provider[] = [
   { id: "anthropic", name: "Anthropic", icon: "A", placeholder: "sk-ant-...", keyUrl: "https://console.anthropic.com/settings/keys" },
   { id: "openai", name: "OpenAI", icon: "O", placeholder: "sk-...", keyUrl: "https://platform.openai.com/api-keys" },
@@ -918,6 +1013,11 @@ function integrationRequirementLabel(requirement: IntegrationQuickActionRequirem
 
 function normalizeModelId(id: string | null | undefined, proxyMode: boolean): string | null {
   if (!id) return null;
+  // Local models use OpenClaw's native Ollama provider.
+  if (id.startsWith("local/")) {
+    const rest = id.slice(6);
+    return `ollama/${rest}`;
+  }
   if (!proxyMode) return id;
   if (id.startsWith("openrouter/")) return id;
   return `openrouter/${id}`;
@@ -1017,6 +1117,7 @@ export function Chat({
   onRecoverProxyAuth,
   useLocalKeys,
   selectedModel,
+  localModelConfig,
   onModelChange: _onModelChange,
   imageModel: _imageModel,
   imageGenerationModel,
@@ -1036,6 +1137,7 @@ export function Chat({
   onRecoverProxyAuth?: () => Promise<boolean> | boolean;
   useLocalKeys: boolean;
   selectedModel: string;
+  localModelConfig?: LocalModelConfig;
   onModelChange?: (model: string) => void;
   imageModel: string;
   imageGenerationModel: string;
@@ -1080,6 +1182,9 @@ export function Chat({
   const [showEmailAuth, setShowEmailAuth] = useState(false);
   const [emailAuthMode, setEmailAuthMode] = useState<"signin" | "signup">("signin");
   const [authEmail, setAuthEmail] = useState("");
+  const isDirectLocalModel =
+    selectedModel.startsWith("local/") &&
+    Boolean(localModelConfig?.enabled && localModelConfig.baseUrl.trim() && localModelConfig.modelName.trim());
   const [authPassword, setAuthPassword] = useState("");
   const [showOwnProviderOptions, setShowOwnProviderOptions] = useState(false);
   const [providerStatus, setProviderStatus] = useState<AuthState["providers"]>([]);
@@ -3036,6 +3141,9 @@ export function Chat({
         }
       } else if (event.state === "final" && eventRunId && knownSessionKey) {
         addDiag(`final event missing payload runId=${eventRunId}; attempting history recovery`);
+        if (event.message) {
+          addDiag(`final raw runId=${eventRunId} ${summarizeGatewayMessageForDiag(event.message as GatewayMessage)}`);
+        }
         void recoverFinalRunFromHistory(eventRunId, knownSessionKey);
       }
       if (event.state === "final") {
@@ -4035,7 +4143,7 @@ export function Chat({
     const liveClient = clientRef.current;
     const shouldQueueForReconnect =
       gatewayStarting || isConnecting || connectInFlightRef.current || gatewayRunning;
-    if ((!liveClient || !liveClient.isConnected()) && !shouldQueueForReconnect) {
+    if (!isDirectLocalModel && (!liveClient || !liveClient.isConnected()) && !shouldQueueForReconnect) {
       if (!connectInFlightRef.current) {
         void connectToGateway();
       }
@@ -4205,6 +4313,56 @@ export function Chat({
     setThinkingStatus("Thinking");
     setError(null);
     try {
+      if (isDirectLocalModel && localModelConfig) {
+        addDiag(
+          `send -> local-direct session=${sendSession} len=${outboundMessageContent.length} attachments=${attachmentsPayload.length}`
+        );
+        const priorMessages = (sessionMessagesRef.current[sendSession] || [])
+          .filter((message) => message.id !== userMessage.id)
+          .filter((message) => message.role === "user" || message.role === "assistant")
+          .map((message) => ({
+            role: message.role,
+            content: message.content,
+          })) as Array<{ role: "user" | "assistant"; content: string }>;
+        const assistantText = await sendDirectLocalChat({
+          config: localModelConfig,
+          messages: [
+            ...priorMessages,
+            { role: "user", content: outboundMessageContent },
+          ],
+        });
+        const normalizedAssistantText =
+          assistantText && !isSilentReplyText(assistantText)
+            ? assistantText
+            : "Assistant returned no visible response.";
+        const assistantMessage: Message = {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: normalizedAssistantText,
+          sentAt: Date.now(),
+        };
+        if (currentSessionRef.current === sendSession) {
+          visibleMessagesSessionRef.current = sendSession;
+          setMessages((prev) => [...prev, assistantMessage]);
+        }
+        const cachedMsgs = sessionMessagesRef.current[sendSession] || [];
+        sessionMessagesRef.current[sendSession] = [...cachedMsgs, assistantMessage];
+        setSessions((prev) =>
+          applySessionTitles(
+            normalizeSessionsList(
+              prev.some((s) => s.key === sendSession)
+                ? prev.map((s) => (s.key === sendSession ? { ...s, updatedAt: Date.now() } : s))
+                : [{ key: sendSession, updatedAt: Date.now() }, ...prev],
+            ),
+          ),
+        );
+        setIsLoading(false);
+        setThinkingStatus(null);
+        setPendingAttachments([]);
+        schedulePersist();
+        addDiag(`local-direct ok session=${sendSession} textLen=${assistantText.length}`);
+        return;
+      }
       await dispatchPendingSend(pendingSend);
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : "Send failed";
