@@ -83,6 +83,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const retryTimeoutRef = useRef<number | null>(null);
   const retryIntervalRef = useRef<number | null>(null);
   const runtimeAutoRefreshAttemptedRef = useRef(false);
+  const runtimeAutoCleanupAttemptedRef = useRef(false);
   const fullSyncRef = useRef(false);
   const [providerSwitchConfirm, setProviderSwitchConfirm] = useState<{
     oldProvider: string;
@@ -421,6 +422,71 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     );
   }
 
+  async function retryGatewayStartup() {
+    const proxyEnabled =
+      isAuthConfigured &&
+      !useLocalKeys &&
+      (isAuthenticated || (localCreditBalanceCents ?? 0) > 0);
+
+    if (proxyEnabled) {
+      await startGatewayProxyFlow({
+        model: selectedModel,
+        image: imageModel,
+        stopFirst: false,
+        allowRetry: false,
+      });
+      return;
+    }
+
+    if (isAuthConfigured && !useLocalKeys) {
+      setStartupError(buildOutOfCreditsStartupError());
+      setGatewayStartupStage("idle");
+      setShowGatewayStartup(false);
+      return;
+    }
+
+    setShowGatewayStartup(true);
+    setGatewayStartupStage("launch");
+    await invoke("start_gateway", { model: selectedModel });
+    setGatewayStartupStage("health");
+    await new Promise((r) => setTimeout(r, 2000));
+    await checkGateway();
+  }
+
+  async function tryAutoRecoverRuntime(message: string): Promise<"cleanup" | "refresh" | null> {
+    if (!shouldAutoRefreshRuntime(message)) {
+      return null;
+    }
+
+    if (!runtimeAutoCleanupAttemptedRef.current) {
+      runtimeAutoCleanupAttemptedRef.current = true;
+      try {
+        setStartupError({
+          message: "Repairing sandbox runtime and retrying startup...",
+        });
+        setShowGatewayStartup(true);
+        setGatewayStartupStage("launch");
+        setGatewayRunning(false);
+        try {
+          await invoke("stop_gateway");
+        } catch (error) {
+          console.warn("[Entropic] Failed to stop gateway before automatic runtime repair:", error);
+        }
+        await invoke("reset_isolated_runtime");
+        runtimeAutoRefreshAttemptedRef.current = false;
+        return "cleanup";
+      } catch (error) {
+        console.warn("[Entropic] Automatic runtime cleanup failed:", error);
+      }
+    }
+
+    if (await tryAutoRefreshRuntime(message)) {
+      return "refresh";
+    }
+
+    return null;
+  }
+
   async function tryAutoRefreshRuntime(message: string): Promise<boolean> {
     if (runtimeAutoRefreshAttemptedRef.current || !shouldAutoRefreshRuntime(message)) {
       return false;
@@ -587,6 +653,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       gatewayHealthFailureStreakRef.current = 0;
       setGatewayRunning(true);
       runtimeAutoRefreshAttemptedRef.current = false;
+      runtimeAutoCleanupAttemptedRef.current = false;
       clearGatewayRetry();
       setStartupError(null);
       setGatewayStartupStage("idle");
@@ -673,18 +740,29 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         return false;
       }
 
+      const recoveredRuntime = await tryAutoRecoverRuntime(message);
+      if (recoveredRuntime) {
+        clearGatewayRetry();
+        scheduleGatewayRetry(() => {
+          void startGatewayProxyFlow({
+            model,
+            image,
+            stopFirst: recoveredRuntime === "refresh",
+            allowRetry: false,
+          });
+        });
+        return false;
+      }
+
       setStartupError({
         message,
       });
-      const refreshedRuntime = allowRetry
-        ? await tryAutoRefreshRuntime(message)
-        : false;
       if (allowRetry) {
         scheduleGatewayRetry(() => {
-          startGatewayProxyFlow({
+          void startGatewayProxyFlow({
             model,
             image,
-            stopFirst: refreshedRuntime ? true : stopFirst,
+            stopFirst,
             allowRetry,
           });
         });
@@ -762,19 +840,29 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           setShowGatewayStartup(true);
           setGatewayStartupStage("launch");
           setIsTogglingGateway(true);
-          try {
-            await invoke("stop_gateway");
-            console.log("[Entropic] Auto-start: stopped stale container, starting with local keys...");
-            await invoke("start_gateway", { model: selectedModel });
+        try {
+          await invoke("stop_gateway");
+          console.log("[Entropic] Auto-start: stopped stale container, starting with local keys...");
+          await invoke("start_gateway", { model: selectedModel });
             setGatewayStartupStage("health");
             await new Promise((r) => setTimeout(r, 2000));
-            await checkGateway();
-            console.log("[Entropic] Auto-start: local-keys restart completed");
-          } catch (error) {
-            console.error("[Entropic] Auto-start: local-keys restart failed:", error);
-          } finally {
-            setIsTogglingGateway(false);
-            setShowGatewayStartup(false);
+          await checkGateway();
+          console.log("[Entropic] Auto-start: local-keys restart completed");
+        } catch (error) {
+          console.error("[Entropic] Auto-start: local-keys restart failed:", error);
+          const message = extractGatewayStartError(error);
+          const recoveredRuntime = await tryAutoRecoverRuntime(message);
+          if (recoveredRuntime) {
+            clearGatewayRetry();
+            scheduleGatewayRetry(() => {
+              void retryGatewayStartup();
+            });
+          } else {
+            setStartupError({ message });
+          }
+        } finally {
+          setIsTogglingGateway(false);
+          setShowGatewayStartup(false);
           }
         } else {
           setGatewayRunning(true);
@@ -815,6 +903,16 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           console.log("[Entropic] Auto-start (local keys) completed");
         } catch (error) {
           console.error("[Entropic] Auto-start (local keys) error:", error);
+          const message = extractGatewayStartError(error);
+          const recoveredRuntime = await tryAutoRecoverRuntime(message);
+          if (recoveredRuntime) {
+            clearGatewayRetry();
+            scheduleGatewayRetry(() => {
+              void retryGatewayStartup();
+            });
+          } else {
+            setStartupError({ message });
+          }
         } finally {
           setIsTogglingGateway(false);
           setShowGatewayStartup(false);
@@ -964,7 +1062,16 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       await checkGateway();
     } catch (error) {
       console.error("[Entropic] Failed to toggle gateway:", error);
-      setStartupError({ message: extractGatewayStartError(error) });
+      const message = extractGatewayStartError(error);
+      const recoveredRuntime = await tryAutoRecoverRuntime(message);
+      if (recoveredRuntime) {
+        clearGatewayRetry();
+        scheduleGatewayRetry(() => {
+          void retryGatewayStartup();
+        });
+      } else {
+        setStartupError({ message });
+      }
     } finally {
       setIsTogglingGateway(false);
     }
