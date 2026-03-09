@@ -1064,6 +1064,13 @@ impl Runtime {
         let _ = std::fs::remove_file(path);
     }
 
+    fn windows_runtime_cache_root(&self) -> Option<PathBuf> {
+        let home = std::env::var_os("ENTROPIC_TEST_HOME_DIR")
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir)?;
+        Some(home.join(".entropic").join("cache"))
+    }
+
     fn save_windows_bootstrap_error(&self, stage: &str, err: &RuntimeError) {
         self.save_windows_bootstrap_state(stage, false, Some(err.to_string()));
     }
@@ -1978,6 +1985,18 @@ fi
                     runtime_root.display(),
                     err
                 ));
+            }
+        }
+
+        if let Some(cache_root) = self.windows_runtime_cache_root() {
+            if cache_root.exists() {
+                if let Err(err) = std::fs::remove_dir_all(&cache_root) {
+                    failures.push(format!(
+                        "Failed to remove Windows runtime cache {}: {}",
+                        cache_root.display(),
+                        err
+                    ));
+                }
             }
         }
 
@@ -3186,6 +3205,7 @@ exit 1
 
     struct WindowsBootstrapFixture {
         root_dir: PathBuf,
+        home_dir: PathBuf,
         local_app_data: PathBuf,
         wsl_state_file: PathBuf,
         bootstrap_state_file: PathBuf,
@@ -3203,10 +3223,12 @@ exit 1
         fn new(label: &str, install_requires_reboot: bool) -> Self {
             let root_dir = unique_test_dir(label);
             let fake_bin_dir = root_dir.join("fake-bin");
+            let home_dir = root_dir.join("home");
             let local_app_data = root_dir.join("localappdata");
             let resources_root = root_dir.join("resources-root");
             let runtime_resources = resources_root.join("resources").join("runtime");
             fs::create_dir_all(&fake_bin_dir).expect("failed to create fake bin dir");
+            fs::create_dir_all(&home_dir).expect("failed to create fake home dir");
             fs::create_dir_all(&runtime_resources).expect("failed to create runtime resources");
 
             let dev_artifact = runtime_resources.join("entropic-runtime-dev.wsl");
@@ -3230,7 +3252,10 @@ exit 1
 
             let env_guard = EnvGuard::new(&[
                 "PATH",
+                "ENTROPIC_TEST_HOME_DIR",
+                "HOME",
                 "LOCALAPPDATA",
+                "USERPROFILE",
                 "ENTROPIC_WINDOWS_MANAGED_WSL",
                 "ENTROPIC_RUNTIME_ALLOW_SHARED_DOCKER",
                 "ENTROPIC_RUNTIME_MODE",
@@ -3252,6 +3277,9 @@ exit 1
                 format!("{}{}{}", fake_bin_dir.display(), path_sep, previous_path)
             };
             env_guard.set("PATH", merged_path);
+            env_guard.set("ENTROPIC_TEST_HOME_DIR", home_dir.display().to_string());
+            env_guard.set("HOME", home_dir.display().to_string());
+            env_guard.set("USERPROFILE", home_dir.display().to_string());
             if cfg!(windows) {
                 env_guard.set("ENTROPIC_WSL_POWERSHELL_SCRIPT", fake_wsl.display().to_string());
                 env_guard.remove("ENTROPIC_WSL_EXE");
@@ -3284,6 +3312,7 @@ exit 1
 
             Self {
                 root_dir,
+                home_dir,
                 local_app_data,
                 wsl_state_file,
                 bootstrap_state_file,
@@ -3306,6 +3335,10 @@ exit 1
             let raw = self.read_wsl_state();
             let updated = raw.replace("reboot_pending=1", "reboot_pending=0");
             fs::write(&self.wsl_state_file, updated).expect("failed to update fake wsl state");
+        }
+
+        fn runtime_cache_dir(&self) -> PathBuf {
+            self.home_dir.join(".entropic").join("cache")
         }
     }
 
@@ -3456,6 +3489,12 @@ exit 1
     fn windows_runtime_reset_unregisters_managed_distros() {
         let _guard = env_lock().lock().expect("env lock poisoned");
         let fixture = WindowsBootstrapFixture::new("windows-reset", false);
+        let cache_dir = fixture.runtime_cache_dir();
+        fs::create_dir_all(&cache_dir).expect("failed to create fake runtime cache");
+        fs::write(cache_dir.join("runtime-manifest.json"), "{}")
+            .expect("failed to seed fake runtime manifest cache");
+        fs::write(cache_dir.join("openclaw-runtime.tar.gz"), "stale-runtime")
+            .expect("failed to seed fake runtime tar cache");
 
         fixture
             .runtime
@@ -3483,6 +3522,10 @@ exit 1
         assert!(
             !fixture.local_app_data.join("Entropic").join("runtime").exists(),
             "managed runtime root should be removed by reset"
+        );
+        assert!(
+            !fixture.runtime_cache_dir().exists(),
+            "runtime cache should be removed by reset"
         );
     }
 }
