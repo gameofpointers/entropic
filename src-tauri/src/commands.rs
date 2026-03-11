@@ -9669,7 +9669,9 @@ pub async fn start_gateway_with_proxy(
     // Check if container is already running
     if named_gateway_container_exists(OPENCLAW_CONTAINER, true) {
         let expected_proxy_env = docker_proxy_api_url.clone();
+        let expected_web_base_env = resolved_proxy_url.clone();
         let current_proxy = read_container_env("ENTROPIC_PROXY_BASE_URL");
+        let current_web_base = read_container_env("ENTROPIC_WEB_BASE_URL");
         let current_token = read_container_env("OPENROUTER_API_KEY");
         let current_gateway_token = read_container_env("OPENCLAW_GATEWAY_TOKEN");
         let current_schema = read_container_env("ENTROPIC_GATEWAY_SCHEMA_VERSION");
@@ -9690,6 +9692,7 @@ pub async fn start_gateway_with_proxy(
         let expected_image = image_model.clone().unwrap_or_default();
 
         let proxy_matches = current_proxy.as_deref() == Some(expected_proxy_env.as_str());
+        let web_base_matches = current_web_base.as_deref() == Some(expected_web_base_env.as_str());
         let gateway_token_matches =
             current_gateway_token.as_deref() == Some(local_gateway_token.as_str());
         let schema_matches = current_schema.as_deref() == Some(ENTROPIC_GATEWAY_SCHEMA_VERSION);
@@ -9706,6 +9709,7 @@ pub async fn start_gateway_with_proxy(
         let token_matches = current_token.as_deref() == Some(gateway_token.as_str());
 
         if proxy_matches
+            && web_base_matches
             && gateway_token_matches
             && schema_matches
             && model_matches
