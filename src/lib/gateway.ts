@@ -382,7 +382,7 @@ export class GatewayClient {
         try {
           const clientId = "openclaw-control-ui";
           const clientMode = "ui";
-          const scopes = ["operator.admin", "operator.approvals", "operator.pairing"];
+          const scopes = ["operator.read", "operator.admin", "operator.approvals", "operator.pairing"];
           const nonce =
             frame.payload && typeof frame.payload === "object" && "nonce" in frame.payload
               ? String((frame.payload as { nonce?: unknown }).nonce ?? "")

@@ -2563,7 +2563,6 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
 
     let result = timeout(Duration::from_millis(5000), async {
         let mut sent_connect = false;
-        let mut sent_health = false;
         loop {
             let msg = ws
                 .next()
@@ -2613,17 +2612,29 @@ async fn check_gateway_ws_health(ws_url: &str, token: &str) -> Result<bool, Stri
                                 .unwrap_or("gateway connect rejected");
                             return Err(msg.to_string());
                         }
-                        if !sent_health {
-                            sent_health = true;
-                            let health = serde_json::json!({
-                                "type": "req",
-                                "id": "2",
-                                "method": "health"
-                            });
-                            ws.send(Message::Text(health.to_string()))
-                                .await
-                                .map_err(|e| format!("WebSocket send failed: {}", e))?;
+                        let granted_scopes: Vec<&str> = frame
+                            .get("payload")
+                            .and_then(|v| v.get("auth"))
+                            .and_then(|v| v.get("scopes"))
+                            .and_then(|v| v.as_array())
+                            .map(|scopes| scopes.iter().filter_map(|v| v.as_str()).collect())
+                            .unwrap_or_default();
+                        let can_call_health = granted_scopes.iter().any(|scope| {
+                            matches!(*scope, "operator.read" | "operator.write" | "operator.admin")
+                        });
+
+                        if !can_call_health {
+                            return Ok(true);
                         }
+
+                        let health = serde_json::json!({
+                            "type": "req",
+                            "id": "2",
+                            "method": "health"
+                        });
+                        ws.send(Message::Text(health.to_string()))
+                            .await
+                            .map_err(|e| format!("WebSocket send failed: {}", e))?;
                     } else if id == "2" {
                         if !ok {
                             let msg = frame
@@ -4011,7 +4022,7 @@ fn clawhub_exec(args: &[&str]) -> Result<Output, String> {
            rm -rf /data/.local/lib/node_modules/clawhub /data/.local/bin/clawhub /data/.local/bin/clawdhub; \
            npm install -g --prefix /data/.local clawhub@0.7.0; \
          fi; \
-         exec \"$CLAWHUB_BIN\"",
+         exec node \"$CLAWHUB_DIST\"",
     );
     for arg in args {
         shell_cmd.push(' ');
