@@ -4775,31 +4775,81 @@ fn browser_service_request<T: DeserializeOwned>(
         .map_err(|e| format!("Failed to parse browser service response: {}", e))
 }
 
-fn write_container_file(path: &str, content: &str) -> Result<(), String> {
-    let dir = Path::new(path)
+fn append_container_file_write_script(script: &mut String, file: &ContainerFileWrite<'_>) {
+    let dir = Path::new(file.path)
         .parent()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "/".to_string());
-    docker_exec_output(&["exec", OPENCLAW_CONTAINER, "mkdir", "-p", "--", &dir])?;
+    let encoded = STANDARD.encode(file.content.as_bytes());
+    let dir_q = sh_single_quote(&dir);
+    let path_q = sh_single_quote(file.path);
+    let encoded_q = sh_single_quote(&encoded);
+
+    // Write via temp file + mv so readers never observe a partially written file.
+    script.push_str("(\n");
+    script.push_str(&format!("dir={}\n", dir_q));
+    script.push_str(&format!("path={}\n", path_q));
+    script.push_str("mkdir -p -- \"$dir\"\n");
+    if file.only_if_missing {
+        script.push_str("if [ ! -s \"$path\" ]; then\n");
+    }
+    script.push_str("tmp=$(mktemp \"$dir/.entropic-write.XXXXXX\")\n");
+    script.push_str("trap 'rm -f -- \"$tmp\"' EXIT HUP INT TERM\n");
+    script.push_str(&format!("printf %s {} | base64 -d > \"$tmp\"\n", encoded_q));
+    script.push_str("chmod 600 \"$tmp\" 2>/dev/null || true\n");
+    script.push_str("mv -f -- \"$tmp\" \"$path\"\n");
+    if file.only_if_missing {
+        script.push_str("fi\n");
+    }
+    script.push_str(")\n");
+}
+
+fn build_container_file_write_script(files: &[ContainerFileWrite<'_>]) -> String {
+    let mut script = String::from("set -eu\n");
+    for file in files {
+        append_container_file_write_script(&mut script, file);
+    }
+    script
+}
+
+fn run_container_write_script(script: &str, target: &str) -> Result<(), String> {
     let mut child = docker_command()
-        .args(["exec", "-i", OPENCLAW_CONTAINER, "tee", "--", path])
+        .args(["exec", "-i", OPENCLAW_CONTAINER, "sh", "-se"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to write file: {}", e))?;
+        .map_err(|e| format!("Failed to write {}: {}", target, e))?;
+
     if let Some(stdin) = child.stdin.as_mut() {
         use std::io::Write;
         stdin
-            .write_all(content.as_bytes())
-            .map_err(|e| format!("Failed to write file: {}", e))?;
+            .write_all(script.as_bytes())
+            .map_err(|e| format!("Failed to stream {} write script: {}", target, e))?;
     }
-    let status = child
-        .wait()
-        .map_err(|e| format!("Failed to finalize write: {}", e))?;
-    if !status.success() {
-        return Err("Failed to write file in container".to_string());
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to finalize {} write: {}", target, e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "Failed to write {} in container: {}",
+            target,
+            stderr.trim()
+        ));
     }
     Ok(())
+}
+
+fn write_container_file(path: &str, content: &str) -> Result<(), String> {
+    let file = ContainerFileWrite {
+        path,
+        content,
+        only_if_missing: false,
+    };
+    let script = build_container_file_write_script(std::slice::from_ref(&file));
+    run_container_write_script(&script, "file")
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -5044,57 +5094,42 @@ fn write_container_files_batch(files: &[ContainerFileWrite<'_>]) -> Result<(), S
         return Ok(());
     }
 
-    let mut script = String::from("set -eu\n");
-    for file in files {
-        let dir = Path::new(file.path)
-            .parent()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| "/".to_string());
-        let encoded = STANDARD.encode(file.content.as_bytes());
-        let dir_q = sh_single_quote(&dir);
-        let path_q = sh_single_quote(file.path);
-        let encoded_q = sh_single_quote(&encoded);
+    let script = build_container_file_write_script(files);
+    run_container_write_script(&script, "files")
+}
 
-        script.push_str(&format!("mkdir -p -- {}\n", dir_q));
-        if file.only_if_missing {
-            script.push_str(&format!(
-                "if [ ! -s {} ]; then printf %s {} | base64 -d > {}; fi\n",
-                path_q, encoded_q, path_q
-            ));
-        } else {
-            script.push_str(&format!(
-                "printf %s {} | base64 -d > {}\n",
-                encoded_q, path_q
-            ));
-        }
+#[cfg(test)]
+mod container_file_write_tests {
+    use super::{build_container_file_write_script, ContainerFileWrite};
+
+    #[test]
+    fn build_container_file_write_script_uses_atomic_replace() {
+        let files = [ContainerFileWrite {
+            path: "/home/node/.openclaw/openclaw.json",
+            content: "{\"ok\":true}",
+            only_if_missing: false,
+        }];
+
+        let script = build_container_file_write_script(&files);
+
+        assert!(script.contains("tmp=$(mktemp \"$dir/.entropic-write.XXXXXX\")"));
+        assert!(script.contains("mv -f -- \"$tmp\" \"$path\""));
+        assert!(!script.contains("tee --"));
+        assert!(!script.contains("base64 -d > '/home/node/.openclaw/openclaw.json'"));
     }
 
-    let mut child = docker_command()
-        .args(["exec", "-i", OPENCLAW_CONTAINER, "sh", "-se"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to batch write files: {}", e))?;
+    #[test]
+    fn build_container_file_write_script_preserves_only_if_missing_guard() {
+        let files = [ContainerFileWrite {
+            path: "/tmp/identity.md",
+            content: "hello",
+            only_if_missing: true,
+        }];
 
-    if let Some(stdin) = child.stdin.as_mut() {
-        use std::io::Write;
-        stdin
-            .write_all(script.as_bytes())
-            .map_err(|e| format!("Failed to stream file batch script: {}", e))?;
-    }
+        let script = build_container_file_write_script(&files);
 
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to finalize file batch write: {}", e))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "Failed to write files in container: {}",
-            stderr.trim()
-        ));
+        assert!(script.contains("if [ ! -s \"$path\" ]; then"));
     }
-    Ok(())
 }
 
 fn current_local_date() -> String {
