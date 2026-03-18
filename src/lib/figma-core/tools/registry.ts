@@ -11,7 +11,7 @@ import {
   pageBounds,
   selectNodes,
 } from "./read";
-import { createShape, createComponent, createInstance, createPage, createVector } from "./create";
+import { createShape, createComponent, createInstance, createPage, createVector, renderSpec } from "./create";
 import {
   setFill,
   setStroke,
@@ -67,17 +67,21 @@ import {
   createCollection,
   deleteCollection,
 } from "./variables";
+import { calc } from "./calc";
+import { describe } from "./describe";
 
 export const CORE_TOOLS: ToolDef[] = [
   getSelection,
   getPageTree,
   getNode,
   findNodes,
+  describe,
   listPages,
   switchPage,
   getCurrentPage,
   pageBounds,
   selectNodes,
+  renderSpec,
   createShape,
   createPage,
   createComponent,
@@ -132,6 +136,7 @@ export const CORE_TOOLS: ToolDef[] = [
   createCollection,
   deleteCollection,
   setFontRange,
+  calc,
 ];
 
 export const TOOL_MAP = new Map(CORE_TOOLS.map((tool) => [tool.name, tool]));

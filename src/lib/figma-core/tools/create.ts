@@ -5,6 +5,163 @@ import { defineTool, nodeSummary } from "./schema";
 import type { FigmaNodeProxy } from "../figma-api";
 import type { VectorNetwork } from "../scene-graph";
 
+type RenderSpecNode = {
+  type: "FRAME" | "RECTANGLE" | "ELLIPSE" | "TEXT" | "LINE" | "STAR" | "POLYGON" | "SECTION";
+  name?: string;
+  text?: string;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  fill?: string;
+  stroke?: string;
+  stroke_width?: number;
+  radius?: number;
+  font_size?: number;
+  font_weight?: number;
+  text_color?: string;
+  direction?: "row" | "column";
+  gap?: number;
+  padding?: number;
+  children?: RenderSpecNode[];
+};
+
+function createNodeByType(figma: Parameters<typeof createShape.execute>[0], type: RenderSpecNode["type"]): FigmaNodeProxy {
+  const createMap: Record<RenderSpecNode["type"], () => FigmaNodeProxy> = {
+    FRAME: () => figma.createFrame(),
+    RECTANGLE: () => figma.createRectangle(),
+    ELLIPSE: () => figma.createEllipse(),
+    TEXT: () => figma.createText(),
+    LINE: () => figma.createLine(),
+    STAR: () => figma.createStar(),
+    POLYGON: () => figma.createPolygon(),
+    SECTION: () => figma.createSection(),
+  };
+  return createMap[type]();
+}
+
+function applyNodeStyles(node: FigmaNodeProxy, spec: RenderSpecNode) {
+  if (spec.name) node.name = spec.name;
+  if (spec.type === "TEXT") {
+    node.characters = spec.text || spec.name || "Text";
+    node.fontSize = spec.font_size ?? Math.max(14, Math.min(spec.height ?? 24, 28));
+    node.fontWeight = spec.font_weight ?? 500;
+    node.fills = [
+      {
+        type: "SOLID",
+        color: parseColor(spec.text_color || "#0f172a"),
+        opacity: 1,
+        visible: true,
+      },
+    ];
+    return;
+  }
+  if (spec.fill) {
+    node.fills = [{ type: "SOLID", color: parseColor(spec.fill), opacity: 1, visible: true }];
+  }
+  if (spec.stroke) {
+    node.strokes = [
+      {
+        color: parseColor(spec.stroke),
+        weight: spec.stroke_width ?? 1,
+        opacity: 1,
+        visible: true,
+        align: "INSIDE",
+      },
+    ];
+  }
+  if (spec.radius !== undefined) {
+    node.cornerRadius = spec.radius;
+  }
+}
+
+function measureSpecNode(spec: RenderSpecNode): { width: number; height: number } {
+  const padding = spec.padding ?? 0;
+  const gap = spec.gap ?? 0;
+  if (spec.type === "TEXT") {
+    const fontSize = spec.font_size ?? 16;
+    const text = spec.text || spec.name || "Text";
+    return {
+      width: spec.width ?? Math.max(40, Math.ceil(text.length * fontSize * 0.58)),
+      height: spec.height ?? Math.ceil(fontSize * 1.4),
+    };
+  }
+  if (!spec.children || spec.children.length === 0) {
+    return {
+      width: spec.width ?? 120,
+      height: spec.height ?? 48,
+    };
+  }
+  const childSizes = spec.children.map(measureSpecNode);
+  if (spec.direction === "row") {
+    const contentWidth = childSizes.reduce((sum, child) => sum + child.width, 0) + gap * Math.max(0, childSizes.length - 1);
+    const contentHeight = childSizes.reduce((max, child) => Math.max(max, child.height), 0);
+    return {
+      width: spec.width ?? contentWidth + padding * 2,
+      height: spec.height ?? contentHeight + padding * 2,
+    };
+  }
+  const contentWidth = childSizes.reduce((max, child) => Math.max(max, child.width), 0);
+  const contentHeight = childSizes.reduce((sum, child) => sum + child.height, 0) + gap * Math.max(0, childSizes.length - 1);
+  return {
+    width: spec.width ?? contentWidth + padding * 2,
+    height: spec.height ?? contentHeight + padding * 2,
+  };
+}
+
+function renderSpecTree(
+  figma: Parameters<typeof createShape.execute>[0],
+  spec: RenderSpecNode,
+  parent: FigmaNodeProxy | null,
+  originX: number,
+  originY: number,
+): FigmaNodeProxy {
+  const node = createNodeByType(figma, spec.type);
+  const size = measureSpecNode(spec);
+  node.x = originX + (spec.x ?? 0);
+  node.y = originY + (spec.y ?? 0);
+  node.resize(size.width, size.height);
+  applyNodeStyles(node, spec);
+  if (!spec.fill && spec.type !== "TEXT" && spec.type !== "LINE") {
+    node.fills = [{ type: "SOLID", color: parseColor("#f8fafc"), opacity: 1, visible: true }];
+  }
+  if (!spec.stroke && spec.type !== "TEXT") {
+    node.strokes = [
+      {
+        color: parseColor("#cbd5e1"),
+        weight: 1,
+        opacity: 1,
+        visible: true,
+        align: "INSIDE",
+      },
+    ];
+  }
+  if (spec.radius === undefined && spec.type !== "TEXT" && spec.type !== "LINE") {
+    node.cornerRadius = spec.type === "FRAME" || spec.type === "SECTION" ? 24 : 16;
+  }
+  if (parent) {
+    parent.appendChild(node);
+  }
+
+  if (spec.children && spec.children.length > 0) {
+    const padding = spec.padding ?? 0;
+    const gap = spec.gap ?? 0;
+    let cursorX = padding;
+    let cursorY = padding;
+    for (const child of spec.children) {
+      const childSize = measureSpecNode(child);
+      renderSpecTree(figma, child, node, cursorX, cursorY);
+      if (spec.direction === "row") {
+        cursorX += childSize.width + gap;
+      } else {
+        cursorY += childSize.height + gap;
+      }
+    }
+  }
+
+  return node;
+}
+
 export const createShape = defineTool({
   name: "create_shape",
   mutates: true,
@@ -86,6 +243,55 @@ export const createComponent = defineTool({
     if (!node) return { error: `Node "${id}" not found` };
     const comp = figma.createComponentFromNode(node);
     return nodeSummary(comp);
+  },
+});
+
+export const renderSpec = defineTool({
+  name: "render_spec",
+  mutates: true,
+  description:
+    "Render a nested UI spec from JSON in one tool call. Best for screens, cards, button rows, and simple app layouts. Example spec: {\"type\":\"FRAME\",\"name\":\"Wallet Screen\",\"width\":360,\"height\":720,\"fill\":\"#dcfce7\",\"direction\":\"column\",\"gap\":16,\"padding\":20,\"children\":[...]}",
+  params: {
+    spec: {
+      type: "string",
+      description: "JSON object describing a nested UI tree",
+      required: true,
+    },
+    parent_id: { type: "string", description: "Parent node ID to nest inside" },
+    replace_id: { type: "string", description: "Existing node ID to replace" },
+    x: { type: "number", description: "Override root X position" },
+    y: { type: "number", description: "Override root Y position" },
+  },
+  execute: (figma, args) => {
+    const spec = JSON.parse(args.spec) as RenderSpecNode;
+    let parentId = args.parent_id;
+    let replaceIndex = -1;
+
+    if (args.replace_id) {
+      const target = figma.graph.getNode(args.replace_id);
+      if (target?.parentId) {
+        parentId = target.parentId;
+        const parentNode = figma.graph.getNode(parentId);
+        if (parentNode) {
+          replaceIndex = parentNode.childIds.indexOf(args.replace_id);
+        }
+      }
+    }
+
+    const parent = parentId ? figma.getNodeById(parentId) : null;
+    const root = renderSpecTree(figma, spec, parent, args.x ?? 0, args.y ?? 0);
+
+    if (args.replace_id && parentId && replaceIndex >= 0) {
+      figma.graph.reorderChild(root.id, parentId, replaceIndex);
+      figma.graph.deleteNode(args.replace_id);
+    }
+
+    return {
+      id: root.id,
+      name: root.name,
+      type: root.type,
+      childCount: root.children.length,
+    };
   },
 });
 
