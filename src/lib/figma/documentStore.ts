@@ -481,10 +481,8 @@ export class FigmaDocumentStore {
 
   getPlanningContext() {
     const page = this.getCurrentPage();
-    const topLevel = page?.childIds
-      .map((id) => this.graph.getNode(id))
-      .filter((node): node is SceneNode => Boolean(node))
-      .map((node) => ({
+    const summarizeNode = (node: SceneNode, depth: number): Record<string, unknown> => {
+      const summary: Record<string, unknown> = {
         id: node.id,
         name: node.name,
         type: node.type,
@@ -493,11 +491,47 @@ export class FigmaDocumentStore {
         width: node.width,
         height: node.height,
         childCount: node.childIds.length,
-      })) ?? [];
+      };
+      if (node.text.trim()) {
+        summary.text = node.text.length > 120 ? `${node.text.slice(0, 117)}...` : node.text;
+      }
+      if (depth > 0 && node.childIds.length > 0) {
+        summary.children = node.childIds
+          .slice(0, 8)
+          .map((id) => this.graph.getNode(id))
+          .filter((child): child is SceneNode => Boolean(child))
+          .map((child) => summarizeNode(child, depth - 1));
+      }
+      return summary;
+    };
+
+    const topLevel =
+      page?.childIds
+        .map((id) => this.graph.getNode(id))
+        .filter((node): node is SceneNode => Boolean(node))
+        .map((node) => summarizeNode(node, 2)) ?? [];
+    const selectedNodes = this.snapshotState.selectedIds
+      .map((id) => this.graph.getNode(id))
+      .filter((node): node is SceneNode => Boolean(node))
+      .map((node) => summarizeNode(node, 2));
+    const recentChat = this.snapshotState.chatMessages.slice(-6).map((message) => ({
+      role: message.role,
+      content: message.content,
+      status: message.status ?? "done",
+    }));
+    const recentActivities = this.snapshotState.activities.slice(0, 8).map((entry) => ({
+      kind: entry.kind,
+      title: entry.title,
+      detail: entry.detail,
+    }));
+
     return {
       currentPageId: this.snapshotState.currentPageId,
       selectedIds: this.snapshotState.selectedIds,
+      selectedNodes,
       topLevelNodes: topLevel,
+      recentChat,
+      recentActivities,
       toolCatalog: CORE_TOOLS.map((tool) => ({
         name: tool.name,
         description: tool.description,

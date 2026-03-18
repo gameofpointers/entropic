@@ -3,7 +3,6 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { colorToCSSCompact } from "../lib/figma-core";
 import { FigmaDocumentStore } from "../lib/figma/documentStore";
-import { FIGMA_RECIPES } from "../lib/figma/recipes";
 import { extractJsonBlocks, normalizeGatewayMessage } from "../lib/chatMessageUtils";
 import { createGatewayClient } from "../lib/gateway";
 import { resolveGatewayAuth } from "../lib/gateway-auth";
@@ -15,6 +14,12 @@ import type { SceneNode } from "../lib/figma-core";
 type ParsedPlan = {
   assistantResponse: string;
   toolCalls: FigmaToolCall[];
+};
+
+type DebugEntry = {
+  id: string;
+  ts: number;
+  message: string;
 };
 
 type Props = {
@@ -55,6 +60,7 @@ function nodeTextColor(node: SceneNode): string {
 function buildGatewayPlannerPrompt(
   userPrompt: string,
   context: ReturnType<FigmaDocumentStore["getPlanningContext"]>,
+  requestId: string,
 ): string {
   return [
     "You are the design-planning agent for Entropic's Figma workspace.",
@@ -62,11 +68,17 @@ function buildGatewayPlannerPrompt(
     "Return exactly one JSON object with this shape:",
     '{ "assistant_response": "short user-facing summary", "tool_calls": [{ "tool": "tool_name", "args": { "key": "value" } }] }',
     "Rules:",
+    "- Only respond to the latest user prompt. Treat prior chat as document context, not as the instruction to follow.",
     "- Use only tool names from the provided catalog.",
     "- Args must be valid JSON.",
     "- If the current document should be edited, plan incremental changes against existing nodes when possible.",
+    "- Preserve existing layout, styling, colors, and component structure unless the latest user prompt explicitly asks you to change them.",
+    "- If the user asks for copy, mock data, sample rows, sample cards, labels, counts, or text content, prefer editing text or duplicating existing content patterns. Do not restyle unrelated nodes.",
+    "- If the user refers to an existing area like a card, feed, panel, table, hero, or nav, find the matching existing node by name and hierarchy before creating new top-level structure.",
     "- If no edit is needed, return an empty tool_calls array.",
     "- Do not include markdown outside the JSON object.",
+    "",
+    `Planner request id: ${requestId}`,
     "",
     `User prompt: ${userPrompt}`,
     "",
@@ -112,13 +124,114 @@ function parseGatewayToolPlan(raw: string): ParsedPlan | null {
   return null;
 }
 
+function normalizeToolPlan(toolCalls: FigmaToolCall[], userPrompt: string): FigmaToolCall[] {
+  const normalized: FigmaToolCall[] = [];
+  const prompt = userPrompt.toLowerCase();
+  const themeFill =
+    prompt.includes("light green") || prompt.includes("green")
+      ? "#dcfce7"
+      : prompt.includes("light blue") || prompt.includes("blue")
+        ? "#dbeafe"
+        : "#f8fafc";
+  const buttonFill =
+    prompt.includes("light green") || prompt.includes("green")
+      ? "#86efac"
+      : prompt.includes("light blue") || prompt.includes("blue")
+        ? "#93c5fd"
+        : "#e2e8f0";
+  const textFill = "#0f172a";
+  const styledNodeIds = new Set<string>();
+  const textNodeIds = new Set<string>();
+  const shapeNodeIds = new Set<string>();
+
+  for (const call of toolCalls) {
+    if (call.tool === "set_fill" && typeof call.args?.id === "string") {
+      styledNodeIds.add(call.args.id);
+    }
+    if (call.tool === "set_stroke" && typeof call.args?.id === "string") {
+      styledNodeIds.add(call.args.id);
+    }
+    if (call.tool === "set_text" && typeof call.args?.id === "string") {
+      textNodeIds.add(call.args.id);
+    }
+  }
+
+  for (const call of toolCalls) {
+    normalized.push(call);
+    if (call.tool !== "create_shape") continue;
+    const id = typeof call.args?.id === "string" ? call.args.id : null;
+    const type = typeof call.args?.type === "string" ? call.args.type : "";
+    const name = typeof call.args?.name === "string" ? call.args.name.toLowerCase() : "";
+    if (!id) continue;
+
+    if (type === "TEXT") {
+      if (!textNodeIds.has(id)) {
+        normalized.push({
+          tool: "set_text",
+          args: {
+            id,
+            text:
+              typeof call.args?.name === "string" && call.args.name.trim().length > 0
+                ? call.args.name
+                : "Label",
+          },
+        });
+      }
+      if (!styledNodeIds.has(id)) {
+        normalized.push({
+          tool: "set_fill",
+          args: {
+            id,
+            color: textFill,
+          },
+        });
+      }
+      continue;
+    }
+
+    shapeNodeIds.add(id);
+    if (!styledNodeIds.has(id)) {
+      const fill =
+        name.includes("button") || name.includes("send") || name.includes("receive") || name.includes("buy")
+          ? buttonFill
+          : themeFill;
+      normalized.push({
+        tool: "set_fill",
+        args: {
+          id,
+          color: fill,
+        },
+      });
+      normalized.push({
+        tool: "set_stroke",
+        args: {
+          id,
+          color: "#94a3b8",
+          weight: 1,
+        },
+      });
+      normalized.push({
+        tool: "set_radius",
+        args: {
+          id,
+          radius: name.includes("screen") || name.includes("phone") ? 28 : 16,
+        },
+      });
+    }
+  }
+
+  return normalized;
+}
+
 export function Figma({ gatewayRunning }: Props) {
   const [store] = useState(() => new FigmaDocumentStore());
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const [prompt, setPrompt] = useState("Create a dashboard layout with a left nav, KPI strip, and activity feed.");
   const [projectNameDraft, setProjectNameDraft] = useState("");
+  const [projectPendingDelete, setProjectPendingDelete] = useState<{ id: string; name: string } | null>(null);
   const [gatewayConnected, setGatewayConnected] = useState(false);
   const [gatewayError, setGatewayError] = useState<string | null>(null);
+  const [debugEntries, setDebugEntries] = useState<DebugEntry[]>([]);
   const dragRef = useRef<{ x: number; y: number } | null>(null);
   const viewportAreaRef = useRef<HTMLDivElement | null>(null);
   const viewportDragRef = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
@@ -131,6 +244,9 @@ export function Figma({ gatewayRunning }: Props) {
   const activeRunIdRef = useRef<string | null>(null);
   const activeSessionKeyRef = useRef<string | null>(null);
   const activeAssistantMessageIdRef = useRef<string | null>(null);
+  const activeRequestIdRef = useRef<string | null>(null);
+  const activeRunTimeoutRef = useRef<number | null>(null);
+  const busyRef = useRef(snapshot.busy);
 
   const nodes = store.getRenderableNodes();
   const selectedSet = new Set(snapshot.selectedIds);
@@ -141,44 +257,240 @@ export function Figma({ gatewayRunning }: Props) {
   }, [activeProject?.id, activeProject?.name]);
 
   useEffect(() => {
+    busyRef.current = snapshot.busy;
+  }, [snapshot.busy]);
+
+  function pushDebug(message: string) {
+    const entry = {
+      id: crypto.randomUUID(),
+      ts: Date.now(),
+      message,
+    };
+    console.log("[FigmaDebug]", message);
+    setDebugEntries((current) => [entry, ...current].slice(0, 80));
+  }
+
+  function clearActiveRun(reason?: string) {
+    pushDebug(
+      `clearActiveRun reason=${reason || "none"} runId=${activeRunIdRef.current || "none"} session=${activeSessionKeyRef.current || "none"}`,
+    );
+    activeRunIdRef.current = null;
+    activeRequestIdRef.current = null;
+    if (activeRunTimeoutRef.current !== null) {
+      window.clearTimeout(activeRunTimeoutRef.current);
+      activeRunTimeoutRef.current = null;
+    }
+    store.setBusy(false);
+    if (reason && activeAssistantMessageIdRef.current) {
+      store.upsertAssistantMessage(activeAssistantMessageIdRef.current, reason, "error");
+    }
+  }
+
+  async function recoverRunFromHistory(sessionKey: string, assistantMessageId: string, requestId: string | null) {
+    const client = clientRef.current;
+    if (!client) {
+      pushDebug("recoverRunFromHistory skipped: no client");
+      return false;
+    }
+    pushDebug(`recoverRunFromHistory start session=${sessionKey}`);
+    try {
+      const history = await client.getChatHistory(sessionKey, 50);
+      pushDebug(`recoverRunFromHistory historyCount=${history.length}`);
+      const normalizedHistory = history
+        .map((message, index) => normalizeGatewayMessage(message, `history-${index}`))
+        .filter((message): message is Exclude<ReturnType<typeof normalizeGatewayMessage>, null> => message !== null);
+
+      let assistantText = "";
+      if (requestId) {
+        const marker = `Planner request id: ${requestId}`;
+        const requestIndex = normalizedHistory.findIndex(
+          (message) => message.role === "user" && message.content.includes(marker),
+        );
+        pushDebug(`recoverRunFromHistory requestId=${requestId} requestIndex=${requestIndex}`);
+        if (requestIndex >= 0) {
+          const matchedAssistant = normalizedHistory
+            .slice(requestIndex + 1)
+            .find((message) => message.role === "assistant" && message.content.trim().length > 0);
+          assistantText = matchedAssistant?.content ?? "";
+        }
+      }
+
+      if (!assistantText) {
+        const fallbackAssistant = [...normalizedHistory]
+          .reverse()
+          .find((message) => message.role === "assistant" && message.content.trim().length > 0);
+        if (!fallbackAssistant) {
+          pushDebug("recoverRunFromHistory no assistant messages found");
+          return false;
+        }
+        pushDebug("recoverRunFromHistory falling back to latest assistant message");
+        assistantText = fallbackAssistant.content;
+      }
+
+      if (!assistantText) {
+        pushDebug("recoverRunFromHistory matched assistant was empty");
+        return false;
+      }
+
+      pushDebug(`recoverRunFromHistory latestAssistant textLen=${assistantText.length}`);
+      const parsedPlan = parseGatewayToolPlan(assistantText);
+      if (!parsedPlan) {
+        pushDebug("recoverRunFromHistory parse failed");
+        store.upsertAssistantMessage(
+          assistantMessageId,
+          assistantText || "Recovered assistant output from history, but it did not contain a valid tool plan.",
+          "error",
+        );
+        return false;
+      }
+
+      pushDebug(`recoverRunFromHistory parse ok toolCalls=${parsedPlan.toolCalls.length}`);
+      store.upsertAssistantMessage(assistantMessageId, parsedPlan.assistantResponse, "done");
+      if (parsedPlan.toolCalls.length > 0) {
+        await store.executeToolPlan(parsedPlan.toolCalls);
+        store.addSystemMessage(
+          `Recovered and executed ${parsedPlan.toolCalls.length} tool call${parsedPlan.toolCalls.length === 1 ? "" : "s"} from session history.`,
+        );
+      } else {
+        store.addSystemMessage("Recovered assistant response from history, but it contained no tool calls.");
+      }
+      return true;
+    } catch (error) {
+      pushDebug(`recoverRunFromHistory failed error=${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }
+
+  async function waitForRunHistory(runId: string, sessionKey: string) {
+    const client = clientRef.current;
+    if (!client) {
+      pushDebug("waitForRunHistory skipped: no client");
+      return false;
+    }
+    try {
+      pushDebug(`waitForRunHistory start runId=${runId} session=${sessionKey}`);
+      const status = await client.rpc<{ status?: string }>("agent.wait", {
+        runId,
+        timeoutMs: 20_000,
+      });
+      pushDebug(`waitForRunHistory status=${status?.status || "unknown"}`);
+      return status?.status !== "timeout";
+    } catch (error) {
+      pushDebug(`waitForRunHistory failed error=${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }
+
+  async function settleRunFromHistory(
+    runId: string,
+    sessionKey: string,
+    assistantMessageId: string,
+    requestId: string | null,
+    source: "background" | "watchdog" | "final-empty",
+    failOnMiss: boolean,
+  ) {
+    pushDebug(`settleRunFromHistory start source=${source} runId=${runId}`);
+    await waitForRunHistory(runId, sessionKey);
+    if (activeRunIdRef.current !== runId) {
+      pushDebug(`settleRunFromHistory exit source=${source} runId=${runId} reason=inactive`);
+      return false;
+    }
+
+    const recovered = await recoverRunFromHistory(sessionKey, assistantMessageId, requestId);
+    if (activeRunIdRef.current !== runId) {
+      pushDebug(`settleRunFromHistory exit source=${source} runId=${runId} reason=cleared-after-recovery`);
+      return recovered;
+    }
+
+    if (recovered) {
+      clearActiveRun();
+      store.addSystemMessage(
+        source === "background"
+          ? "Recovered and completed the run from gateway history after stream delivery stalled."
+          : source === "watchdog"
+            ? "Run watchdog triggered, but the assistant response was recovered from gateway history."
+            : "Gateway completed without a final chat payload, but the assistant response was recovered from session history.",
+      );
+      return true;
+    }
+
+    if (failOnMiss) {
+      clearActiveRun(
+        source === "watchdog"
+          ? "Gateway accepted the run but never completed it. Retry once. If it keeps happening, the planner response format is likely off."
+          : "The model finished, but no assistant payload was attached to the final gateway event and history recovery failed.",
+      );
+      store.addSystemMessage(
+        source === "watchdog"
+          ? "Run watchdog triggered after waiting 45s for a gateway completion event."
+          : "Gateway completed the run without a usable final payload, and no recoverable assistant plan was found in history.",
+      );
+    } else {
+      pushDebug(`settleRunFromHistory source=${source} runId=${runId} no recoverable history yet`);
+    }
+
+    return false;
+  }
+
+  useEffect(() => {
     let cancelled = false;
 
     async function ensureConnected() {
       if (!gatewayRunning) {
+        pushDebug("ensureConnected skipped: gatewayRunning=false");
         setGatewayConnected(false);
         clientRef.current?.disconnect();
         clientRef.current = null;
         return;
       }
       if (clientRef.current?.isConnected()) {
+        pushDebug("ensureConnected skipped: existing client already connected");
         setGatewayConnected(true);
         return;
       }
       try {
+        pushDebug("resolveGatewayAuth start");
         const auth = await resolveGatewayAuth();
+        pushDebug(`resolveGatewayAuth ok wsUrl=${auth.wsUrl}`);
         if (cancelled) return;
         const client = createGatewayClient(auth.wsUrl, auth.token);
         client.on("connected", () => {
           if (!cancelled) {
+            pushDebug("gateway event: connected");
             setGatewayConnected(true);
             setGatewayError(null);
           }
         });
         client.on("disconnected", () => {
           if (!cancelled) {
+            pushDebug("gateway event: disconnected");
             setGatewayConnected(false);
+            if (busyRef.current) {
+              clearActiveRun("Gateway disconnected before the design run completed.");
+            }
           }
         });
         client.on("error", (error) => {
           if (!cancelled) {
+            pushDebug(`gateway event: error message=${error}`);
             setGatewayError(error);
           }
         });
+        client.on("agent", (event) => {
+          pushDebug(
+            `gateway agent event stream=${event.stream} runId=${event.runId} session=${event.sessionKey || "none"}`,
+          );
+        });
         client.on("chat", async (event) => {
+          pushDebug(
+            `gateway chat event state=${event.state} runId=${event.runId} session=${event.sessionKey} activeRun=${activeRunIdRef.current || "none"} activeSession=${activeSessionKeyRef.current || "none"}`,
+          );
           if (!activeRunIdRef.current || !activeSessionKeyRef.current || !activeAssistantMessageIdRef.current) {
+            pushDebug("gateway chat event ignored: no active run/session/message refs");
             return;
           }
           if (event.runId !== activeRunIdRef.current || event.sessionKey !== activeSessionKeyRef.current) {
+            pushDebug("gateway chat event ignored: runId/sessionKey mismatch");
             return;
           }
 
@@ -186,6 +498,9 @@ export function Figma({ gatewayRunning }: Props) {
             ? normalizeGatewayMessage(event.message, event.runId)
             : null;
           const text = normalized?.content ?? "";
+          pushDebug(
+            `gateway chat normalized hasMessage=${Boolean(event.message)} normalized=${Boolean(normalized)} textLen=${text.length}`,
+          );
 
           if (event.state === "delta" || event.state === "final") {
             store.upsertAssistantMessage(
@@ -196,9 +511,24 @@ export function Figma({ gatewayRunning }: Props) {
           }
 
           if (event.state === "final") {
-            activeRunIdRef.current = null;
-            store.setBusy(false);
+            if (!text.trim()) {
+              pushDebug("gateway final had no text payload; attempting settlement from history");
+              await settleRunFromHistory(
+                event.runId,
+                activeSessionKeyRef.current,
+                activeAssistantMessageIdRef.current,
+                activeRequestIdRef.current,
+                "final-empty",
+                true,
+              );
+              return;
+            }
+
+            clearActiveRun();
             const parsedPlan = parseGatewayToolPlan(text);
+            pushDebug(
+              `gateway final received parsePlan=${parsedPlan ? "ok" : "failed"} toolCalls=${parsedPlan?.toolCalls.length ?? 0}`,
+            );
             if (!parsedPlan) {
               store.upsertAssistantMessage(
                 activeAssistantMessageIdRef.current,
@@ -221,11 +551,14 @@ export function Figma({ gatewayRunning }: Props) {
             }
 
             try {
+              pushDebug(`executing tool plan count=${parsedPlan.toolCalls.length}`);
               await store.executeToolPlan(parsedPlan.toolCalls);
               store.addSystemMessage(
                 `Executed ${parsedPlan.toolCalls.length} tool call${parsedPlan.toolCalls.length === 1 ? "" : "s"} from the gateway plan.`,
               );
+              pushDebug("tool plan execution completed");
             } catch (error) {
+              pushDebug(`tool plan execution failed error=${error instanceof Error ? error.message : String(error)}`);
               store.addSystemMessage(
                 `Tool execution failed: ${error instanceof Error ? error.message : String(error)}`,
               );
@@ -233,9 +566,9 @@ export function Figma({ gatewayRunning }: Props) {
           }
 
           if (event.state === "error" || event.state === "aborted") {
-            activeRunIdRef.current = null;
-            store.setBusy(false);
+            clearActiveRun();
             const message = event.errorMessage || "Gateway run failed.";
+            pushDebug(`gateway terminal error state=${event.state} message=${message}`);
             store.upsertAssistantMessage(
               activeAssistantMessageIdRef.current,
               message,
@@ -243,6 +576,7 @@ export function Figma({ gatewayRunning }: Props) {
             );
           }
         });
+        pushDebug("gateway connect start");
         await client.connect();
         if (cancelled) {
           client.disconnect();
@@ -251,8 +585,10 @@ export function Figma({ gatewayRunning }: Props) {
         clientRef.current = client;
         setGatewayConnected(true);
         setGatewayError(null);
+        pushDebug("gateway connect ok");
       } catch (error) {
         if (!cancelled) {
+          pushDebug(`gateway connect failed error=${error instanceof Error ? error.message : String(error)}`);
           setGatewayConnected(false);
           setGatewayError(error instanceof Error ? error.message : String(error));
         }
@@ -263,6 +599,11 @@ export function Figma({ gatewayRunning }: Props) {
 
     return () => {
       cancelled = true;
+      if (activeRunTimeoutRef.current !== null) {
+        window.clearTimeout(activeRunTimeoutRef.current);
+        activeRunTimeoutRef.current = null;
+      }
+      pushDebug("gateway effect cleanup");
       clientRef.current?.disconnect();
       clientRef.current = null;
     };
@@ -391,20 +732,27 @@ export function Figma({ gatewayRunning }: Props) {
   async function handlePromptSubmit() {
     if (!prompt.trim() || snapshot.busy) return;
     if (!gatewayRunning) {
+      pushDebug("handlePromptSubmit blocked: gatewayRunning=false");
       store.addSystemMessage("Start the gateway first. The Figma tab now uses the real gateway transport.");
       return;
     }
     const client = clientRef.current;
     if (!client || !client.isConnected()) {
+      pushDebug(`handlePromptSubmit blocked: client connected=${client?.isConnected() ?? false} error=${gatewayError || "none"}`);
       store.addSystemMessage(gatewayError || "Gateway is not connected yet. Retry in a moment.");
       return;
     }
 
     const sessionKey = store.ensureGatewaySessionKey();
     const assistantMessageId = crypto.randomUUID();
+    const requestId = crypto.randomUUID();
     activeSessionKeyRef.current = sessionKey;
     activeAssistantMessageIdRef.current = assistantMessageId;
+    activeRequestIdRef.current = requestId;
     activeRunIdRef.current = null;
+    pushDebug(
+      `handlePromptSubmit start session=${sessionKey} assistantMessageId=${assistantMessageId} requestId=${requestId}`,
+    );
 
     store.setPrompt(prompt);
     store.addUserPrompt(prompt);
@@ -412,11 +760,25 @@ export function Figma({ gatewayRunning }: Props) {
     store.setBusy(true);
 
     try {
-      const outbound = buildGatewayPlannerPrompt(prompt, store.getPlanningContext());
+      const outbound = buildGatewayPlannerPrompt(prompt, store.getPlanningContext(), requestId);
+      pushDebug(`sendMessage start session=${sessionKey} promptLen=${prompt.length} outboundLen=${outbound.length}`);
       const runId = await client.sendMessage(sessionKey, outbound);
       activeRunIdRef.current = runId;
+      pushDebug(`sendMessage ok runId=${runId}`);
+      void settleRunFromHistory(runId, sessionKey, assistantMessageId, requestId, "background", false);
+      if (activeRunTimeoutRef.current !== null) {
+        window.clearTimeout(activeRunTimeoutRef.current);
+      }
+      activeRunTimeoutRef.current = window.setTimeout(() => {
+        if (activeRunIdRef.current !== runId) return;
+        pushDebug(`run watchdog fired runId=${runId}; attempting settlement from history`);
+        void (async () => {
+          await settleRunFromHistory(runId, sessionKey, assistantMessageId, requestId, "watchdog", true);
+        })();
+      }, 45_000);
     } catch (error) {
-      store.setBusy(false);
+      pushDebug(`sendMessage failed error=${error instanceof Error ? error.message : String(error)}`);
+      clearActiveRun();
       store.upsertAssistantMessage(
         assistantMessageId,
         error instanceof Error ? error.message : "Failed to start gateway run.",
@@ -458,7 +820,7 @@ export function Figma({ gatewayRunning }: Props) {
             </div>
 
             <div
-              className="absolute overflow-hidden rounded-[24px] border border-white/10 bg-[rgba(8,12,20,0.78)] shadow-[0_28px_90px_rgba(0,0,0,0.36)] backdrop-blur"
+              className="absolute overflow-hidden rounded-[24px] border border-[var(--border-subtle)] bg-[color-mix(in_srgb,var(--bg-card)_92%,transparent)] shadow-[0_28px_90px_rgba(0,0,0,0.16)] backdrop-blur"
               style={{
                 left: viewportRect.left,
                 top: viewportRect.top,
@@ -467,7 +829,7 @@ export function Figma({ gatewayRunning }: Props) {
               }}
             >
               <div
-                className="flex h-[54px] items-center justify-between border-b border-white/10 px-4"
+                className="flex h-[54px] items-center justify-between border-b border-[var(--border-subtle)] px-4"
                 onPointerDown={handleViewportDragStart}
                 onPointerMove={handleViewportDragMove}
                 onPointerUp={handleViewportDragEnd}
@@ -479,17 +841,17 @@ export function Figma({ gatewayRunning }: Props) {
                     <span className="h-3 w-3 rounded-full bg-[#34d399]" />
                   </div>
                   <div>
-                    <div className="text-xs font-semibold uppercase tracking-[0.16em] text-white/50">
+                    <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--text-tertiary)]">
                       Display View
                     </div>
-                    <div className="text-sm text-white/85">Drag, resize, or expand this viewport</div>
+                    <div className="text-sm text-[var(--text-primary)]">Drag, resize, or expand this viewport</div>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={toggleViewportMinimized}
-                    className="flex h-8 w-8 items-center justify-center rounded-full bg-white/8 text-white/80 transition-colors hover:bg-white/14"
+                    className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--bg-app)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-muted)] hover:text-[var(--text-primary)]"
                     aria-label={viewportMinimized ? "Restore viewport" : "Minimize viewport"}
                   >
                     {viewportMinimized ? <Square className="h-3.5 w-3.5" /> : <Minus className="h-3.5 w-3.5" />}
@@ -497,7 +859,7 @@ export function Figma({ gatewayRunning }: Props) {
                   <button
                     type="button"
                     onClick={toggleViewportMaximized}
-                    className="flex h-8 w-8 items-center justify-center rounded-full bg-white/8 text-white/80 transition-colors hover:bg-white/14"
+                    className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--bg-app)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-muted)] hover:text-[var(--text-primary)]"
                     aria-label={viewportMaximized ? "Restore viewport size" : "Maximize viewport"}
                   >
                     {viewportMaximized ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
@@ -520,7 +882,7 @@ export function Figma({ gatewayRunning }: Props) {
                     }}
                   >
                     {nodes.length === 0 && (
-                      <div className="absolute left-24 top-24 max-w-md rounded-[28px] border border-dashed border-white/20 bg-[rgba(8,12,20,0.7)] p-6 text-sm leading-6 text-white/75 backdrop-blur">
+                      <div className="absolute left-24 top-24 max-w-md rounded-[28px] border border-dashed border-[var(--border-default)] bg-[color-mix(in_srgb,var(--bg-card)_94%,transparent)] p-6 text-sm leading-6 text-[var(--text-secondary)] backdrop-blur">
                         Enter a prompt or choose a starter recipe. The right-hand panel will plan a design and execute OpenPencil-derived tool calls against this document graph.
                       </div>
                     )}
@@ -568,7 +930,7 @@ export function Figma({ gatewayRunning }: Props) {
                               {node.text || node.name}
                             </span>
                           ) : (
-                            <span className="pointer-events-none absolute left-3 top-3 rounded-full bg-black/10 px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-[color:var(--text-primary)]">
+                            <span className="pointer-events-none absolute left-3 top-3 rounded-full bg-[color-mix(in_srgb,var(--bg-card)_78%,transparent)] px-2 py-1 text-[10px] uppercase tracking-[0.16em] text-[var(--text-primary)]">
                               {node.name}
                             </span>
                           )}
@@ -579,7 +941,7 @@ export function Figma({ gatewayRunning }: Props) {
                   {!viewportMaximized && (
                     <button
                       type="button"
-                      className="absolute bottom-2 right-2 h-6 w-6 cursor-se-resize rounded-md bg-white/10 text-white/60 transition-colors hover:bg-white/15"
+                      className="absolute bottom-2 right-2 h-6 w-6 cursor-se-resize rounded-md bg-[var(--bg-app)] text-[var(--text-tertiary)] transition-colors hover:bg-[var(--bg-muted)] hover:text-[var(--text-primary)]"
                       onPointerDown={handleViewportResizeStart}
                       onPointerMove={handleViewportResizeMove}
                       onPointerUp={handleViewportResizeEnd}
@@ -592,7 +954,7 @@ export function Figma({ gatewayRunning }: Props) {
               )}
             </div>
 
-            <div className="absolute bottom-4 left-4 flex items-center gap-2 rounded-full border border-[var(--border-subtle)] bg-[rgba(10,14,23,0.74)] px-3 py-2 text-[11px] text-white/80 backdrop-blur">
+            <div className="absolute bottom-4 left-4 flex items-center gap-2 rounded-full border border-[var(--border-subtle)] bg-[color-mix(in_srgb,var(--bg-card)_92%,transparent)] px-3 py-2 text-[11px] text-[var(--text-secondary)] backdrop-blur">
               <span>Zoom {Math.round(snapshot.zoom * 100)}%</span>
               <span className="opacity-40">•</span>
               <span>Drag canvas to pan</span>
@@ -639,10 +1001,7 @@ export function Figma({ gatewayRunning }: Props) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    const confirmed = window.confirm(`Delete "${activeProject.name}"?`);
-                    if (confirmed) store.deleteProject(activeProject.id);
-                  }}
+                  onClick={() => setProjectPendingDelete({ id: activeProject.id, name: activeProject.name })}
                   className="rounded-full border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-400 transition-colors hover:bg-red-500/15"
                 >
                   Delete
@@ -713,23 +1072,15 @@ export function Figma({ gatewayRunning }: Props) {
               >
                 Reset
               </button>
-            </div>
-          </div>
-
-          <div className="border-b border-[var(--border-subtle)] px-5 py-4">
-            <div className="text-xs font-medium text-[var(--text-primary)]">Starter recipes</div>
-            <div className="mt-3 grid gap-2">
-              {FIGMA_RECIPES.map((recipe) => (
+              {snapshot.busy && (
                 <button
-                  key={recipe.id}
                   type="button"
-                  onClick={() => setPrompt(recipe.summary)}
-                  className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-app)] px-3 py-3 text-left transition-colors hover:border-[var(--border-default)]"
+                  onClick={() => clearActiveRun("Run stopped locally before a terminal gateway event arrived.")}
+                  className="rounded-full border border-red-500/20 bg-red-500/10 px-4 py-2 text-sm text-red-300 transition-colors hover:bg-red-500/15"
                 >
-                  <div className="text-sm font-medium text-[var(--text-primary)]">{recipe.label}</div>
-                  <div className="mt-1 text-xs leading-5 text-[var(--text-secondary)]">{recipe.summary}</div>
+                  Stop
                 </button>
-              ))}
+              )}
             </div>
           </div>
 
@@ -757,6 +1108,40 @@ export function Figma({ gatewayRunning }: Props) {
                   <div className="mt-2 whitespace-pre-wrap text-sm leading-6 text-[var(--text-primary)]">
                     {message.content}
                   </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="border-b border-[var(--border-subtle)] px-5 py-4">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="text-xs font-medium text-[var(--text-primary)]">Gateway Debug</div>
+              <button
+                type="button"
+                onClick={() => setDebugEntries([])}
+                className="rounded-full border border-[var(--border-subtle)] bg-[var(--bg-app)] px-2.5 py-1 text-[10px] text-[var(--text-secondary)] transition-colors hover:border-[var(--border-default)]"
+              >
+                Clear
+              </button>
+            </div>
+            <div className="mb-3 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-app)] px-3 py-3 font-mono text-[11px] leading-5 text-[var(--text-secondary)]">
+              <div>gatewayRunning={String(gatewayRunning)}</div>
+              <div>gatewayConnected={String(gatewayConnected)}</div>
+              <div>busy={String(snapshot.busy)}</div>
+              <div>activeRunId={activeRunIdRef.current || "none"}</div>
+              <div>activeSession={activeSessionKeyRef.current || "none"}</div>
+              <div>projectSession={snapshot.gatewaySessionKey || "none"}</div>
+            </div>
+            <div className="max-h-48 space-y-2 overflow-y-auto pr-1">
+              {debugEntries.map((entry) => (
+                <div
+                  key={entry.id}
+                  className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-app)] px-3 py-3 font-mono text-[11px] leading-5 text-[var(--text-secondary)]"
+                >
+                  <div className="text-[10px] text-[var(--text-tertiary)]">
+                    {new Date(entry.ts).toLocaleTimeString()}
+                  </div>
+                  <div className="mt-1 break-words">{entry.message}</div>
                 </div>
               ))}
             </div>
@@ -790,6 +1175,35 @@ export function Figma({ gatewayRunning }: Props) {
           </div>
         </aside>
       </div>
+      {projectPendingDelete && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-[28px] border border-[var(--border-subtle)] bg-[var(--bg-card)] p-6 shadow-[0_24px_80px_rgba(0,0,0,0.25)]">
+            <div className="text-lg font-semibold text-[var(--text-primary)]">Delete project?</div>
+            <div className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">
+              This will permanently remove <span className="font-medium text-[var(--text-primary)]">{projectPendingDelete.name}</span> and its saved canvas, session, and activity log.
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setProjectPendingDelete(null)}
+                className="rounded-full border border-[var(--border-subtle)] bg-[var(--bg-app)] px-4 py-2 text-sm text-[var(--text-primary)] transition-colors hover:border-[var(--border-default)]"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  store.deleteProject(projectPendingDelete.id);
+                  setProjectPendingDelete(null);
+                }}
+                className="rounded-full border border-red-500/20 bg-red-500 px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

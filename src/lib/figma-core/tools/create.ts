@@ -42,6 +42,33 @@ export const createShape = defineTool({
     node.y = args.y;
     node.resize(args.width, args.height);
     if (args.name) node.name = args.name;
+    if (args.type === "TEXT") {
+      node.characters = args.name || "Text";
+      node.fontSize = Math.max(14, Math.min(args.height, 28));
+      node.fills = [{ type: "SOLID", color: parseColor("#0f172a"), opacity: 1, visible: true }];
+    } else if (args.type === "LINE") {
+      node.strokes = [
+        {
+          color: parseColor("#94a3b8"),
+          weight: 1.5,
+          opacity: 1,
+          visible: true,
+          align: "CENTER",
+        },
+      ];
+    } else {
+      node.fills = [{ type: "SOLID", color: parseColor("#f8fafc"), opacity: 1, visible: true }];
+      node.strokes = [
+        {
+          color: parseColor("#cbd5e1"),
+          weight: 1,
+          opacity: 1,
+          visible: true,
+          align: "INSIDE",
+        },
+      ];
+      node.cornerRadius = args.type === "FRAME" || args.type === "SECTION" ? 24 : 16;
+    }
     if (parent) parent.appendChild(node);
     return nodeSummary(node);
   },
