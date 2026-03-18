@@ -360,6 +360,19 @@ export function generateId(): string {
   return `0:${nextLocalID++}`
 }
 
+export function syncGeneratedIdCounter(ids: Iterable<string>): void {
+  let maxLocalId = 0
+  for (const id of ids) {
+    const match = /^0:(\d+)$/.exec(id)
+    if (!match) continue
+    const value = Number(match[1])
+    if (Number.isFinite(value)) {
+      maxLocalId = Math.max(maxLocalId, value)
+    }
+  }
+  nextLocalID = Math.max(nextLocalID, maxLocalId + 1)
+}
+
 function createDefaultNode(type: NodeType, overrides: Partial<SceneNode> = {}): SceneNode {
   return {
     id: generateId(),

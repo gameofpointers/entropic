@@ -1,6 +1,6 @@
 export * from "./types";
 export * from "./constants";
-export { SceneGraph, generateId, type SceneNode, type Variable, type VariableCollection } from "./scene-graph";
+export { SceneGraph, generateId, syncGeneratedIdCounter, type SceneNode, type Variable, type VariableCollection } from "./scene-graph";
 export { FigmaAPI, FigmaNodeProxy, computeImageHash, type FigmaFontName } from "./figma-api";
 export { parseColor, normalizeColor, colorToCSSCompact, colorToHex } from "./color";
 export { defineTool, nodeSummary, nodeToResult, type ToolDef } from "./tools/schema";
