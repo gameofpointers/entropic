@@ -26,6 +26,25 @@ type RenderSpecNode = {
   children?: RenderSpecNode[];
 };
 
+function parseRenderSpecInput(input: unknown): RenderSpecNode {
+  if (input && typeof input === "object" && !Array.isArray(input)) {
+    return input as RenderSpecNode;
+  }
+  if (typeof input !== "string") {
+    throw new Error("render_spec requires `spec` as a JSON string or object.");
+  }
+
+  try {
+    return JSON.parse(input) as RenderSpecNode;
+  } catch (jsonError) {
+    try {
+      return new Function(`"use strict"; return (${input});`)() as RenderSpecNode;
+    } catch {
+      throw jsonError;
+    }
+  }
+}
+
 function createNodeByType(figma: Parameters<typeof createShape.execute>[0], type: RenderSpecNode["type"]): FigmaNodeProxy {
   const createMap: Record<RenderSpecNode["type"], () => FigmaNodeProxy> = {
     FRAME: () => figma.createFrame(),
@@ -263,7 +282,7 @@ export const renderSpec = defineTool({
     y: { type: "number", description: "Override root Y position" },
   },
   execute: (figma, args) => {
-    const spec = JSON.parse(args.spec) as RenderSpecNode;
+    const spec = parseRenderSpecInput(args.spec);
     let parentId = args.parent_id;
     let replaceIndex = -1;
 

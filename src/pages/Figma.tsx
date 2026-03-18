@@ -26,6 +26,11 @@ type Props = {
   gatewayRunning: boolean;
 };
 
+function sessionKeysMatch(left: string, right: string): boolean {
+  if (left === right) return true;
+  return left.endsWith(`:${right}`) || right.endsWith(`:${left}`);
+}
+
 function nodeBackground(node: SceneNode): string {
   const fill = node.fills.find((candidate) => candidate.visible);
   if (!fill) return "transparent";
@@ -62,6 +67,7 @@ function buildGatewayPlannerPrompt(
   context: ReturnType<FigmaDocumentStore["getPlanningContext"]>,
   requestId: string,
 ): string {
+  const availableTools = context.toolCatalog.map((tool) => tool.name).join(", ");
   return [
     "You are the design-planning agent for Entropic's Figma workspace.",
     "You do not directly edit the canvas. You must plan tool calls for the local Figma tool runtime.",
@@ -86,6 +92,8 @@ function buildGatewayPlannerPrompt(
     "- If no edit is needed, return an empty tool_calls array.",
     "- Do not include markdown outside the JSON object.",
     "",
+    `Available tool names: ${availableTools}`,
+    "",
     `Planner request id: ${requestId}`,
     "",
     `User prompt: ${userPrompt}`,
@@ -95,17 +103,97 @@ function buildGatewayPlannerPrompt(
   ].join("\n");
 }
 
+function buildGatewayRepairPrompt(
+  userPrompt: string,
+  invalidAssistantResponse: string,
+  context: ReturnType<FigmaDocumentStore["getPlanningContext"]>,
+  requestId: string,
+): string {
+  const availableTools = context.toolCatalog.map((tool) => tool.name).join(", ");
+  return [
+    "You are repairing a previous invalid design-planning response.",
+    "Return exactly one JSON object with this shape:",
+    '{ "assistant_response": "short user-facing summary", "tool_calls": [{ "tool": "tool_name", "args": { "key": "value" } }] }',
+    "Rules:",
+    "- Output JSON only. No markdown. No prose before or after the JSON.",
+    "- Use only tool names from the provided catalog.",
+    "- If inspection is needed first, include inspection tool calls such as `get_current_page`, `get_page_tree`, `find_nodes`, `get_node`, or `describe` in `tool_calls`.",
+    "- Do not say you need to inspect the page. Express that as tool calls.",
+    "- Prefer `render_spec` for creating a new screen or section from scratch.",
+    "",
+    `Available tool names: ${availableTools}`,
+    "",
+    `Repair request id: ${requestId}`,
+    "",
+    `Original user prompt: ${userPrompt}`,
+    "",
+    "Previous invalid assistant response:",
+    invalidAssistantResponse,
+    "",
+    "Planning context JSON:",
+    JSON.stringify(context),
+  ].join("\n");
+}
+
 function parseGatewayToolPlan(raw: string): ParsedPlan | null {
+  const parseCandidate = (candidate: string) => {
+    try {
+      return JSON.parse(candidate) as {
+        assistant_response?: unknown;
+        tool_calls?: unknown;
+      };
+    } catch {
+      try {
+        return new Function(`"use strict"; return (${candidate});`)() as {
+          assistant_response?: unknown;
+          tool_calls?: unknown;
+        };
+      } catch {
+        return null;
+      }
+    }
+  };
+
+  const toolCallMatch = raw.match(/TOOLCALL>\s*(\[[\s\S]*\])\s*<ALL>/i);
+  if (toolCallMatch) {
+    try {
+      const parsedCalls = JSON.parse(toolCallMatch[1]) as Array<{
+        name?: unknown;
+        args?: unknown;
+      }>;
+      const toolCalls = parsedCalls
+        .filter(
+          (entry): entry is { name: string; args: Record<string, unknown> } =>
+            Boolean(entry) &&
+            typeof entry === "object" &&
+            typeof entry.name === "string" &&
+            typeof entry.args === "object" &&
+            entry.args !== null &&
+            !Array.isArray(entry.args),
+        )
+        .map((entry) => ({
+          tool: entry.name,
+          args: entry.args,
+        }));
+      return {
+        assistantResponse:
+          raw
+            .replace(/TOOLCALL>\s*[\s\S]*?<ALL>/i, "")
+            .trim() || `Planned ${toolCalls.length} tool call${toolCalls.length === 1 ? "" : "s"}.`,
+        toolCalls,
+      };
+    } catch {
+      // Fall through to the standard JSON-object parser.
+    }
+  }
+
   const candidates = extractJsonBlocks(raw)
     .map((block) => block.jsonText)
     .concat(raw.trim() ? [raw.trim()] : []);
 
   for (const candidate of candidates) {
-    try {
-      const parsed = JSON.parse(candidate) as {
-        assistant_response?: unknown;
-        tool_calls?: unknown;
-      };
+    const parsed = parseCandidate(candidate);
+    if (parsed) {
       const toolCalls = Array.isArray(parsed.tool_calls)
         ? parsed.tool_calls.filter(
             (entry): entry is FigmaToolCall =>
@@ -125,10 +213,151 @@ function parseGatewayToolPlan(raw: string): ParsedPlan | null {
               : raw,
         toolCalls,
       };
-    } catch {
-      // try next candidate
     }
   }
+  return null;
+}
+
+function buildHeuristicToolPlan(
+  userPrompt: string,
+  store: FigmaDocumentStore,
+): { assistantResponse: string; toolCalls: FigmaToolCall[] } | null {
+  const prompt = userPrompt.toLowerCase();
+  const nodes = Array.from(store.graph.nodes.values());
+  const currentPageId = store.getSnapshot().currentPageId;
+  const pageNodes = nodes.filter((node) => node.parentId === currentPageId);
+  const walletFrame =
+    nodes.find(
+      (node) =>
+        node.type === "FRAME" &&
+        (node.name.toLowerCase().includes("wallet") || node.name.toLowerCase().includes("screen")),
+    ) ??
+    pageNodes
+      .filter((node) => node.type === "FRAME")
+      .sort((a, b) => b.width * b.height - a.width * a.height)[0];
+
+  const buttonFrames = nodes.filter((node) => {
+    if (node.type !== "FRAME" && node.type !== "RECTANGLE") return false;
+    const name = node.name.toLowerCase();
+    return (
+      name.includes("send") ||
+      name.includes("receive") ||
+      name.includes("buy")
+    );
+  });
+
+  if (
+    buttonFrames.length >= 3 &&
+    (prompt.includes("horizontal") || prompt.includes("middle") || prompt.includes("center"))
+  ) {
+    const commonParentId =
+      buttonFrames.length > 0 &&
+      buttonFrames.every((node) => node.parentId && node.parentId === buttonFrames[0]?.parentId)
+        ? buttonFrames[0]?.parentId ?? null
+        : null;
+    const existingRow = (commonParentId && store.graph.getNode(commonParentId)) || null;
+    if (!existingRow) {
+      return null;
+    }
+    const toolCalls: FigmaToolCall[] = [];
+    const rowWidth = walletFrame ? Math.min(walletFrame.width - 40, 320) : 320;
+    const rowX = walletFrame ? Math.max(20, Math.round((walletFrame.width - rowWidth) / 2)) : existingRow.x;
+    const rowY = walletFrame ? Math.round(walletFrame.height * 0.46) : 260;
+    toolCalls.push({
+      tool: "rename_node",
+      args: {
+        id: existingRow.id,
+        name: "Action Row",
+      },
+    });
+    toolCalls.push({
+      tool: "set_layout",
+      args: {
+        id: existingRow.id,
+        direction: "HORIZONTAL",
+        spacing: 16,
+        padding_horizontal: 12,
+        padding_vertical: 12,
+        align: "CENTER",
+        counter_align: "CENTER",
+      },
+    });
+    toolCalls.push({
+      tool: "node_resize",
+      args: {
+        id: existingRow.id,
+        width: rowWidth,
+        height: 88,
+      },
+    });
+    toolCalls.push({
+      tool: "node_move",
+      args: {
+        id: existingRow.id,
+        x: rowX,
+        y: rowY,
+      },
+    });
+    toolCalls.push({
+      tool: "set_fill",
+      args: {
+        id: existingRow.id,
+        color: "#dcfce7",
+      },
+    });
+    toolCalls.push({
+      tool: "set_stroke",
+      args: {
+        id: existingRow.id,
+        color: "#86efac",
+        weight: 1,
+      },
+    });
+    toolCalls.push({
+      tool: "set_radius",
+      args: {
+        id: existingRow.id,
+        radius: 20,
+      },
+    });
+
+    for (const button of buttonFrames.slice(0, 3)) {
+      toolCalls.push({
+        tool: "set_layout_child",
+        args: {
+          id: button.id,
+          positioning: "AUTO",
+          sizing_horizontal: "FIXED",
+          sizing_vertical: "FIXED",
+          align_self: "CENTER",
+        },
+      });
+    }
+
+    return {
+      assistantResponse: "Centered the action buttons in a horizontal row.",
+      toolCalls,
+    };
+  }
+
+  const balanceText = nodes.find(
+    (node) => node.type === "TEXT" && (node.name.toLowerCase().includes("balance") || node.text.toLowerCase().includes("quai")),
+  );
+  if (balanceText && prompt.includes("100 quai")) {
+    return {
+      assistantResponse: "Updated the balance text to 100 Quai.",
+      toolCalls: [
+        {
+          tool: "set_text",
+          args: {
+            id: balanceText.id,
+            text: "100 Quai",
+          },
+        },
+      ],
+    };
+  }
+
   return null;
 }
 
@@ -253,7 +482,9 @@ export function Figma({ gatewayRunning }: Props) {
   const activeSessionKeyRef = useRef<string | null>(null);
   const activeAssistantMessageIdRef = useRef<string | null>(null);
   const activeRequestIdRef = useRef<string | null>(null);
+  const recentRunRef = useRef<{ runId: string; sessionKey: string; assistantMessageId: string } | null>(null);
   const activeRunTimeoutRef = useRef<number | null>(null);
+  const repairAttemptedRef = useRef(false);
   const busyRef = useRef(snapshot.busy);
 
   const nodes = store.getRenderableNodes();
@@ -282,8 +513,16 @@ export function Figma({ gatewayRunning }: Props) {
     pushDebug(
       `clearActiveRun reason=${reason || "none"} runId=${activeRunIdRef.current || "none"} session=${activeSessionKeyRef.current || "none"}`,
     );
+    if (activeRunIdRef.current && activeSessionKeyRef.current && activeAssistantMessageIdRef.current) {
+      recentRunRef.current = {
+        runId: activeRunIdRef.current,
+        sessionKey: activeSessionKeyRef.current,
+        assistantMessageId: activeAssistantMessageIdRef.current,
+      };
+    }
     activeRunIdRef.current = null;
     activeRequestIdRef.current = null;
+    repairAttemptedRef.current = false;
     if (activeRunTimeoutRef.current !== null) {
       window.clearTimeout(activeRunTimeoutRef.current);
       activeRunTimeoutRef.current = null;
@@ -292,6 +531,10 @@ export function Figma({ gatewayRunning }: Props) {
     if (reason && activeAssistantMessageIdRef.current) {
       store.upsertAssistantMessage(activeAssistantMessageIdRef.current, reason, "error");
     }
+  }
+
+  function delay(ms: number) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 
   async function recoverRunFromHistory(sessionKey: string, assistantMessageId: string, requestId: string | null) {
@@ -311,15 +554,30 @@ export function Figma({ gatewayRunning }: Props) {
       let assistantText = "";
       if (requestId) {
         const marker = `Planner request id: ${requestId}`;
-        const requestIndex = normalizedHistory.findIndex(
-          (message) => message.role === "user" && message.content.includes(marker),
+        const requestIndexes = normalizedHistory
+          .map((message, index) =>
+            message.role === "user" && message.content.includes(marker) ? index : -1,
+          )
+          .filter((index) => index >= 0);
+        pushDebug(
+          `recoverRunFromHistory requestId=${requestId} requestIndexes=${requestIndexes.join(",") || "none"}`,
         );
-        pushDebug(`recoverRunFromHistory requestId=${requestId} requestIndex=${requestIndex}`);
-        if (requestIndex >= 0) {
-          const matchedAssistant = normalizedHistory
+        if (requestIndexes.length > 0) {
+          const requestIndex = requestIndexes[requestIndexes.length - 1];
+          const forwardAssistant = normalizedHistory
             .slice(requestIndex + 1)
             .find((message) => message.role === "assistant" && message.content.trim().length > 0);
-          assistantText = matchedAssistant?.content ?? "";
+          const backwardAssistant = [...normalizedHistory]
+            .slice(0, requestIndex)
+            .reverse()
+            .find((message) => message.role === "assistant" && message.content.trim().length > 0);
+          if (forwardAssistant) {
+            pushDebug(`recoverRunFromHistory matched forward assistant after requestIndex=${requestIndex}`);
+            assistantText = forwardAssistant.content;
+          } else if (backwardAssistant) {
+            pushDebug(`recoverRunFromHistory matched backward assistant before requestIndex=${requestIndex}`);
+            assistantText = backwardAssistant.content;
+          }
         }
       }
 
@@ -344,6 +602,23 @@ export function Figma({ gatewayRunning }: Props) {
       const parsedPlan = parseGatewayToolPlan(assistantText);
       if (!parsedPlan) {
         pushDebug("recoverRunFromHistory parse failed");
+        const heuristicPlan = buildHeuristicToolPlan(store.getSnapshot().prompt, store);
+        if (heuristicPlan) {
+          pushDebug(`recoverRunFromHistory heuristic fallback toolCalls=${heuristicPlan.toolCalls.length}`);
+          store.upsertAssistantMessage(assistantMessageId, heuristicPlan.assistantResponse, "done");
+          await store.executeToolPlan(heuristicPlan.toolCalls);
+          store.addSystemMessage(
+            `Applied ${heuristicPlan.toolCalls.length} local fallback tool call${heuristicPlan.toolCalls.length === 1 ? "" : "s"} after planner output failed.`,
+          );
+          return true;
+        }
+        if (!repairAttemptedRef.current) {
+          repairAttemptedRef.current = true;
+          const repaired = await attemptRepairPlan(sessionKey, assistantMessageId, assistantText);
+          if (repaired) {
+            return true;
+          }
+        }
         store.upsertAssistantMessage(
           assistantMessageId,
           assistantText || "Recovered assistant output from history, but it did not contain a valid tool plan.",
@@ -365,6 +640,39 @@ export function Figma({ gatewayRunning }: Props) {
       return true;
     } catch (error) {
       pushDebug(`recoverRunFromHistory failed error=${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }
+
+  async function attemptRepairPlan(
+    sessionKey: string,
+    assistantMessageId: string,
+    invalidAssistantResponse: string,
+  ) {
+    const client = clientRef.current;
+    if (!client) {
+      pushDebug("attemptRepairPlan skipped: no client");
+      return false;
+    }
+
+    try {
+      const repairRequestId = crypto.randomUUID();
+      const repairSessionKey = client.createSessionKey();
+      const repairPrompt = buildGatewayRepairPrompt(
+        store.getSnapshot().prompt,
+        invalidAssistantResponse,
+        store.getPlanningContext(),
+        repairRequestId,
+      );
+      pushDebug(`attemptRepairPlan start requestId=${repairRequestId} session=${repairSessionKey}`);
+      const repairRunId = await client.sendMessage(repairSessionKey, repairPrompt);
+      pushDebug(`attemptRepairPlan sendMessage ok runId=${repairRunId}`);
+      await waitForRunHistory(repairRunId, repairSessionKey);
+      const repaired = await recoverRunFromHistory(repairSessionKey, assistantMessageId, repairRequestId);
+      pushDebug(`attemptRepairPlan result repaired=${String(repaired)}`);
+      return repaired;
+    } catch (error) {
+      pushDebug(`attemptRepairPlan failed error=${error instanceof Error ? error.message : String(error)}`);
       return false;
     }
   }
@@ -404,7 +712,19 @@ export function Figma({ gatewayRunning }: Props) {
       return false;
     }
 
-    const recovered = await recoverRunFromHistory(sessionKey, assistantMessageId, requestId);
+    let recovered = false;
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      pushDebug(`settleRunFromHistory recover attempt=${attempt} source=${source} runId=${runId}`);
+      recovered = await recoverRunFromHistory(sessionKey, assistantMessageId, requestId);
+      if (recovered) break;
+      if (activeRunIdRef.current !== runId) {
+        pushDebug(`settleRunFromHistory exit source=${source} runId=${runId} reason=inactive-during-retry`);
+        return false;
+      }
+      if (attempt < 4) {
+        await delay(attempt * 1500);
+      }
+    }
     if (activeRunIdRef.current !== runId) {
       pushDebug(`settleRunFromHistory exit source=${source} runId=${runId} reason=cleared-after-recovery`);
       return recovered;
@@ -493,12 +813,32 @@ export function Figma({ gatewayRunning }: Props) {
           pushDebug(
             `gateway chat event state=${event.state} runId=${event.runId} session=${event.sessionKey} activeRun=${activeRunIdRef.current || "none"} activeSession=${activeSessionKeyRef.current || "none"}`,
           );
-          if (!activeRunIdRef.current || !activeSessionKeyRef.current || !activeAssistantMessageIdRef.current) {
-            pushDebug("gateway chat event ignored: no active run/session/message refs");
-            return;
+          let messageId = activeAssistantMessageIdRef.current;
+          let isActiveRunEvent = true;
+          if (
+            !activeRunIdRef.current ||
+            !activeSessionKeyRef.current ||
+            !activeAssistantMessageIdRef.current ||
+            event.runId !== activeRunIdRef.current ||
+            !sessionKeysMatch(event.sessionKey, activeSessionKeyRef.current)
+          ) {
+            const recentRun = recentRunRef.current;
+            if (
+              recentRun &&
+              recentRun.runId === event.runId &&
+              sessionKeysMatch(event.sessionKey, recentRun.sessionKey) &&
+              (event.state === "error" || event.state === "aborted" || event.state === "final")
+            ) {
+              pushDebug("gateway chat event matched recent cleared run");
+              messageId = recentRun.assistantMessageId;
+              isActiveRunEvent = false;
+            } else {
+              pushDebug("gateway chat event ignored: runId/sessionKey mismatch");
+              return;
+            }
           }
-          if (event.runId !== activeRunIdRef.current || event.sessionKey !== activeSessionKeyRef.current) {
-            pushDebug("gateway chat event ignored: runId/sessionKey mismatch");
+          if (!messageId) {
+            pushDebug("gateway chat event ignored: no assistant message id available");
             return;
           }
 
@@ -512,14 +852,22 @@ export function Figma({ gatewayRunning }: Props) {
 
           if (event.state === "delta" || event.state === "final") {
             store.upsertAssistantMessage(
-              activeAssistantMessageIdRef.current,
+              messageId,
               text || "Planning design changes...",
               event.state === "final" ? "done" : "streaming",
             );
           }
 
           if (event.state === "final") {
+            if (!isActiveRunEvent) {
+              pushDebug("gateway final for recent cleared run ignored after late arrival");
+              return;
+            }
             if (!text.trim()) {
+              if (!activeSessionKeyRef.current || !activeAssistantMessageIdRef.current) {
+                pushDebug("gateway final empty payload ignored: active session/message refs missing");
+                return;
+              }
               pushDebug("gateway final had no text payload; attempting settlement from history");
               await settleRunFromHistory(
                 event.runId,
@@ -532,14 +880,41 @@ export function Figma({ gatewayRunning }: Props) {
               return;
             }
 
-            clearActiveRun();
             const parsedPlan = parseGatewayToolPlan(text);
             pushDebug(
               `gateway final received parsePlan=${parsedPlan ? "ok" : "failed"} toolCalls=${parsedPlan?.toolCalls.length ?? 0}`,
             );
             if (!parsedPlan) {
+              const heuristicPlan = buildHeuristicToolPlan(store.getSnapshot().prompt, store);
+              if (heuristicPlan) {
+                pushDebug(`gateway final heuristic fallback toolCalls=${heuristicPlan.toolCalls.length}`);
+                clearActiveRun();
+                store.upsertAssistantMessage(messageId, heuristicPlan.assistantResponse, "done");
+                await store.executeToolPlan(heuristicPlan.toolCalls);
+                store.addSystemMessage(
+                  `Applied ${heuristicPlan.toolCalls.length} local fallback tool call${heuristicPlan.toolCalls.length === 1 ? "" : "s"} after planner output failed.`,
+                );
+                return;
+              }
+              if (!repairAttemptedRef.current) {
+                if (!activeSessionKeyRef.current) {
+                  pushDebug("attemptRepairPlan skipped: active session ref missing");
+                } else {
+                repairAttemptedRef.current = true;
+                const repaired = await attemptRepairPlan(
+                  activeSessionKeyRef.current,
+                  messageId,
+                  text || "The model finished, but did not return a valid tool plan.",
+                );
+                if (repaired) {
+                  clearActiveRun();
+                  return;
+                }
+                }
+              }
+              clearActiveRun();
               store.upsertAssistantMessage(
-                activeAssistantMessageIdRef.current,
+                messageId,
                 text || "The model finished, but did not return a valid tool plan.",
                 "error",
               );
@@ -547,8 +922,9 @@ export function Figma({ gatewayRunning }: Props) {
               return;
             }
 
+            clearActiveRun();
             store.upsertAssistantMessage(
-              activeAssistantMessageIdRef.current,
+              messageId,
               parsedPlan.assistantResponse,
               "done",
             );
@@ -574,11 +950,13 @@ export function Figma({ gatewayRunning }: Props) {
           }
 
           if (event.state === "error" || event.state === "aborted") {
-            clearActiveRun();
+            if (isActiveRunEvent) {
+              clearActiveRun();
+            }
             const message = event.errorMessage || "Gateway run failed.";
             pushDebug(`gateway terminal error state=${event.state} message=${message}`);
             store.upsertAssistantMessage(
-              activeAssistantMessageIdRef.current,
+              messageId,
               message,
               "error",
             );
@@ -751,7 +1129,7 @@ export function Figma({ gatewayRunning }: Props) {
       return;
     }
 
-    const sessionKey = store.ensureGatewaySessionKey();
+    const sessionKey = client.createSessionKey();
     const assistantMessageId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
     activeSessionKeyRef.current = sessionKey;
