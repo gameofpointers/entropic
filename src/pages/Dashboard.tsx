@@ -11,6 +11,7 @@ import { Chat, type ChatSession, type ChatSessionActionRequest } from "./Chat";
 import { Store } from "./Store";
 import { Channels } from "./Channels";
 import { Files } from "./Files";
+import { Figma } from "./Figma";
 import { Tasks } from "./Tasks";
 import { Jobs } from "./Jobs";
 import { BillingPage } from "./BillingPage";
@@ -1475,6 +1476,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     switch (currentPage) {
       case "chat":
         return null;
+      case "figma":
+        return <Figma gatewayRunning={gatewayRunning} />;
       case "store":
       case "skills":
         return (

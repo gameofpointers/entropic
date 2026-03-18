@@ -76,6 +76,7 @@ import {
   syncEmbeddedPreviewWebview,
 } from "../lib/nativePreview";
 import { hostedFeaturesEnabled } from "../lib/buildProfile";
+import type { Page } from "../components/Layout";
 
 type WorkspaceFileEntry = {
   name: string;
@@ -2941,11 +2942,13 @@ export function Files({
     focusWindow("chat");
   }
 
-  function handleDesktopChatNavigate(page: "chat" | "store" | "skills" | "channels" | "files" | "tasks" | "jobs" | "settings" | "billing") {
+  function handleDesktopChatNavigate(page: Page) {
     switch (page) {
       case "chat":
         setChatOpen(true);
         focusWindow("chat");
+        return;
+      case "figma":
         return;
       case "store":
         setPluginsOpen(true);

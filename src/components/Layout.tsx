@@ -16,6 +16,7 @@ import {
   MoreHorizontal,
   Pin,
   Trash2,
+  PencilRuler,
 } from "lucide-react";
 import entropicLogo from "../assets/entropic-logo.png";
 import type { ChatSession } from "../pages/Chat";
@@ -41,6 +42,7 @@ function startDrag(e: React.MouseEvent) {
 
 export type Page =
   | "chat"
+  | "figma"
   | "store"
   | "skills"
   | "channels"
@@ -71,6 +73,7 @@ type Props = {
 
 const baseNavItems: { id: Page; label: string; icon: typeof MessageSquare }[] = [
   { id: "chat", label: "New Chat", icon: Plus },
+  { id: "figma", label: "Figma", icon: PencilRuler },
   { id: "files", label: "Desktop", icon: FolderOpen },
   { id: "jobs", label: "Jobs", icon: CalendarClock },
   { id: "channels", label: "Messaging", icon: Radio },
