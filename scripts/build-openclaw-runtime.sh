@@ -200,6 +200,7 @@ mkdir -p "$STAGING_DIR/bundled-skills"
 PLUGINS_TO_BUNDLE=(
     "memory-core"
     "memory-lancedb"
+    "lossless-claw"
     "entropic-integrations"
     "discord"
     "telegram"

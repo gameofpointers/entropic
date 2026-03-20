@@ -7089,6 +7089,25 @@ Use it for durable decisions, preferences, and facts that should persist across 
         &["plugins", "slots", "memory"],
         serde_json::json!(memory_slot),
     );
+    remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "lossless-claw"]);
+    if container_plugin_exists("lossless-claw") {
+        set_openclaw_config_value(
+            &mut cfg,
+            &["plugins", "slots", "contextEngine"],
+            serde_json::json!("lossless-claw"),
+        );
+        set_openclaw_config_value(
+            &mut cfg,
+            &["plugins", "entries", "lossless-claw", "enabled"],
+            serde_json::json!(true),
+        );
+    } else {
+        set_openclaw_config_value(
+            &mut cfg,
+            &["plugins", "slots", "contextEngine"],
+            serde_json::json!("legacy"),
+        );
+    }
     apply_default_qmd_memory_config(
         &mut cfg,
         memory_slot,
@@ -7182,6 +7201,10 @@ Use it for durable decisions, preferences, and facts that should persist across 
     }
 
     let resolve_managed_plugin_path = |plugin_id: &str| -> Option<String> {
+        let bundled_path = format!("/app/extensions/{}", plugin_id);
+        if container_path_exists(&bundled_path) {
+            return Some(bundled_path);
+        }
         if let Some(skills_root) = read_container_env("ENTROPIC_SKILLS_PATH") {
             let base = format!("{}/{}", skills_root.trim_end_matches('/'), plugin_id);
             let current = format!("{}/current", base);
@@ -7213,6 +7236,12 @@ Use it for durable decisions, preferences, and facts that should persist across 
             );
         }
     };
+
+    if container_plugin_exists("lossless-claw") {
+        if let Some(path) = resolve_managed_plugin_path("lossless-claw") {
+            ensure_plugin_load_path(&mut cfg, path);
+        }
+    }
 
     // Enable x plugin if it exists (entropic-x or legacy nova-x).
     let x_plugin_id = resolve_managed_plugin_id("entropic-x", "nova-x");
@@ -7395,40 +7424,8 @@ Use it for durable decisions, preferences, and facts that should persist across 
     // Add Telegram plugin path to plugins.load.paths so the gateway can find it.
     // This mirrors the X plugin block above.
     if settings.telegram_enabled {
-        let telegram_plugin_id = "telegram";
-        let mut telegram_plugin_path: Option<String> = None;
-        if let Some(skills_root) = read_container_env("ENTROPIC_SKILLS_PATH") {
-            let base = format!(
-                "{}/{}",
-                skills_root.trim_end_matches('/'),
-                telegram_plugin_id
-            );
-            let current = format!("{}/current", base);
-            let candidate = if container_path_exists(&current) {
-                current
-            } else {
-                base
-            };
-            if container_path_exists(&candidate) {
-                telegram_plugin_path = Some(candidate);
-            }
-        }
-        if let Some(path) = telegram_plugin_path {
-            let load_paths = cfg
-                .pointer_mut("/plugins/load/paths")
-                .and_then(|v| v.as_array_mut());
-            if let Some(list) = load_paths {
-                let exists = list.iter().any(|v| v.as_str() == Some(&path));
-                if !exists {
-                    list.push(serde_json::json!(path));
-                }
-            } else {
-                set_openclaw_config_value(
-                    &mut cfg,
-                    &["plugins", "load", "paths"],
-                    serde_json::json!([path]),
-                );
-            }
+        if let Some(path) = resolve_managed_plugin_path("telegram") {
+            ensure_plugin_load_path(&mut cfg, path);
         }
     }
 

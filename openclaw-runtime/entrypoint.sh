@@ -20,6 +20,17 @@ resolve_entropic_skill_path() {
     fi
 }
 
+resolve_plugin_load_path() {
+    plugin_id="$1"
+
+    if [ -d "/app/extensions/${plugin_id}" ]; then
+        printf '%s' "/app/extensions/${plugin_id}"
+        return
+    fi
+
+    resolve_entropic_skill_path "${plugin_id}"
+}
+
 append_plugin_load_path() {
     raw_path="$1"
     if [ -z "$raw_path" ]; then
@@ -272,6 +283,9 @@ PLUGIN_ENTRIES="\"entropic-integrations\": { \"enabled\": true }"
 ALSO_ALLOW="\"entropic-integrations\""
 PLUGIN_LOAD_PATHS=""
 
+if [ -d "/app/extensions/lossless-claw" ]; then
+    PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, \"lossless-claw\": { \"enabled\": true }"
+fi
 if [ -d "/app/extensions/entropic-x" ] || [ -d "/data/entropic-skills/entropic-x" ] || [ -d "${ENTROPIC_SKILLS_PATH}/entropic-x" ] || [ -d "${ENTROPIC_SKILLS_PATH}/entropic-x/current" ]; then
     PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, \"entropic-x\": { \"enabled\": true }"
     ALSO_ALLOW="${ALSO_ALLOW}, \"x_search\", \"x_profile\", \"x_thread\", \"x_user_tweets\""
@@ -279,8 +293,9 @@ fi
 if [ -d "/app/extensions/entropic-quai-builder" ] || [ -d "/data/entropic-skills/entropic-quai-builder" ] || [ -d "${ENTROPIC_SKILLS_PATH}/entropic-quai-builder" ] || [ -d "${ENTROPIC_SKILLS_PATH}/entropic-quai-builder/current" ]; then
     PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, \"entropic-quai-builder\": { \"enabled\": true }"
 fi
-append_plugin_load_path "$(resolve_entropic_skill_path "entropic-x")"
-append_plugin_load_path "$(resolve_entropic_skill_path "entropic-quai-builder")"
+append_plugin_load_path "$(resolve_plugin_load_path "lossless-claw")"
+append_plugin_load_path "$(resolve_plugin_load_path "entropic-x")"
+append_plugin_load_path "$(resolve_plugin_load_path "entropic-quai-builder")"
 if [ -n "$MEMORY_CONFIG" ]; then
     PLUGIN_ENTRIES="${PLUGIN_ENTRIES}, ${MEMORY_CONFIG}"
 fi
@@ -478,8 +493,8 @@ fi
 
 # Start the gateway
 PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
-TOKEN_PARAM=""
+set -- node /app/dist/index.js gateway --bind lan --port "${PORT}" --allow-unconfigured
 if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
-    TOKEN_PARAM="--token ${OPENCLAW_GATEWAY_TOKEN}"
+    set -- "$@" --token "${OPENCLAW_GATEWAY_TOKEN}"
 fi
-exec node /app/dist/index.js gateway --bind lan --port "${PORT}" --allow-unconfigured ${TOKEN_PARAM}
+exec "$@"
