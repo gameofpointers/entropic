@@ -76,11 +76,21 @@ const DEFAULT_PROXY_OPENROUTER_GATEWAY_MODEL: &str = "openrouter/free";
 const DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL: &str = "anthropic/claude-opus-4-6:thinking";
 const DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL: &str = "openai-codex/gpt-5.3-codex";
 const DEFAULT_LOCAL_GOOGLE_GATEWAY_MODEL: &str = "google/gemini-2.5-pro";
+const DEFAULT_OPENVIKING_BASE_URL: &str = "http://127.0.0.1:1933";
+const DEFAULT_OPENVIKING_CONFIG_PATH: &str = "/home/node/.openclaw/openviking/ov.conf";
 
 static BROWSER_SERVICE_TOKEN_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static EMBEDDED_PREVIEW_STATE_CACHE: OnceLock<Mutex<Option<EmbeddedPreviewStatePayload>>> =
     OnceLock::new();
 static DESKTOP_TERMINAL_MANAGER: OnceLock<DesktopTerminalManager> = OnceLock::new();
+
+fn resolved_openviking_base_url() -> String {
+    std::env::var("OPENVIKING_BASE_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_OPENVIKING_BASE_URL.to_string())
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -9644,6 +9654,18 @@ pub async fn start_gateway(
     if let Some(base) = web_base_url.as_deref() {
         env_entries.push(("ENTROPIC_WEB_BASE_URL", base));
     }
+    let openviking_base_url = std::env::var("OPENVIKING_BASE_URL")
+        .ok()
+        .filter(|base| !base.trim().is_empty());
+    if let Some(base) = openviking_base_url.as_deref() {
+        env_entries.push(("OPENVIKING_BASE_URL", base));
+    }
+    let openviking_api_key = std::env::var("OPENVIKING_API_KEY")
+        .ok()
+        .filter(|api_key| !api_key.trim().is_empty());
+    if let Some(api_key) = openviking_api_key.as_deref() {
+        env_entries.push(("OPENVIKING_API_KEY", api_key));
+    }
 
     let env_file = gateway_env_file(&env_entries)?;
     let env_file_path = docker_host_path_for_command(&env_file.path);
@@ -9892,6 +9914,18 @@ pub async fn start_gateway_with_proxy(
             if !image_model.trim().is_empty() {
                 env_entries.push(("OPENCLAW_IMAGE_MODEL", image_model));
             }
+        }
+        let openviking_base_url = std::env::var("OPENVIKING_BASE_URL")
+            .ok()
+            .filter(|base| !base.trim().is_empty());
+        if let Some(base) = openviking_base_url.as_deref() {
+            env_entries.push(("OPENVIKING_BASE_URL", base));
+        }
+        let openviking_api_key = std::env::var("OPENVIKING_API_KEY")
+            .ok()
+            .filter(|api_key| !api_key.trim().is_empty());
+        if let Some(api_key) = openviking_api_key.as_deref() {
+            env_entries.push(("OPENVIKING_API_KEY", api_key));
         }
         let env_file = gateway_env_file(&env_entries)?;
         let env_file_path = docker_host_path_for_command(&env_file.path);
@@ -11893,12 +11927,19 @@ pub async fn get_plugin_store() -> Result<Vec<PluginInfo>, String> {
     let cfg = read_openclaw_config();
     let manifests = list_extension_manifests()?;
 
-    let slot_memory = cfg
+    let plugin_slots = cfg
         .get("plugins")
         .and_then(|v| v.get("slots"))
-        .and_then(|v| v.get("memory"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let slot_memory = plugin_slots
+        .get("memory")
         .and_then(|v| v.as_str())
         .unwrap_or("memory-core");
+    let slot_context_engine = plugin_slots
+        .get("contextEngine")
+        .and_then(|v| v.as_str())
+        .unwrap_or("legacy");
 
     let mut out = Vec::new();
     for m in manifests {
@@ -11934,7 +11975,7 @@ pub async fn get_plugin_store() -> Result<Vec<PluginInfo>, String> {
             .and_then(|v| v.get("enabled"))
             .and_then(|v| v.as_bool());
 
-        let enabled = if id == slot_memory {
+        let enabled = if id == slot_memory || id == slot_context_engine {
             true
         } else {
             entry_enabled.unwrap_or(false)
@@ -11957,7 +11998,12 @@ pub async fn get_plugin_store() -> Result<Vec<PluginInfo>, String> {
 }
 
 #[tauri::command]
-pub async fn set_plugin_enabled(id: String, enabled: bool) -> Result<(), String> {
+pub async fn set_plugin_enabled(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
     if MANAGED_PLUGIN_IDS.contains(&id.as_str()) {
         return Err("Plugin is managed by Entropic".to_string());
     }
@@ -11968,7 +12014,62 @@ pub async fn set_plugin_enabled(id: String, enabled: bool) -> Result<(), String>
         &["plugins", "entries", &id, "enabled"],
         serde_json::json!(enabled),
     );
-    write_openclaw_config(&cfg)
+
+    if id == "openviking" {
+        if enabled {
+            set_openclaw_config_value(
+                &mut cfg,
+                &["plugins", "slots", "contextEngine"],
+                serde_json::json!("openviking"),
+            );
+            set_openclaw_config_value(
+                &mut cfg,
+                &["plugins", "entries", "openviking", "config", "mode"],
+                serde_json::json!("local"),
+            );
+            set_openclaw_config_value(
+                &mut cfg,
+                &["plugins", "entries", "openviking", "config", "configPath"],
+                serde_json::json!(DEFAULT_OPENVIKING_CONFIG_PATH),
+            );
+            set_openclaw_config_value(
+                &mut cfg,
+                &["plugins", "entries", "openviking", "config", "baseUrl"],
+                serde_json::json!(resolved_openviking_base_url()),
+            );
+            set_openclaw_config_value(
+                &mut cfg,
+                &["plugins", "entries", "openviking", "config", "agentId"],
+                serde_json::json!("entropic-desktop"),
+            );
+            set_openclaw_config_value(
+                &mut cfg,
+                &["plugins", "entries", "openviking", "config", "autoRecall"],
+                serde_json::json!(true),
+            );
+            set_openclaw_config_value(
+                &mut cfg,
+                &["plugins", "entries", "openviking", "config", "autoCapture"],
+                serde_json::json!(true),
+            );
+        } else if cfg
+            .pointer("/plugins/slots/contextEngine")
+            .and_then(|v| v.as_str())
+            == Some("openviking")
+        {
+            set_openclaw_config_value(
+                &mut cfg,
+                &["plugins", "slots", "contextEngine"],
+                serde_json::json!("legacy"),
+            );
+        }
+    }
+
+    write_openclaw_config(&cfg)?;
+    if existing_gateway_container_name().is_some() {
+        restart_gateway_in_place(app, state).await?;
+    }
+    Ok(())
 }
 
 #[tauri::command]

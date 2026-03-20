@@ -240,6 +240,239 @@ export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/data/.cache}"
 export npm_config_cache="${npm_config_cache:-/data/.npm}"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/data/playwright}"
 export NODE_PATH="/data/.bun/install/global/node_modules:/home/node/.bun/install/global/node_modules${NODE_PATH:+:$NODE_PATH}"
+export OPENVIKING_PYTHON="${OPENVIKING_PYTHON:-/opt/openviking/.venv/bin/python3}"
+
+OPENVIKING_LOCAL_READY=0
+OPENVIKING_BOOTSTRAP_CONFIG_FILE="/home/node/.openclaw/openviking/ov.conf"
+OPENVIKING_BOOTSTRAP_SENTINEL="/data/openviking/.entropic-defaults-v1"
+
+if [ "${OPENVIKING_ENABLE:-1}" != "0" ] && \
+   [ -d /app/extensions/openviking ] && \
+   [ -x "${OPENVIKING_PYTHON}" ]; then
+    mkdir -p /home/node/.openclaw/openviking
+    mkdir -p /data/openviking/data
+    mkdir -p /data/openviking/log
+    export OPENVIKING_CONFIG_FILE="${OPENVIKING_BOOTSTRAP_CONFIG_FILE}"
+    if node <<'NODE'
+const fs = require('fs');
+
+const env = process.env;
+const configPath = env.OPENVIKING_CONFIG_FILE;
+
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return '';
+}
+
+function parsePositiveInt(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function stripPrefix(value, prefix) {
+  if (typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  return trimmed.startsWith(prefix) ? trimmed.slice(prefix.length) : trimmed;
+}
+
+function normalizeProxyModel(rawModel) {
+  const trimmed = firstNonEmpty(rawModel);
+  if (!trimmed) return '';
+  const stripped = stripPrefix(trimmed, 'openrouter/');
+  if (stripped === 'free' || stripped === 'auto') {
+    return trimmed;
+  }
+  return stripped;
+}
+
+function ensurePrefix(value, prefix) {
+  const trimmed = firstNonEmpty(value);
+  if (!trimmed) return '';
+  return trimmed.startsWith(`${prefix}/`) ? trimmed : `${prefix}/${trimmed}`;
+}
+
+function providerModel(rawModel, providerPrefix, fallback) {
+  const trimmed = firstNonEmpty(rawModel);
+  if (!trimmed) return fallback;
+  if (trimmed.startsWith(`${providerPrefix}/`)) {
+    return trimmed.slice(providerPrefix.length + 1);
+  }
+  if (!trimmed.includes('/')) {
+    return trimmed;
+  }
+  return fallback;
+}
+
+function resolveEmbedding() {
+  const explicitProvider = firstNonEmpty(env.OPENVIKING_EMBEDDING_PROVIDER);
+  const explicitModel = firstNonEmpty(env.OPENVIKING_EMBEDDING_MODEL);
+  const explicitApiKey = firstNonEmpty(env.OPENVIKING_EMBEDDING_API_KEY);
+  const explicitApiBase = firstNonEmpty(env.OPENVIKING_EMBEDDING_API_BASE);
+  const explicitDimension = parsePositiveInt(env.OPENVIKING_EMBEDDING_DIM, 1536);
+  if (explicitProvider && explicitModel && explicitApiKey) {
+    return {
+      provider: explicitProvider,
+      api_base: explicitApiBase,
+      api_key: explicitApiKey,
+      model: explicitModel,
+      dimension: explicitDimension,
+    };
+  }
+
+  if (
+    env.ENTROPIC_PROXY_MODE === '1' &&
+    firstNonEmpty(env.OPENROUTER_API_KEY) &&
+    firstNonEmpty(env.ENTROPIC_PROXY_BASE_URL)
+  ) {
+    return {
+      provider: 'openai',
+      api_base: firstNonEmpty(env.ENTROPIC_PROXY_BASE_URL),
+      api_key: firstNonEmpty(env.OPENROUTER_API_KEY),
+      model: firstNonEmpty(env.OPENVIKING_EMBEDDING_MODEL, 'openai/text-embedding-3-small'),
+      dimension: parsePositiveInt(env.OPENVIKING_EMBEDDING_DIM, 1536),
+    };
+  }
+
+  if (firstNonEmpty(env.OPENAI_API_KEY)) {
+    return {
+      provider: 'openai',
+      api_base: firstNonEmpty(env.OPENVIKING_OPENAI_API_BASE, 'https://api.openai.com/v1'),
+      api_key: firstNonEmpty(env.OPENAI_API_KEY),
+      model: firstNonEmpty(env.OPENVIKING_EMBEDDING_MODEL, 'text-embedding-3-small'),
+      dimension: parsePositiveInt(env.OPENVIKING_EMBEDDING_DIM, 1536),
+    };
+  }
+
+  return null;
+}
+
+function resolveVlm() {
+  const explicitProvider = firstNonEmpty(env.OPENVIKING_VLM_PROVIDER);
+  const explicitModel = firstNonEmpty(env.OPENVIKING_VLM_MODEL);
+  const explicitApiKey = firstNonEmpty(env.OPENVIKING_VLM_API_KEY);
+  const explicitApiBase = firstNonEmpty(env.OPENVIKING_VLM_API_BASE);
+  if (explicitProvider && explicitModel && explicitApiKey) {
+    return {
+      provider: explicitProvider,
+      api_base: explicitApiBase,
+      api_key: explicitApiKey,
+      model: explicitModel,
+    };
+  }
+
+  if (
+    env.ENTROPIC_PROXY_MODE === '1' &&
+    firstNonEmpty(env.OPENROUTER_API_KEY) &&
+    firstNonEmpty(env.ENTROPIC_PROXY_BASE_URL)
+  ) {
+    return {
+      provider: 'litellm',
+      api_base: firstNonEmpty(env.ENTROPIC_PROXY_BASE_URL),
+      api_key: firstNonEmpty(env.OPENROUTER_API_KEY),
+      model: firstNonEmpty(
+        env.OPENVIKING_VLM_MODEL,
+        ensurePrefix(normalizeProxyModel(env.OPENCLAW_MODEL), 'openrouter'),
+        'openrouter/openai/gpt-4.1-mini',
+      ),
+    };
+  }
+
+  if (firstNonEmpty(env.OPENAI_API_KEY)) {
+    return {
+      provider: 'openai',
+      api_base: firstNonEmpty(env.OPENVIKING_OPENAI_API_BASE, 'https://api.openai.com/v1'),
+      api_key: firstNonEmpty(env.OPENAI_API_KEY),
+      model: firstNonEmpty(
+        env.OPENVIKING_VLM_MODEL,
+        providerModel(env.OPENCLAW_MODEL, 'openai', ''),
+        'gpt-4.1-mini',
+      ),
+    };
+  }
+
+  const anthropicToken = firstNonEmpty(env.ANTHROPIC_OAUTH_TOKEN, env.ANTHROPIC_API_KEY);
+  if (anthropicToken) {
+    return {
+      provider: 'litellm',
+      api_base: firstNonEmpty(env.OPENVIKING_ANTHROPIC_API_BASE),
+      api_key: anthropicToken,
+      model: firstNonEmpty(
+        env.OPENVIKING_VLM_MODEL,
+        providerModel(env.OPENCLAW_MODEL, 'anthropic', ''),
+        'claude-3-5-sonnet-20240620',
+      ),
+    };
+  }
+
+  if (firstNonEmpty(env.GEMINI_API_KEY)) {
+    return {
+      provider: 'litellm',
+      api_base: firstNonEmpty(env.OPENVIKING_GEMINI_API_BASE),
+      api_key: firstNonEmpty(env.GEMINI_API_KEY),
+      model: firstNonEmpty(
+        env.OPENVIKING_VLM_MODEL,
+        providerModel(env.OPENCLAW_MODEL, 'google', ''),
+        providerModel(env.OPENCLAW_MODEL, 'gemini', ''),
+        'gemini-2.5-flash',
+      ),
+    };
+  }
+
+  return null;
+}
+
+const embedding = resolveEmbedding();
+if (!embedding) {
+  console.error('[entrypoint] OpenViking bootstrap skipped: no compatible embedding backend found');
+  process.exit(1);
+}
+
+const vlm = resolveVlm();
+if (!vlm) {
+  console.error('[entrypoint] OpenViking bootstrap skipped: no compatible VLM backend found');
+  process.exit(1);
+}
+
+const config = {
+  storage: {
+    workspace: '/data/openviking/data',
+  },
+  log: {
+    level: firstNonEmpty(env.OPENVIKING_LOG_LEVEL, 'INFO'),
+    output: firstNonEmpty(env.OPENVIKING_LOG_OUTPUT, 'stdout'),
+  },
+  embedding: {
+    dense: {
+      provider: embedding.provider,
+      api_base: embedding.api_base,
+      api_key: embedding.api_key,
+      model: embedding.model,
+      dimension: embedding.dimension,
+    },
+    max_concurrent: parsePositiveInt(env.OPENVIKING_EMBEDDING_MAX_CONCURRENT, 10),
+  },
+  vlm: {
+    provider: vlm.provider,
+    api_base: vlm.api_base,
+    api_key: vlm.api_key,
+    model: vlm.model,
+    max_concurrent: parsePositiveInt(env.OPENVIKING_VLM_MAX_CONCURRENT, 100),
+  },
+};
+
+fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+console.error(
+  `[entrypoint] OpenViking bootstrap configured embedding=${embedding.provider}:${embedding.model} vlm=${vlm.provider}:${vlm.model}`,
+);
+NODE
+    then
+        OPENVIKING_LOCAL_READY=1
+    fi
+fi
 
 # Write a minimal config to select the primary model when provided
 MEMORY_SLOT="${OPENCLAW_MEMORY_SLOT:-}"
@@ -446,6 +679,47 @@ try {
   console.error('[entrypoint] Failed to merge persisted openclaw config:', error?.message || error);
 }
 NODE
+fi
+
+if [ "${OPENVIKING_LOCAL_READY}" = "1" ] && [ ! -f "${OPENVIKING_BOOTSTRAP_SENTINEL}" ] && [ -f /home/node/.openclaw/openclaw.json ]; then
+    mkdir -p "$(dirname "${OPENVIKING_BOOTSTRAP_SENTINEL}")"
+    OPENVIKING_CONFIG_FILE_PATH="${OPENVIKING_CONFIG_FILE:-${OPENVIKING_BOOTSTRAP_CONFIG_FILE}}"
+    OPENVIKING_BASE_URL_DEFAULT="${OPENVIKING_BASE_URL:-http://127.0.0.1:1933}"
+    OPENVIKING_CONFIG_FILE_ESC="$(json_escape "${OPENVIKING_CONFIG_FILE_PATH}")"
+    OPENVIKING_BASE_URL_DEFAULT_ESC="$(json_escape "${OPENVIKING_BASE_URL_DEFAULT}")"
+    node <<EOF
+const fs = require('fs');
+
+const configPath = '/home/node/.openclaw/openclaw.json';
+const nextContextEngine = 'openviking';
+const openvikingConfigPath = "${OPENVIKING_CONFIG_FILE_ESC}";
+const openvikingBaseUrl = "${OPENVIKING_BASE_URL_DEFAULT_ESC}";
+
+try {
+  const current = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  current.plugins ??= {};
+  current.plugins.slots ??= {};
+  current.plugins.entries ??= {};
+  current.plugins.entries.openviking ??= {};
+  current.plugins.entries.openviking.enabled ??= true;
+  current.plugins.entries.openviking.config ??= {};
+  current.plugins.entries.openviking.config.mode ??= 'local';
+  current.plugins.entries.openviking.config.configPath ??= openvikingConfigPath;
+  current.plugins.entries.openviking.config.port ??= 1933;
+  current.plugins.entries.openviking.config.baseUrl ??= openvikingBaseUrl;
+  current.plugins.entries.openviking.config.agentId ??= 'entropic-desktop';
+  current.plugins.entries.openviking.config.autoRecall ??= true;
+  current.plugins.entries.openviking.config.autoCapture ??= true;
+  if (current.plugins.slots.contextEngine === undefined) {
+    current.plugins.slots.contextEngine = nextContextEngine;
+  }
+  fs.writeFileSync(configPath, JSON.stringify(current, null, 2));
+} catch (error) {
+  console.error('[entrypoint] Failed to seed OpenViking defaults:', error?.message || error);
+  process.exit(1);
+}
+EOF
+    touch "${OPENVIKING_BOOTSTRAP_SENTINEL}"
 fi
 
 # Start the browser service in the background for desktop/browser bridge commands.

@@ -1,6 +1,8 @@
 # OpenClaw Core Runtime Container
 # Hardened, non-root, read-only filesystem
 
+FROM ghcr.io/volcengine/openviking:main AS openviking-runtime
+
 FROM node:22-bookworm-slim
 
 # Install runtime deps and create directories
@@ -82,6 +84,10 @@ COPY --chown=node:node dist ./dist
 # Copy bundled skills (seeded into /data/skills/ at startup by entrypoint)
 COPY --chown=node:node bundled-skills /app/bundled-skills
 
+# Reuse the published OpenViking runtime environment so we don't have to
+# compile its Python/Rust/Go toolchain inside Entropic's image build.
+COPY --from=openviking-runtime --chown=node:node /app/.venv /opt/openviking/.venv
+
 # Install bundled skill dependencies (runs as root before USER node)
 RUN for skill in /app/bundled-skills/*/; do \
       if [ -f "$skill/package.json" ]; then \
@@ -162,6 +168,8 @@ EXPOSE 18789 19791 19793
 
 # Set credentials directory to persistent storage
 ENV OPENCLAW_OAUTH_DIR=/data/credentials
+ENV OPENVIKING_PYTHON=/opt/openviking/.venv/bin/python3
+ENV PATH="/opt/openviking/.venv/bin:${PATH}"
 
 # Entrypoint script that creates auth from env vars, then starts gateway
 COPY --chown=node:node entrypoint.sh /app/entrypoint.sh

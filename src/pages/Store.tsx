@@ -242,11 +242,18 @@ const PLUGIN_ICONS: Record<string, PluginIconSpec> = {
   "entropic-quai-builder": { kind: "image", src: quaiLogo, alt: "Quai Network" },
   "memory-lancedb": { kind: "component", component: MemoryLogo },
   "memory-core": { kind: "component", component: MemoryLogo },
+  openviking: { kind: "component", component: MemoryLogo },
 };
 
 const META: Record<string, Partial<Plugin>> = {
   "memory-lancedb": { name: "Long-Term Memory", description: "OpenAI-powered long-term recall (optional add-on).", category: "memory" },
   "memory-core": { name: "QMD Memory (Default)", description: "Fast local hybrid memory search over notes and sessions.", category: "memory" },
+  openviking: {
+    name: "OpenViking Memory",
+    description:
+      "OpenViking-backed context engine. Entropic uses the bundled local OpenViking runtime by default when an OpenAI API key is available.",
+    category: "memory",
+  },
   discord: { name: "Discord", description: "Connect Entropic to Discord servers and DMs with a bot token and OAuth invite.", category: "integrations" },
   telegram: { name: "Telegram", description: "Run your agent as a Telegram bot.", category: "integrations" },
   slack: { name: "Slack", description: "Connect Entropic to Slack workspaces.", category: "integrations" },
