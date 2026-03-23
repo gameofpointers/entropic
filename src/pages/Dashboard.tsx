@@ -1952,7 +1952,6 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     if (
       isAuthConfigured &&
       !useLocalKeys &&
-      gatewayTokenRef.current &&
       (isAuthenticated || (localCreditBalanceCents ?? 0) > 0)
     ) {
       // Proxy mode — restart with new model via proxy flow
@@ -2077,7 +2076,6 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       gatewayRunning &&
       isAuthConfigured &&
       !useLocalKeys &&
-      gatewayTokenRef.current &&
       (isAuthenticated || (localCreditBalanceCents ?? 0) > 0)
     ) {
       try {
