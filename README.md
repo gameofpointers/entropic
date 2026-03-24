@@ -165,7 +165,7 @@ pnpm dev:wsl:prune        # Remove the WSL runtime and reclaim disk space
 
 ```bash
 pnpm build
-cargo check --manifest-path src-tauri/Cargo.toml
+cargo check --manifest-path src-tauri/Cargo.toml --no-default-features
 ```
 
 ## Project Docs

@@ -6984,7 +6984,7 @@ fn apply_agent_settings(app: &AppHandle, state: &AppState) -> Result<(), String>
             }
         }
     }
-    let mut tools_body = build_tools_markdown(&settings.capabilities);
+    let tools_body = build_tools_markdown(&settings.capabilities);
 
     let mut id_body = String::from("# IDENTITY.md - Who Am I?\n\n");
     id_body.push_str(&format!("- **Name:** {}\n", settings.identity_name.trim()));
