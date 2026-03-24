@@ -14,6 +14,7 @@ src-tauri/gen/
 # fresh checkouts and CI without running bundle-runtime.sh first.
 src-tauri/resources/bin/*
 !src-tauri/resources/bin/README.txt
+src-tauri/resources/openclaw-runtime.tar.gz
 src-tauri/resources/share/*
 !src-tauri/resources/share/placeholders/
 src-tauri/resources/share/placeholders/*

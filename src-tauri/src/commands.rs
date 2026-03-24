@@ -10663,7 +10663,7 @@ pub fn update_gateway_model(app: AppHandle, model: String) -> Result<(), String>
         "off"
     };
     let config_model = if read_container_env("ENTROPIC_PROXY_MODE").as_deref() == Some("1") {
-        normalize_proxy_runtime_model_ref(base_model)
+        normalize_proxy_runtime_model_ref(&base_model)
     } else {
         base_model.to_string()
     };
