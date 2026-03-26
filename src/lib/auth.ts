@@ -478,7 +478,7 @@ export const CONNECTION_MODE_OPTIONS: Array<{
   {
     value: "local-models",
     label: "Local Models",
-    description: "Use Ollama, LM Studio, vLLM, or another local service.",
+    description: "Use Ollama, LM Studio, vLLM, RNN Local, or another local service.",
   },
 ];
 
@@ -495,6 +495,7 @@ export type LocalModelServiceType =
   | "ollama"
   | "lmstudio"
   | "vllm"
+  | "rnn-local"
   | "openai-compatible";
 
 export type LocalModelApiMode =
@@ -521,6 +522,7 @@ export const LOCAL_MODEL_SERVICE_OPTIONS: Array<{
   { value: "ollama", label: "Ollama" },
   { value: "lmstudio", label: "LM Studio" },
   { value: "vllm", label: "vLLM" },
+  { value: "rnn-local", label: "RNN Local" },
   { value: "openai-compatible", label: "OpenAI-Compatible" },
 ];
 
@@ -540,6 +542,8 @@ export function defaultLocalModelBaseUrl(serviceType: LocalModelServiceType): st
       return "http://localhost:1234/v1";
     case "vllm":
       return "http://localhost:8000/v1";
+    case "rnn-local":
+      return "http://localhost:11445/v1";
     case "openai-compatible":
       return "http://localhost:1234/v1";
   }
@@ -552,6 +556,7 @@ export function defaultLocalModelApiMode(serviceType: LocalModelServiceType): Lo
     case "lmstudio":
       return "openai-responses";
     case "vllm":
+    case "rnn-local":
     case "openai-compatible":
       return "openai-completions";
   }
@@ -561,6 +566,7 @@ function inferLocalModelServiceType(baseUrl: string | null | undefined): LocalMo
   const normalized = (baseUrl || "").trim().toLowerCase();
   if (!normalized) return "ollama";
   if (normalized.includes("11434") || normalized.includes("ollama")) return "ollama";
+  if (normalized.includes("11445") || normalized.includes("rnn")) return "rnn-local";
   if (normalized.includes("1234") || normalized.includes("lmstudio")) return "lmstudio";
   if (normalized.includes("8000") || normalized.includes("vllm")) return "vllm";
   return "openai-compatible";
@@ -576,10 +582,13 @@ export function normalizeLocalModelConfig(
     enabled: Boolean(config?.enabled),
     serviceType,
     apiMode: serviceType === "ollama" ? "ollama" : apiMode,
-    baseUrl: config?.baseUrl?.trim() || defaultLocalModelBaseUrl(serviceType),
+    baseUrl:
+      serviceType === "rnn-local"
+        ? defaultLocalModelBaseUrl(serviceType)
+        : config?.baseUrl?.trim() || defaultLocalModelBaseUrl(serviceType),
     apiKey: config?.apiKey?.trim() || DEFAULT_LOCAL_MODEL_API_KEY,
     modelName: config?.modelName?.trim() || "",
-    allowNonLocal: config?.allowNonLocal === true,
+    allowNonLocal: serviceType === "rnn-local" ? false : config?.allowNonLocal === true,
   };
 }
 
@@ -666,6 +675,8 @@ export function localModelProviderId(
   config?: Pick<LocalModelConfig, "serviceType"> | null,
 ): string {
   switch (config?.serviceType || "ollama") {
+    case "rnn-local":
+      return "rnn";
     case "openai-compatible":
       return "local";
     default:

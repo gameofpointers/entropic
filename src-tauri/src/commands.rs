@@ -77,11 +77,23 @@ const DEFAULT_PROXY_OPENROUTER_GATEWAY_MODEL: &str = "openrouter/free";
 const DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL: &str = "anthropic/claude-opus-4-6:thinking";
 const DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL: &str = "openai-codex/gpt-5.3-codex";
 const DEFAULT_LOCAL_GOOGLE_GATEWAY_MODEL: &str = "google/gemini-2.5-pro";
+const RNN_RUNTIME_HOST: &str = "127.0.0.1";
+const RNN_RUNTIME_PORT: u16 = 11445;
+const RNN_RUNTIME_BASE_URL: &str = "http://127.0.0.1:11445/v1";
+const RNN_RUNTIME_ROOT_URL: &str = "http://127.0.0.1:11445";
+const RNN_RUNTIME_HEALTH_URL: &str = "http://127.0.0.1:11445/healthz";
+const RNN_RUNTIME_DIR_NAME: &str = "rnn-runtime";
+const RNN_RUNTIME_SERVER_RELATIVE_PATH: &str = "share/rnn-runtime/server.py";
 
 static BROWSER_SERVICE_TOKEN_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static EMBEDDED_PREVIEW_STATE_CACHE: OnceLock<Mutex<Option<EmbeddedPreviewStatePayload>>> =
     OnceLock::new();
 static DESKTOP_TERMINAL_MANAGER: OnceLock<DesktopTerminalManager> = OnceLock::new();
+static RNN_RUNTIME_START_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+
+fn rnn_runtime_start_lock() -> &'static AsyncMutex<()> {
+    RNN_RUNTIME_START_LOCK.get_or_init(|| AsyncMutex::new(()))
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -696,7 +708,8 @@ mod local_gateway_model_tests {
     fn preserves_local_model_ids_without_provider_keys() {
         let api_keys = HashMap::new();
 
-        let model = normalize_local_gateway_model(Some("local/qwen3:14b"), Some("anthropic"), &api_keys);
+        let model =
+            normalize_local_gateway_model(Some("local/qwen3:14b"), Some("anthropic"), &api_keys);
 
         assert_eq!(model, "local/qwen3:14b");
     }
@@ -7924,7 +7937,10 @@ Use it for durable decisions, preferences, and facts that should persist across 
             let local_api_key = local_model_config.api_key.clone();
             let auth_profile_id = local_model_config.auth_profile_id();
             let mut auth_json = read_main_agent_auth_profiles();
-            if let Some(profiles) = auth_json.get_mut("profiles").and_then(|p| p.as_object_mut()) {
+            if let Some(profiles) = auth_json
+                .get_mut("profiles")
+                .and_then(|p| p.as_object_mut())
+            {
                 profiles.insert(
                     auth_profile_id.clone(),
                     serde_json::json!({
@@ -7934,8 +7950,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
                     }),
                 );
             }
-            let payload =
-                serde_json::to_string_pretty(&auth_json).map_err(|e| e.to_string())?;
+            let payload = serde_json::to_string_pretty(&auth_json).map_err(|e| e.to_string())?;
             println!(
                 "[Entropic] Writing {} auth profile for local model (key len={})",
                 auth_profile_id,
@@ -9860,10 +9875,19 @@ pub async fn start_gateway(
 
     let expected_local_model_config = if let Some(model_name) = base_model.strip_prefix("local/") {
         let mut local_model_config = read_local_model_config(&app)?.ok_or_else(|| {
-            "Configure your local AI service in Settings before starting a local model."
-                .to_string()
+            "Configure your local AI service in Settings before starting a local model.".to_string()
         })?;
         local_model_config.model_name = model_name.to_string();
+        if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+            ensure_rnn_runtime_ready(&app).await?;
+            let available = discover_local_model_ids_inner(&local_model_config, None).await?;
+            if !available.iter().any(|value| value == model_name) {
+                return Err(format!(
+                    "RNN model '{}' is not available locally. Download it from Settings before starting the local connector.",
+                    model_name
+                ));
+            }
+        }
         Some(local_model_config)
     } else {
         None
@@ -9926,8 +9950,7 @@ pub async fn start_gateway(
                     == Some(expected_local_model_config.api_key.as_str())
                 && current_local_service_type.as_deref()
                     == Some(expected_local_model_config.service_type_name())
-                && current_local_api.as_deref()
-                    == Some(expected_local_model_config.api_mode_name())
+                && current_local_api.as_deref() == Some(expected_local_model_config.api_mode_name())
         } else {
             current_local_base_url.is_none()
                 && current_local_api_key.is_none()
@@ -10637,8 +10660,7 @@ pub fn update_gateway_model(app: AppHandle, model: String) -> Result<(), String>
         local_model_name.as_deref()
     {
         let local_model_config = read_local_model_config(&app)?.ok_or_else(|| {
-            "Configure your local AI service in Settings before using a local model."
-                .to_string()
+            "Configure your local AI service in Settings before using a local model.".to_string()
         })?;
         (
             local_model_config.gateway_model_ref(Some(model_name)),
@@ -10652,7 +10674,11 @@ pub fn update_gateway_model(app: AppHandle, model: String) -> Result<(), String>
             .split(':')
             .find_map(|s| s.strip_prefix("reasoning="))
             .unwrap_or("");
-        (base_model.to_string(), thinking_enabled, reasoning_effort.to_string())
+        (
+            base_model.to_string(),
+            thinking_enabled,
+            reasoning_effort.to_string(),
+        )
     };
 
     let thinking_level = if thinking_enabled {
@@ -10837,11 +10863,552 @@ pub async fn get_gateway_auth(app: AppHandle) -> Result<GatewayAuthPayload, Stri
     })
 }
 
+#[derive(Debug, Clone)]
+struct RnnRuntimePaths {
+    root: PathBuf,
+    models_dir: PathBuf,
+    state_dir: PathBuf,
+    log_file: PathBuf,
+    pid_file: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct PythonCommandSpec {
+    program: String,
+    args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RnnRuntimeStatusPayload {
+    pub running: bool,
+    pub base_url: String,
+    pub loaded_model: Option<String>,
+    pub last_error: Option<String>,
+    pub pid: Option<u32>,
+    pub models_dir: String,
+    pub state_dir: String,
+    pub log_file: String,
+    pub script_path: Option<String>,
+}
+
+fn rnn_runtime_paths(app: &AppHandle) -> Result<RnnRuntimePaths, String> {
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data directory: {}", e))?
+        .join(RNN_RUNTIME_DIR_NAME);
+    Ok(RnnRuntimePaths {
+        models_dir: root.join("models"),
+        state_dir: root.join("state"),
+        log_file: root.join("runtime.log"),
+        pid_file: root.join("runtime.pid"),
+        root,
+    })
+}
+
+fn ensure_rnn_runtime_dirs(paths: &RnnRuntimePaths) -> Result<(), String> {
+    fs::create_dir_all(&paths.root)
+        .map_err(|e| format!("Failed to create RNN runtime directory: {}", e))?;
+    fs::create_dir_all(&paths.models_dir)
+        .map_err(|e| format!("Failed to create RNN models directory: {}", e))?;
+    fs::create_dir_all(&paths.state_dir)
+        .map_err(|e| format!("Failed to create RNN state directory: {}", e))?;
+    Ok(())
+}
+
+fn resolve_rnn_runtime_server_script(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(
+            resource_dir
+                .join("resources")
+                .join(RNN_RUNTIME_SERVER_RELATIVE_PATH),
+        );
+        candidates.push(resource_dir.join(RNN_RUNTIME_SERVER_RELATIVE_PATH));
+    }
+
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join(RNN_RUNTIME_SERVER_RELATIVE_PATH),
+    );
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            candidates.push(
+                exe_dir
+                    .join("resources")
+                    .join(RNN_RUNTIME_SERVER_RELATIVE_PATH),
+            );
+            candidates.push(
+                exe_dir
+                    .join("..")
+                    .join("..")
+                    .join("resources")
+                    .join(RNN_RUNTIME_SERVER_RELATIVE_PATH),
+            );
+            if let Some(contents_dir) = exe_dir.parent() {
+                let resources_dir = contents_dir.join("Resources");
+                candidates.push(
+                    resources_dir
+                        .join("resources")
+                        .join(RNN_RUNTIME_SERVER_RELATIVE_PATH),
+                );
+                candidates.push(resources_dir.join(RNN_RUNTIME_SERVER_RELATIVE_PATH));
+            }
+        }
+    }
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err("RNN runtime server script was not found in bundled resources.".to_string())
+}
+
+fn resolve_rnn_runtime_python() -> Result<PythonCommandSpec, String> {
+    let mut candidates: Vec<PythonCommandSpec> = Vec::new();
+    #[cfg(target_os = "windows")]
+    {
+        candidates.push(PythonCommandSpec {
+            program: "py".to_string(),
+            args: vec!["-3".to_string()],
+        });
+    }
+    candidates.push(PythonCommandSpec {
+        program: "python3".to_string(),
+        args: Vec::new(),
+    });
+    candidates.push(PythonCommandSpec {
+        program: "python".to_string(),
+        args: Vec::new(),
+    });
+
+    for candidate in candidates {
+        let status = Command::new(&candidate.program)
+            .args(&candidate.args)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if matches!(status, Ok(status) if status.success()) {
+            return Ok(candidate);
+        }
+    }
+
+    Err("Python 3 is required to run the local RNN runtime. Install python3 and retry.".to_string())
+}
+
+fn read_rnn_runtime_pid(paths: &RnnRuntimePaths) -> Option<u32> {
+    let raw = fs::read_to_string(&paths.pid_file).ok()?;
+    raw.trim().parse::<u32>().ok()
+}
+
+fn write_rnn_runtime_pid(paths: &RnnRuntimePaths, pid: u32) -> Result<(), String> {
+    fs::write(&paths.pid_file, format!("{}\n", pid))
+        .map_err(|e| format!("Failed to write RNN runtime pid file: {}", e))
+}
+
+fn clear_rnn_runtime_pid(paths: &RnnRuntimePaths) {
+    let _ = fs::remove_file(&paths.pid_file);
+}
+
+fn rnn_runtime_port_conflict() -> Option<String> {
+    let pids = listener_pids_for_port(RNN_RUNTIME_PORT);
+    if pids.is_empty() {
+        return None;
+    }
+
+    let details = pids
+        .iter()
+        .map(|pid| {
+            let command = process_command_line(*pid).unwrap_or_else(|| "unknown".to_string());
+            format!("{} ({})", pid, process_display_name(&command))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "Port {} is already in use by {}. Stop that process or change the local RNN runtime port.",
+        RNN_RUNTIME_PORT, details
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn rnn_process_is_running(pid: u32) -> bool {
+    let filter = format!("PID eq {}", pid);
+    let output = match Command::new("tasklist")
+        .args(["/FI", filter.as_str()])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return false,
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .to_lowercase()
+        .contains(&pid.to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn rnn_process_is_running(pid: u32) -> bool {
+    process_command_line(pid).is_some()
+}
+
+#[cfg(target_os = "windows")]
+fn stop_rnn_runtime_pid(pid: u32) -> Result<(), String> {
+    let output = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .output()
+        .map_err(|e| format!("Failed to stop RNN runtime: {}", e))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{}{}", stdout, stderr).to_lowercase();
+    if combined.contains("not found") || combined.contains("no running instance") {
+        return Ok(());
+    }
+    Err(format!("Failed to stop RNN runtime: {}", combined.trim()))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn stop_rnn_runtime_pid(pid: u32) -> Result<(), String> {
+    send_kill_signal(&[pid], "-TERM")?;
+    std::thread::sleep(Duration::from_millis(400));
+    if !rnn_process_is_running(pid) {
+        return Ok(());
+    }
+    send_kill_signal(&[pid], "-KILL")?;
+    std::thread::sleep(Duration::from_millis(250));
+    Ok(())
+}
+
+async fn rnn_runtime_json_request(
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+    timeout_secs: u64,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|e| format!("Failed to create RNN runtime client: {}", e))?;
+
+    let mut request = client.request(method, format!("{}{}", RNN_RUNTIME_ROOT_URL, path));
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("RNN runtime request failed: {}", e))?;
+    let status = response.status();
+    let payload = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Failed to parse RNN runtime response: {}", e))?;
+    if status.is_success() {
+        Ok(payload)
+    } else {
+        let message = payload
+            .get("error")
+            .and_then(|value| value.get("message").or(Some(value)))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                payload
+                    .get("error")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| format!("RNN runtime returned HTTP {}", status));
+        Err(message)
+    }
+}
+
+async fn rnn_runtime_health_payload() -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|e| format!("Failed to create RNN health client: {}", e))?;
+    let response = client
+        .get(RNN_RUNTIME_HEALTH_URL)
+        .send()
+        .await
+        .map_err(|e| format!("RNN runtime health check failed: {}", e))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "RNN runtime health check returned HTTP {}",
+            response.status()
+        ));
+    }
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Failed to parse RNN runtime health response: {}", e))
+}
+
+fn build_rnn_runtime_status(
+    app: &AppHandle,
+    health: Option<&serde_json::Value>,
+) -> Result<RnnRuntimeStatusPayload, String> {
+    let paths = rnn_runtime_paths(app)?;
+    ensure_rnn_runtime_dirs(&paths)?;
+
+    let mut pid = read_rnn_runtime_pid(&paths);
+    if let Some(current_pid) = pid {
+        if !rnn_process_is_running(current_pid) {
+            clear_rnn_runtime_pid(&paths);
+            pid = None;
+        }
+    }
+    if pid.is_none() {
+        pid = listener_pids_for_port(RNN_RUNTIME_PORT).into_iter().next();
+    }
+
+    Ok(RnnRuntimeStatusPayload {
+        running: health.is_some(),
+        base_url: RNN_RUNTIME_BASE_URL.to_string(),
+        loaded_model: health
+            .and_then(|value| value.get("loadedModel"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        last_error: health
+            .and_then(|value| value.get("lastError"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        pid,
+        models_dir: paths.models_dir.display().to_string(),
+        state_dir: paths.state_dir.display().to_string(),
+        log_file: paths.log_file.display().to_string(),
+        script_path: resolve_rnn_runtime_server_script(app)
+            .ok()
+            .map(|path| path.display().to_string()),
+    })
+}
+
+async fn ensure_rnn_runtime_ready(app: &AppHandle) -> Result<RnnRuntimeStatusPayload, String> {
+    if let Ok(health) = rnn_runtime_health_payload().await {
+        return build_rnn_runtime_status(app, Some(&health));
+    }
+    let _guard = rnn_runtime_start_lock().lock().await;
+    if let Ok(health) = rnn_runtime_health_payload().await {
+        return build_rnn_runtime_status(app, Some(&health));
+    }
+
+    let paths = rnn_runtime_paths(app)?;
+    ensure_rnn_runtime_dirs(&paths)?;
+
+    if let Some(pid) = read_rnn_runtime_pid(&paths) {
+        if !rnn_process_is_running(pid) {
+            clear_rnn_runtime_pid(&paths);
+        }
+    }
+
+    if let Some(conflict) = rnn_runtime_port_conflict() {
+        return Err(conflict);
+    }
+
+    let python = resolve_rnn_runtime_python()?;
+    let script_path = resolve_rnn_runtime_server_script(app)?;
+    let stdout = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&paths.log_file)
+        .map_err(|e| format!("Failed to open RNN runtime log file: {}", e))?;
+    let stderr = stdout
+        .try_clone()
+        .map_err(|e| format!("Failed to open RNN runtime stderr log file: {}", e))?;
+
+    let mut cmd = Command::new(&python.program);
+    cmd.args(&python.args)
+        .arg(&script_path)
+        .arg("--host")
+        .arg(RNN_RUNTIME_HOST)
+        .arg("--port")
+        .arg(RNN_RUNTIME_PORT.to_string())
+        .arg("--models-dir")
+        .arg(&paths.models_dir)
+        .arg("--state-dir")
+        .arg(&paths.state_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .env("PYTHONUNBUFFERED", "1");
+    if let Some(parent) = script_path.parent() {
+        cmd.current_dir(parent);
+    }
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start local RNN runtime: {}", e))?;
+    write_rnn_runtime_pid(&paths, child.id())?;
+    drop(child);
+
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if let Ok(health) = rnn_runtime_health_payload().await {
+            return build_rnn_runtime_status(app, Some(&health));
+        }
+    }
+
+    Err(format!(
+        "The local RNN runtime did not become healthy. Check {} for details.",
+        paths.log_file.display()
+    ))
+}
+
+fn normalize_rnn_action_result(payload: serde_json::Value) -> Result<serde_json::Value, String> {
+    if payload.get("status").and_then(|value| value.as_str()) == Some("error") {
+        let message = payload
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or("RNN runtime returned an error");
+        return Err(message.to_string());
+    }
+    Ok(payload)
+}
+
+#[tauri::command]
+pub async fn get_rnn_runtime_status(app: AppHandle) -> Result<RnnRuntimeStatusPayload, String> {
+    let health = rnn_runtime_health_payload().await.ok();
+    build_rnn_runtime_status(&app, health.as_ref())
+}
+
+#[tauri::command]
+pub async fn get_rnn_catalog(app: AppHandle) -> Result<serde_json::Value, String> {
+    ensure_rnn_runtime_ready(&app).await?;
+    rnn_runtime_json_request(reqwest::Method::GET, "/api/rnn/catalog", None, 30).await
+}
+
+#[tauri::command]
+pub async fn download_rnn_model(
+    app: AppHandle,
+    catalog_id: String,
+    hf_token: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let trimmed_catalog_id = catalog_id.trim();
+    if trimmed_catalog_id.is_empty() {
+        return Err("Choose a catalog model before downloading.".to_string());
+    }
+    ensure_rnn_runtime_ready(&app).await?;
+    normalize_rnn_action_result(
+        rnn_runtime_json_request(
+            reqwest::Method::POST,
+            "/api/rnn/models/download",
+            Some(serde_json::json!({
+                "catalogId": trimmed_catalog_id,
+                "hfToken": hf_token.unwrap_or_default().trim(),
+            })),
+            3600,
+        )
+        .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn load_rnn_model(
+    app: AppHandle,
+    model_name: String,
+) -> Result<serde_json::Value, String> {
+    let trimmed_model_name = model_name.trim();
+    if trimmed_model_name.is_empty() {
+        return Err("Choose a local RNN model before loading it.".to_string());
+    }
+    ensure_rnn_runtime_ready(&app).await?;
+    normalize_rnn_action_result(
+        rnn_runtime_json_request(
+            reqwest::Method::POST,
+            "/api/rnn/models/load",
+            Some(serde_json::json!({ "modelName": trimmed_model_name })),
+            1800,
+        )
+        .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn unload_rnn_model(app: AppHandle) -> Result<serde_json::Value, String> {
+    ensure_rnn_runtime_ready(&app).await?;
+    normalize_rnn_action_result(
+        rnn_runtime_json_request(
+            reqwest::Method::POST,
+            "/api/rnn/models/unload",
+            Some(serde_json::json!({})),
+            60,
+        )
+        .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn delete_rnn_model(
+    app: AppHandle,
+    model_name: String,
+) -> Result<serde_json::Value, String> {
+    let trimmed_model_name = model_name.trim();
+    if trimmed_model_name.is_empty() {
+        return Err("Choose a local RNN model before deleting it.".to_string());
+    }
+    ensure_rnn_runtime_ready(&app).await?;
+    normalize_rnn_action_result(
+        rnn_runtime_json_request(
+            reqwest::Method::POST,
+            "/api/rnn/models/delete",
+            Some(serde_json::json!({ "modelName": trimmed_model_name })),
+            300,
+        )
+        .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn warm_rnn_model(
+    app: AppHandle,
+    model_name: Option<String>,
+) -> Result<serde_json::Value, String> {
+    ensure_rnn_runtime_ready(&app).await?;
+    normalize_rnn_action_result(
+        rnn_runtime_json_request(
+            reqwest::Method::POST,
+            "/api/rnn/models/warm",
+            Some(serde_json::json!({
+                "modelName": model_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(""),
+            })),
+            1800,
+        )
+        .await?,
+    )
+}
+
+#[tauri::command]
+pub async fn stop_rnn_runtime(app: AppHandle) -> Result<(), String> {
+    let paths = rnn_runtime_paths(&app)?;
+    if let Some(pid) = read_rnn_runtime_pid(&paths) {
+        stop_rnn_runtime_pid(pid)?;
+    } else if let Some(pid) = listener_pids_for_port(RNN_RUNTIME_PORT).into_iter().next() {
+        stop_rnn_runtime_pid(pid)?;
+    }
+    clear_rnn_runtime_pid(&paths);
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalModelServiceType {
     Ollama,
     LmStudio,
     Vllm,
+    RnnLocal,
     OpenAiCompatible,
 }
 
@@ -10851,6 +11418,7 @@ impl LocalModelServiceType {
             "ollama" => Some(Self::Ollama),
             "lmstudio" => Some(Self::LmStudio),
             "vllm" => Some(Self::Vllm),
+            "rnn-local" => Some(Self::RnnLocal),
             "openai-compatible" => Some(Self::OpenAiCompatible),
             _ => None,
         }
@@ -10861,12 +11429,14 @@ impl LocalModelServiceType {
             Self::Ollama => "ollama",
             Self::LmStudio => "lmstudio",
             Self::Vllm => "vllm",
+            Self::RnnLocal => "rnn-local",
             Self::OpenAiCompatible => "openai-compatible",
         }
     }
 
     fn provider_id(self) -> &'static str {
         match self {
+            Self::RnnLocal => "rnn",
             Self::OpenAiCompatible => "local",
             Self::Ollama => "ollama",
             Self::LmStudio => "lmstudio",
@@ -10917,18 +11487,29 @@ impl LocalModelRuntimeConfig {
         base_url: Option<String>,
         api_key: Option<String>,
     ) -> Option<Self> {
-        let base_url = base_url.unwrap_or_default().trim().trim_end_matches('/').to_string();
+        let mut base_url = base_url
+            .unwrap_or_default()
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
         if base_url.is_empty() {
             return None;
         }
         let service_type =
             service_type.unwrap_or_else(|| infer_local_model_service_type(base_url.as_str()));
+        if service_type == LocalModelServiceType::RnnLocal {
+            base_url = RNN_RUNTIME_BASE_URL.to_string();
+        }
         let api_mode = if service_type == LocalModelServiceType::Ollama {
             LocalModelApiMode::Ollama
         } else {
             api_mode.unwrap_or_else(|| default_local_model_api_mode(service_type))
         };
-        let api_key = api_key.unwrap_or_default().trim().to_string();
+        let api_key = if service_type == LocalModelServiceType::RnnLocal {
+            "local-placeholder".to_string()
+        } else {
+            api_key.unwrap_or_default().trim().to_string()
+        };
         Some(Self {
             service_type,
             api_mode,
@@ -10953,19 +11534,30 @@ impl LocalModelRuntimeConfig {
         if !enabled {
             return None;
         }
-        let base_url = base_url.unwrap_or_default().trim().trim_end_matches('/').to_string();
+        let mut base_url = base_url
+            .unwrap_or_default()
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
         let model_name = model_name.unwrap_or_default().trim().to_string();
         if base_url.is_empty() || model_name.is_empty() {
             return None;
         }
         let service_type =
             service_type.unwrap_or_else(|| infer_local_model_service_type(base_url.as_str()));
+        if service_type == LocalModelServiceType::RnnLocal {
+            base_url = RNN_RUNTIME_BASE_URL.to_string();
+        }
         let api_mode = if service_type == LocalModelServiceType::Ollama {
             LocalModelApiMode::Ollama
         } else {
             api_mode.unwrap_or_else(|| default_local_model_api_mode(service_type))
         };
-        let api_key = api_key.unwrap_or_default().trim().to_string();
+        let api_key = if service_type == LocalModelServiceType::RnnLocal {
+            "local-placeholder".to_string()
+        } else {
+            api_key.unwrap_or_default().trim().to_string()
+        };
         Some(Self {
             service_type,
             api_mode,
@@ -11028,6 +11620,9 @@ fn infer_local_model_service_type(base_url: &str) -> LocalModelServiceType {
     if normalized.contains("11434") || normalized.contains("ollama") {
         return LocalModelServiceType::Ollama;
     }
+    if normalized.contains("11445") || normalized.contains("rnn") {
+        return LocalModelServiceType::RnnLocal;
+    }
     if normalized.contains("1234") || normalized.contains("lmstudio") {
         return LocalModelServiceType::LmStudio;
     }
@@ -11041,9 +11636,9 @@ fn default_local_model_api_mode(service_type: LocalModelServiceType) -> LocalMod
     match service_type {
         LocalModelServiceType::Ollama => LocalModelApiMode::Ollama,
         LocalModelServiceType::LmStudio => LocalModelApiMode::OpenAiResponses,
-        LocalModelServiceType::Vllm | LocalModelServiceType::OpenAiCompatible => {
-            LocalModelApiMode::OpenAiCompletions
-        }
+        LocalModelServiceType::Vllm
+        | LocalModelServiceType::RnnLocal
+        | LocalModelServiceType::OpenAiCompatible => LocalModelApiMode::OpenAiCompletions,
     }
 }
 
@@ -11067,7 +11662,7 @@ fn build_ollama_models_url(base_url: &str) -> String {
     }
 }
 
-const LOCAL_MODEL_PROVIDER_IDS: &[&str] = &["ollama", "lmstudio", "vllm", "local"];
+const LOCAL_MODEL_PROVIDER_IDS: &[&str] = &["ollama", "lmstudio", "vllm", "rnn", "local"];
 
 fn clear_local_model_provider_configs(cfg: &mut serde_json::Value) {
     for provider_id in LOCAL_MODEL_PROVIDER_IDS {
@@ -11260,7 +11855,10 @@ async fn discover_local_model_ids_inner(
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
     let mut req = client.get(&url);
-    if let Some(key) = request_api_key.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(key) = request_api_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         req = req.header("Authorization", format!("Bearer {}", key));
     }
 
@@ -11325,6 +11923,7 @@ async fn discover_local_model_ids_inner(
 
 #[tauri::command]
 pub async fn discover_local_model_ids(
+    app: AppHandle,
     service_type: Option<String>,
     api_mode: Option<String>,
     base_url: String,
@@ -11340,15 +11939,24 @@ pub async fn discover_local_model_ids(
         api_key.clone(),
     )
     .ok_or_else(|| "Enter a base URL before discovering models.".to_string())?;
+    if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+        ensure_rnn_runtime_ready(&app).await?;
+    }
     validate_local_model_endpoint(
         &local_model_config.base_url,
         allow_non_local.unwrap_or(false),
     )?;
-    discover_local_model_ids_inner(&local_model_config, api_key.as_deref()).await
+    let request_api_key = if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+        None
+    } else {
+        api_key.as_deref()
+    };
+    discover_local_model_ids_inner(&local_model_config, request_api_key).await
 }
 
 #[tauri::command]
 pub async fn test_local_model_connection(
+    app: AppHandle,
     service_type: Option<String>,
     api_mode: Option<String>,
     base_url: String,
@@ -11374,17 +11982,32 @@ pub async fn test_local_model_connection(
         api_key,
     )
     .ok_or_else(|| "Enter a base URL and model id before testing the connection.".to_string())?;
+    if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+        ensure_rnn_runtime_ready(&app).await?;
+    }
     validate_local_model_endpoint(
         &local_model_config.base_url,
         allow_non_local.unwrap_or(false),
     )?;
-    let available =
-        discover_local_model_ids_inner(&local_model_config, request_api_key.as_deref()).await?;
+    let available = discover_local_model_ids_inner(
+        &local_model_config,
+        if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+            None
+        } else {
+            request_api_key.as_deref()
+        },
+    )
+    .await?;
     if !available.is_empty() && !available.iter().any(|value| value == &trimmed_model_name) {
         return Err(format!(
             "Model '{}' not found. Available: {}",
             trimmed_model_name,
-            available.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+            available
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
 

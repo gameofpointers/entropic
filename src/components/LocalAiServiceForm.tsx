@@ -13,6 +13,7 @@ import {
   type LocalModelConfig,
   type LocalModelServiceType,
 } from "../lib/auth";
+import { RnnLocalModelManager } from "./RnnLocalModelManager";
 
 type Props = {
   config: LocalModelConfig;
@@ -26,6 +27,7 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
   const [discoveryStatus, setDiscoveryStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [modelInventoryVersion, setModelInventoryVersion] = useState(0);
   const discoveryRequestRef = useRef(0);
   const endpointSecurity = inspectLocalModelEndpoint(config.baseUrl);
   const endpointBlocked =
@@ -56,7 +58,9 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
   function handleServiceTypeChange(serviceType: LocalModelServiceType) {
     const previousDefaultBaseUrl = defaultLocalModelBaseUrl(config.serviceType);
     const nextBaseUrl =
-      !config.baseUrl.trim() || config.baseUrl === previousDefaultBaseUrl
+      serviceType === "rnn-local"
+        ? defaultLocalModelBaseUrl(serviceType)
+        : !config.baseUrl.trim() || config.baseUrl === previousDefaultBaseUrl
         ? defaultLocalModelBaseUrl(serviceType)
         : config.baseUrl;
     updateConfig({
@@ -65,7 +69,12 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
       serviceType,
       apiMode: defaultLocalModelApiMode(serviceType),
       baseUrl: nextBaseUrl,
+      allowNonLocal: serviceType === "rnn-local" ? false : config.allowNonLocal,
     });
+  }
+
+  function handleRnnCatalogChange() {
+    setModelInventoryVersion((version) => version + 1);
   }
 
   async function discoverModelIds(snapshot: LocalModelConfig, requestId: number) {
@@ -126,6 +135,7 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
     config.baseUrl,
     config.apiKey,
     config.allowNonLocal,
+    modelInventoryVersion,
     endpointInvalid,
     endpointBlocked,
   ]);
@@ -176,7 +186,7 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
           </div>
         </Field>
 
-        {config.serviceType !== "ollama" ? (
+        {config.serviceType !== "ollama" && config.serviceType !== "rnn-local" ? (
           <Field
             label="API Mode"
             icon={Shield}
@@ -203,10 +213,20 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
               <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
             </div>
           </Field>
-        ) : (
+        ) : config.serviceType === "ollama" ? (
           <Field label="API Mode" icon={Shield} help="Ollama uses its native API automatically.">
             <div className={clsx(inputClassName, "flex items-center text-[var(--text-secondary)]")}>
               Ollama API
+            </div>
+          </Field>
+        ) : (
+          <Field
+            label="API Mode"
+            icon={Shield}
+            help="The managed RNN runtime exposes an OpenAI-compatible chat completions endpoint."
+          >
+            <div className={clsx(inputClassName, "flex items-center text-[var(--text-secondary)]")}>
+              Chat Completions
             </div>
           </Field>
         )}
@@ -218,6 +238,8 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
         help={
           config.serviceType === "ollama"
             ? "Example: http://localhost:11434/v1"
+            : config.serviceType === "rnn-local"
+              ? "Managed by Entropic on http://localhost:11445/v1"
             : "Example: http://localhost:1234/v1"
         }
       >
@@ -227,7 +249,8 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
           onChange={(event) =>
             updateConfig({ ...config, enabled: true, baseUrl: event.target.value })
           }
-          className={inputClassName}
+          disabled={config.serviceType === "rnn-local"}
+          className={clsx(inputClassName, config.serviceType === "rnn-local" && "opacity-70")}
           placeholder={defaultLocalModelBaseUrl(config.serviceType)}
         />
         {endpointSecurity.status === "local" && (
@@ -275,7 +298,11 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
       <Field
         label="API Key"
         icon={Key}
-        help="Optional. Most local services don't require a key."
+        help={
+          config.serviceType === "rnn-local"
+            ? "Optional Hugging Face token for gated downloads."
+            : "Optional. Most local services don't require a key."
+        }
       >
         <input
           type="password"
@@ -292,7 +319,23 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
         />
       </Field>
 
-      <Field label="Model ID" icon={Cpu} help="Models are detected automatically when available.">
+      {config.serviceType === "rnn-local" ? (
+        <RnnLocalModelManager
+          config={config}
+          onChange={updateConfig}
+          onCatalogChange={handleRnnCatalogChange}
+        />
+      ) : null}
+
+      <Field
+        label="Model ID"
+        icon={Cpu}
+        help={
+          config.serviceType === "rnn-local"
+            ? "Downloaded RNN models appear here automatically after refresh."
+            : "Models are detected automatically when available."
+        }
+      >
         <div className="space-y-2">
           <div className="relative">
             <select
@@ -334,7 +377,7 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
               updateConfig({ ...config, enabled: true, modelName: event.target.value })
             }
             className={inputClassName}
-            placeholder="qwen3:14b"
+            placeholder={config.serviceType === "rnn-local" ? "rwkv7-g1d-2.9b-..." : "qwen3:14b"}
           />
 
           {discoveryStatus === "success" && suggestions.length > 0 && (
