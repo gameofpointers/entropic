@@ -31,6 +31,17 @@ export class GatewayError extends Error {
   }
 }
 
+function isUnsupportedChatSendOptionsError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!message.includes("invalid chat.send params")) {
+    return false;
+  }
+  return (
+    message.includes("unexpected property 'disableTools'") ||
+    message.includes("unexpected property 'bootstrapContextMode'")
+  );
+}
+
 type GatewayDeviceIdentity = {
   device_id: string;
   public_key: string;
@@ -676,14 +687,46 @@ export class GatewayClient {
       content?: string;
     }>,
     idempotencyKey?: string,
+    options?: {
+      disableTools?: boolean;
+      bootstrapContextMode?: "full" | "lightweight";
+    },
   ): Promise<string> {
-    const result = await this.rpc<{ runId: string }>("chat.send", {
+    const idempotency = idempotencyKey || crypto.randomUUID();
+    const params: Record<string, unknown> = {
       sessionKey,
       message,
       attachments,
-      idempotencyKey: idempotencyKey || crypto.randomUUID(),
-    });
-    return result.runId;
+      idempotencyKey: idempotency,
+    };
+    if (options?.disableTools === true) {
+      params.disableTools = true;
+    }
+    if (options?.bootstrapContextMode) {
+      params.bootstrapContextMode = options.bootstrapContextMode;
+    }
+
+    try {
+      const result = await this.rpc<{ runId: string }>("chat.send", params);
+      return result.runId;
+    } catch (error) {
+      if (
+        (options?.disableTools === true || options?.bootstrapContextMode) &&
+        isUnsupportedChatSendOptionsError(error)
+      ) {
+        this.log(
+          "chat.send runtime rejected local chat tuning params; retrying without disableTools/bootstrapContextMode",
+        );
+        const fallbackResult = await this.rpc<{ runId: string }>("chat.send", {
+          sessionKey,
+          message,
+          attachments,
+          idempotencyKey: idempotency,
+        });
+        return fallbackResult.runId;
+      }
+      throw error;
+    }
   }
 
   async abortChat(sessionKey: string, runId?: string): Promise<void> {

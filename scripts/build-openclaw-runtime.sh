@@ -222,7 +222,7 @@ for manifest in sorted(source_root.glob("*/package.json")):
             merged.setdefault(dep, spec)
 
 output_path.write_text(
-    " ".join(f"{dep}@{spec}" for dep, spec in sorted(merged.items())) + "\n",
+    "\n".join(f"{dep}@{spec}" for dep, spec in sorted(merged.items())) + "\n",
     encoding="utf-8",
 )
 PY

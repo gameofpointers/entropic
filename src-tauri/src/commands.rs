@@ -3683,6 +3683,9 @@ pub struct DesktopSettingsSnapshot {
     pub code_model: Option<String>,
     pub image_model: Option<String>,
     pub image_generation_model: Option<String>,
+    pub local_disable_tools: Option<bool>,
+    pub local_lightweight_bootstrap: Option<bool>,
+    pub local_light_runtime_defaults: Option<bool>,
     pub desktop_wallpaper: Option<String>,
     pub desktop_custom_wallpaper: Option<String>,
 }
@@ -7294,6 +7297,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
             let api_key = local_model_config.api_key.clone();
             let api = local_model_config.provider_api();
             let model_name = local_model_config.model_name.clone();
+            let context_window = local_model_context_window_from_container_env();
             set_openclaw_config_value(
                 &mut cfg,
                 &["models", "providers", provider_id],
@@ -7306,7 +7310,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
                         "name": model_name,
                         "input": ["text"],
                         "reasoning": false,
-                        "contextWindow": 128000,
+                        "contextWindow": context_window,
                         "maxTokens": 8192,
                         "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
                     }]
@@ -7315,7 +7319,15 @@ Use it for durable decisions, preferences, and facts that should persist across 
         }
     }
 
-    let memory_enabled = settings.memory_enabled;
+    let local_model_active = read_container_local_model_config().is_some();
+    let desktop_settings = load_desktop_settings_snapshot(app);
+    let use_local_light_defaults =
+        local_model_active && local_model_prefers_light_defaults(&settings, &desktop_settings);
+    let memory_enabled = if use_local_light_defaults {
+        false
+    } else {
+        settings.memory_enabled
+    };
     let memory_slot = if !memory_enabled {
         "none"
     } else if settings.memory_long_term {
@@ -7323,14 +7335,24 @@ Use it for durable decisions, preferences, and facts that should persist across 
     } else {
         "memory-core"
     };
-    let memory_sessions_enabled = settings.memory_sessions_enabled;
+    let memory_sessions_enabled = if use_local_light_defaults {
+        false
+    } else {
+        settings.memory_sessions_enabled
+    };
     set_openclaw_config_value(
         &mut cfg,
         &["plugins", "slots", "memory"],
         serde_json::json!(memory_slot),
     );
     remove_openclaw_config_value(&mut cfg, &["plugins", "entries", "lossless-claw"]);
-    if container_plugin_exists("lossless-claw") {
+    if local_model_active && use_local_light_defaults {
+        set_openclaw_config_value(
+            &mut cfg,
+            &["plugins", "slots", "contextEngine"],
+            serde_json::json!("legacy"),
+        );
+    } else if container_plugin_exists("lossless-claw") {
         set_openclaw_config_value(
             &mut cfg,
             &["plugins", "slots", "contextEngine"],
@@ -7355,7 +7377,11 @@ Use it for durable decisions, preferences, and facts that should persist across 
         &mut cfg,
         memory_slot,
         memory_sessions_enabled,
-        settings.memory_qmd_enabled,
+        if use_local_light_defaults {
+            false
+        } else {
+            settings.memory_qmd_enabled
+        },
     );
     set_openclaw_config_value(
         &mut cfg,
@@ -9768,6 +9794,7 @@ pub async fn start_gateway(
         .map_err(|e| e.to_string())?
         .clone();
     let settings = load_agent_settings(&app);
+    let desktop_settings = load_desktop_settings_snapshot(&app);
     let gateway_bind = "127.0.0.1:19789:18789";
     let mut memory_slot = if !settings.memory_enabled {
         "none"
@@ -9892,6 +9919,13 @@ pub async fn start_gateway(
     } else {
         None
     };
+    let local_model_context_window = if let Some(local_model_config) =
+        expected_local_model_config.as_ref()
+    {
+        Some(resolve_local_model_context_window(local_model_config).await)
+    } else {
+        None
+    };
     let openclaw_model = if let Some(local_model_config) = expected_local_model_config.as_ref() {
         local_model_config.gateway_model_ref(None)
     } else {
@@ -9919,6 +9953,7 @@ pub async fn start_gateway(
         let current_local_model_name = read_container_env("ENTROPIC_LOCAL_MODEL_NAME");
         let current_local_service_type = read_container_env("ENTROPIC_LOCAL_MODEL_SERVICE_TYPE");
         let current_local_api = read_container_env("ENTROPIC_LOCAL_MODEL_API");
+        let current_local_context_window = read_container_env("ENTROPIC_LOCAL_MODEL_CONTEXT_WINDOW");
         // Check legacy environment variable for backward compatibility during migration
         let legacy_proxy_mode = read_container_env("NOVA_PROXY_MODE");
         // Check if the Anthropic auth type matches (OAuth token vs API key)
@@ -9939,6 +9974,7 @@ pub async fn start_gateway(
             (Some(current), Some(latest)) => current == latest,
             _ => true,
         };
+        let expected_local_context_window = local_model_context_window.map(|value| value.to_string());
         let local_config_matches = if let Some(expected_local_model_config) =
             &expected_local_model_config
         {
@@ -9950,13 +9986,16 @@ pub async fn start_gateway(
                     == Some(expected_local_model_config.api_key.as_str())
                 && current_local_service_type.as_deref()
                     == Some(expected_local_model_config.service_type_name())
-                && current_local_api.as_deref() == Some(expected_local_model_config.api_mode_name())
+                && current_local_api.as_deref()
+                    == Some(expected_local_model_config.api_mode_name())
+                && current_local_context_window.as_deref() == expected_local_context_window.as_deref()
         } else {
             current_local_base_url.is_none()
                 && current_local_api_key.is_none()
                 && current_local_model_name.is_none()
                 && current_local_service_type.is_none()
                 && current_local_api.is_none()
+                && current_local_context_window.is_none()
         };
         if !is_proxy_container
             && auth_type_matches
@@ -10024,6 +10063,13 @@ pub async fn start_gateway(
     } else {
         "off"
     };
+    let runtime_memory_slot = if expected_local_model_config.is_some()
+        && local_model_prefers_light_defaults(&settings, &desktop_settings)
+    {
+        "none"
+    } else {
+        memory_slot
+    };
 
     // Build docker run command - pass API keys as env vars
     let mut env_entries: Vec<(&str, &str)> = vec![
@@ -10035,7 +10081,7 @@ pub async fn start_gateway(
         // OPENCLAW_MODEL is read by apply_agent_settings to write openclaw.json config.
         // Keep base model and pass reasoning/thinking separately.
         ("OPENCLAW_MODEL", &openclaw_model),
-        ("OPENCLAW_MEMORY_SLOT", memory_slot),
+        ("OPENCLAW_MEMORY_SLOT", runtime_memory_slot),
         // ENTROPIC_THINKING_LEVEL is read by apply_agent_settings to set thinkingDefault in config
         ("ENTROPIC_THINKING_LEVEL", thinking_level),
         ("ENTROPIC_WORKSPACE_PATH", WORKSPACE_ROOT),
@@ -10100,17 +10146,21 @@ pub async fn start_gateway(
     let local_model_name_str: String;
     let local_service_type_str: String;
     let local_api_mode_str: String;
+    let local_context_window_str: String;
     if let Some(local_model_config) = &local_model_config {
         local_base_url_docker = local_model_config.gateway_base_url();
         local_api_key = local_model_config.api_key.clone();
         local_model_name_str = local_model_config.model_name.clone();
         local_service_type_str = local_model_config.service_type_name().to_string();
         local_api_mode_str = local_model_config.api_mode_name().to_string();
+        local_context_window_str =
+            local_model_context_window.unwrap_or(LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK).to_string();
         env_entries.push(("ENTROPIC_LOCAL_MODEL_BASE_URL", &local_base_url_docker));
         env_entries.push(("ENTROPIC_LOCAL_MODEL_API_KEY", &local_api_key));
         env_entries.push(("ENTROPIC_LOCAL_MODEL_NAME", &local_model_name_str));
         env_entries.push(("ENTROPIC_LOCAL_MODEL_SERVICE_TYPE", &local_service_type_str));
         env_entries.push(("ENTROPIC_LOCAL_MODEL_API", &local_api_mode_str));
+        env_entries.push(("ENTROPIC_LOCAL_MODEL_CONTEXT_WINDOW", &local_context_window_str));
         if local_model_config.provider_id() == "ollama" {
             env_entries.push(("OLLAMA_API_KEY", &local_api_key));
         }
@@ -10707,6 +10757,7 @@ pub fn update_gateway_model(app: AppHandle, model: String) -> Result<(), String>
             let base_url = local_model_config.gateway_base_url();
             let api_key = local_model_config.api_key.clone();
             let api = local_model_config.provider_api();
+            let context_window = local_model_context_window_from_container_env();
             clear_local_model_provider_configs(&mut cfg);
             set_openclaw_config_value(
                 &mut cfg,
@@ -10720,7 +10771,7 @@ pub fn update_gateway_model(app: AppHandle, model: String) -> Result<(), String>
                         "name": model_name,
                         "input": ["text"],
                         "reasoning": false,
-                        "contextWindow": 128000,
+                        "contextWindow": context_window,
                         "maxTokens": 8192,
                         "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
                     }]
@@ -11640,6 +11691,106 @@ fn default_local_model_api_mode(service_type: LocalModelServiceType) -> LocalMod
         | LocalModelServiceType::RnnLocal
         | LocalModelServiceType::OpenAiCompatible => LocalModelApiMode::OpenAiCompletions,
     }
+}
+
+// OpenClaw currently hard-blocks models below a 16k effective context window,
+// so local defaults need to stay at or above that floor.
+const LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK: usize = 16384;
+const LOCAL_MODEL_CONTEXT_WINDOW_CAP: usize = 16384;
+
+fn clamp_local_model_context_window(value: usize) -> usize {
+    value.max(1).min(LOCAL_MODEL_CONTEXT_WINDOW_CAP)
+}
+
+fn local_model_context_window_from_container_env() -> usize {
+    read_container_env("ENTROPIC_LOCAL_MODEL_CONTEXT_WINDOW")
+        .as_deref()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map(clamp_local_model_context_window)
+        .unwrap_or(LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK)
+}
+
+fn local_model_prefers_light_defaults(
+    settings: &StoredAgentSettings,
+    desktop_settings: &DesktopSettingsSnapshot,
+) -> bool {
+    desktop_settings.local_light_runtime_defaults.unwrap_or(
+        settings.memory_enabled
+            && !settings.memory_long_term
+            && !settings.memory_qmd_enabled
+            && settings.memory_sessions_enabled,
+    )
+}
+
+async fn query_ollama_context_window(
+    base_url: &str,
+    model_name: &str,
+) -> Result<Option<usize>, String> {
+    let api_base = base_url
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches("/v1")
+        .to_string();
+    if api_base.is_empty() || model_name.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let response = client
+        .post(format!("{}/api/show", api_base))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "name": model_name.trim() }))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to inspect Ollama model metadata: {}", e))?;
+
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Failed to parse Ollama model metadata: {}", e))?;
+    let Some(model_info) = body.get("model_info").and_then(|value| value.as_object()) else {
+        return Ok(None);
+    };
+
+    for (key, value) in model_info {
+        if !key.ends_with(".context_length") {
+            continue;
+        }
+        if let Some(context_window) = value.as_u64() {
+            let parsed = usize::try_from(context_window).ok().filter(|v| *v > 0);
+            if let Some(parsed) = parsed {
+                return Ok(Some(clamp_local_model_context_window(parsed)));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+async fn resolve_local_model_context_window(local_model_config: &LocalModelRuntimeConfig) -> usize {
+    if local_model_config.service_type == LocalModelServiceType::Ollama {
+        match query_ollama_context_window(&local_model_config.base_url, &local_model_config.model_name)
+            .await
+        {
+            Ok(Some(context_window)) => return context_window,
+            Ok(None) => {}
+            Err(err) => {
+                println!(
+                    "[Entropic] Failed to inspect Ollama context window for {}: {}",
+                    local_model_config.model_name, err
+                );
+            }
+        }
+    }
+    LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK
 }
 
 fn build_openai_models_url(base_url: &str) -> String {

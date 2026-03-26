@@ -52,7 +52,11 @@ import {
 } from "lucide-react";
 import { loadOnboardingData } from "../lib/profile";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
-import { loadDesktopSettings, updateDesktopSettings } from "../lib/settingsStore";
+import {
+  loadDesktopSettings,
+  updateDesktopSettings,
+  type LocalModePerformanceSettings,
+} from "../lib/settingsStore";
 const PluginStore = lazy(() => import("./Store").then((m) => ({ default: m.Store })));
 const SkillsStore = lazy(() => import("./Store").then((m) => ({ default: m.Store })));
 const Channels = lazy(() => import("./Channels").then((m) => ({ default: m.Channels })));
@@ -108,7 +112,11 @@ type Props = {
   onImageGenerationModelChange: (model: string) => void;
   onImageModelChange: (model: string) => void;
   localModelConfig: LocalModelConfig;
+  localModePerformanceSettings: LocalModePerformanceSettings;
   onLocalModelConfigChange: (config: LocalModelConfig) => void;
+  onLocalModePerformanceSettingsChange: (
+    patch: Partial<LocalModePerformanceSettings>,
+  ) => void | Promise<void>;
   localModel?: Model | null;
 };
 type ViewMode = "grid" | "list";
@@ -816,7 +824,9 @@ export function Files({
   onImageGenerationModelChange,
   onImageModelChange,
   localModelConfig,
+  localModePerformanceSettings,
   onLocalModelConfigChange,
+  onLocalModePerformanceSettingsChange,
   localModel,
 }: Props) {
   const { balance, isAuthenticated, isAuthConfigured } = useAuth();
@@ -4425,7 +4435,9 @@ export function Files({
                   onImageGenerationModelChange={onImageGenerationModelChange}
                   onImageModelChange={onImageModelChange}
                   localModelConfig={localModelConfig}
+                  localModePerformanceSettings={localModePerformanceSettings}
                   onLocalModelConfigChange={onLocalModelConfigChange}
+                  onLocalModePerformanceSettingsChange={onLocalModePerformanceSettingsChange}
                   localModel={localModel}
                 />
               </Suspense>

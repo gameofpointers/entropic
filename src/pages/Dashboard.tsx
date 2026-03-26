@@ -52,7 +52,11 @@ import {
   hostedFeaturesEnabled,
 } from "../lib/buildProfile";
 import {
+  DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS,
+  loadDesktopSettings,
   primeDesktopSettings,
+  resolveLocalModePerformanceSettings,
+  type LocalModePerformanceSettings,
   type DesktopSettingsSnapshot,
   updateDesktopSettings,
 } from "../lib/settingsStore";
@@ -538,6 +542,8 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
   const [localModelConfig, setLocalModelConfig] = useState<LocalModelConfig>(
     normalizeLocalModelConfig(),
   );
+  const [localModePerformanceSettings, setLocalModePerformanceSettings] =
+    useState<LocalModePerformanceSettings>(DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS);
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [currentChatSession, setCurrentChatSession] = useState<string | null>(null);
   const [pendingChatSession, setPendingChatSession] = useState<string | null>(null);
@@ -738,6 +744,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         const savedCode = await store.get("codeModel") as string | null;
         const savedImage = await store.get("imageModel") as string | null;
         const savedImageGeneration = await store.get("imageGenerationModel") as string | null;
+        const desktopSettings = await loadDesktopSettings({ force: true });
+        const nextLocalModePerformanceSettings =
+          resolveLocalModePerformanceSettings(desktopSettings);
         const nextImageGenerationModel = remapImageGenerationModelForMode(
           savedImageGeneration || "",
           nextConnectionMode === "byok",
@@ -748,6 +757,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
         setConnectionMode(nextConnectionMode);
         setLocalModelConfig(normalizedLocalModelConfig);
+        setLocalModePerformanceSettings(nextLocalModePerformanceSettings);
         setSelectedModel(nextSelectedModel);
         if (savedCode) setCodeModel(savedCode);
         if (savedImage) setImageModel(savedImage);
@@ -1057,6 +1067,25 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       await store.save();
     } catch (error) {
       console.error("[Entropic] Failed to save localModelConfig:", error);
+    }
+  }
+
+  async function persistLocalModePerformanceSettings(
+    patch: Partial<LocalModePerformanceSettings>,
+  ) {
+    const next = {
+      ...localModePerformanceSettings,
+      ...patch,
+    };
+    setLocalModePerformanceSettings(next);
+    try {
+      await updateDesktopSettings({
+        localDisableTools: next.disableTools,
+        localLightweightBootstrap: next.lightweightBootstrap,
+        localLightRuntimeDefaults: next.lightRuntimeDefaults,
+      });
+    } catch (error) {
+      console.error("[Entropic] Failed to save local mode performance settings:", error);
     }
   }
 
@@ -2424,6 +2453,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         connectionMode={connectionMode}
         onConnectionModeChange={handleConnectionModeChange}
         localModelConfig={localModelConfig}
+        localModePerformanceSettings={localModePerformanceSettings}
         onLocalModelConfigChange={persistLocalModelConfig}
         selectedModel={activeSelectedModel}
         onModelChange={handleModelChange}
@@ -2485,7 +2515,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           onImageGenerationModelChange={handleImageGenerationModelChange}
           onImageModelChange={handleImageModelChange}
           localModelConfig={localModelConfig}
+          localModePerformanceSettings={localModePerformanceSettings}
           onLocalModelConfigChange={persistLocalModelConfig}
+          onLocalModePerformanceSettingsChange={persistLocalModePerformanceSettings}
           localModel={localModelConfig.enabled && localModelConfig.modelName
             ? {
                 id: `local/${localModelConfig.modelName}`,
@@ -2537,7 +2569,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
             onImageGenerationModelChange={handleImageGenerationModelChange}
             onImageModelChange={handleImageModelChange}
             localModelConfig={localModelConfig}
+            localModePerformanceSettings={localModePerformanceSettings}
             onLocalModelConfigChange={persistLocalModelConfig}
+            onLocalModePerformanceSettingsChange={persistLocalModePerformanceSettings}
             localModel={
               localModelConfig.enabled && localModelConfig.modelName
                 ? {

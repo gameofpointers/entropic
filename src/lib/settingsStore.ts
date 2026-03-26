@@ -7,8 +7,23 @@ export type DesktopSettingsSnapshot = {
   codeModel?: string;
   imageModel?: string;
   imageGenerationModel?: string;
+  localDisableTools?: boolean;
+  localLightweightBootstrap?: boolean;
+  localLightRuntimeDefaults?: boolean;
   desktopWallpaper?: string;
   desktopCustomWallpaper?: string;
+};
+
+export type LocalModePerformanceSettings = {
+  disableTools: boolean;
+  lightweightBootstrap: boolean;
+  lightRuntimeDefaults: boolean;
+};
+
+export const DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS: LocalModePerformanceSettings = {
+  disableTools: true,
+  lightweightBootstrap: true,
+  lightRuntimeDefaults: true,
 };
 
 const SETTINGS_FILE = "entropic-settings.json";
@@ -20,6 +35,9 @@ const SETTING_KEYS = [
   "codeModel",
   "imageModel",
   "imageGenerationModel",
+  "localDisableTools",
+  "localLightweightBootstrap",
+  "localLightRuntimeDefaults",
   "desktopWallpaper",
   "desktopCustomWallpaper",
 ] as const satisfies ReadonlyArray<keyof DesktopSettingsSnapshot>;
@@ -55,8 +73,32 @@ function normalizeDesktopSettings(
     codeModel: normalizeString(raw?.codeModel),
     imageModel: normalizeString(raw?.imageModel),
     imageGenerationModel: normalizeString(raw?.imageGenerationModel),
+    localDisableTools:
+      typeof raw?.localDisableTools === "boolean" ? raw.localDisableTools : undefined,
+    localLightweightBootstrap:
+      typeof raw?.localLightweightBootstrap === "boolean"
+        ? raw.localLightweightBootstrap
+        : undefined,
+    localLightRuntimeDefaults:
+      typeof raw?.localLightRuntimeDefaults === "boolean"
+        ? raw.localLightRuntimeDefaults
+        : undefined,
     desktopWallpaper: normalizeString(raw?.desktopWallpaper),
     desktopCustomWallpaper: normalizeString(raw?.desktopCustomWallpaper),
+  };
+}
+
+export function resolveLocalModePerformanceSettings(
+  raw: Partial<DesktopSettingsSnapshot> | null | undefined,
+): LocalModePerformanceSettings {
+  return {
+    disableTools: raw?.localDisableTools ?? DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS.disableTools,
+    lightweightBootstrap:
+      raw?.localLightweightBootstrap ??
+      DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS.lightweightBootstrap,
+    lightRuntimeDefaults:
+      raw?.localLightRuntimeDefaults ??
+      DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS.lightRuntimeDefaults,
   };
 }
 

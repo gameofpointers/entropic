@@ -597,10 +597,9 @@ if [ -f /app/browser-service/server.mjs ]; then
     fi
 fi
 
-# Start the gateway
+# Start the gateway.
+# The gateway token is already written into /home/node/.openclaw/openclaw.json
+# above, so do not also pass it on the command line. Tokens that begin with "-"
+# can otherwise be misparsed during startup/restart and crash the container.
 PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
-set -- node /app/dist/index.js gateway --bind lan --port "${PORT}" --allow-unconfigured
-if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
-    set -- "$@" --token "${OPENCLAW_GATEWAY_TOKEN}"
-fi
-exec "$@"
+exec node /app/dist/index.js gateway --bind lan --port "${PORT}" --allow-unconfigured

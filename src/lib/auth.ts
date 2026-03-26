@@ -537,7 +537,7 @@ export const LOCAL_MODEL_API_MODE_OPTIONS: Array<{
 export function defaultLocalModelBaseUrl(serviceType: LocalModelServiceType): string {
   switch (serviceType) {
     case "ollama":
-      return "http://localhost:11434/v1";
+      return "http://localhost:11434";
     case "lmstudio":
       return "http://localhost:1234/v1";
     case "vllm":

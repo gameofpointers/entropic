@@ -37,7 +37,11 @@ import {
   type DiagnosticLogEntry,
   type DiagnosticLogType,
 } from "../lib/diagnostics";
-import { loadDesktopSettings, updateDesktopSettings } from "../lib/settingsStore";
+import {
+  loadDesktopSettings,
+  updateDesktopSettings,
+  type LocalModePerformanceSettings,
+} from "../lib/settingsStore";
 import {
   getCachedSettingsWarmState,
   loadSettingsWarmState,
@@ -61,7 +65,11 @@ type Props = {
   onImageGenerationModelChange: (model: string) => void;
   onImageModelChange: (model: string) => void;
   localModelConfig: LocalModelConfig;
+  localModePerformanceSettings: LocalModePerformanceSettings;
   onLocalModelConfigChange: (config: LocalModelConfig) => void;
+  onLocalModePerformanceSettingsChange: (
+    patch: Partial<LocalModePerformanceSettings>,
+  ) => void | Promise<void>;
   localModel?: import("../lib/auth").Model | null;
 };
 
@@ -170,6 +178,48 @@ function SettingsRow({
   );
 }
 
+function SettingsToggleRow({
+  label,
+  description,
+  checked,
+  onChange,
+  disabled = false,
+}: {
+  label: string;
+  description: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <label className={clsx("p-4 flex items-center justify-between gap-4", disabled && "opacity-60")}>
+      <div className="min-w-0">
+        <div className="text-[14px] font-medium text-[var(--text-primary)]">{label}</div>
+        <div className="text-[12px] text-[var(--text-secondary)]">{description}</div>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        disabled={disabled}
+        onClick={() => onChange(!checked)}
+        className={clsx(
+          "relative inline-flex h-6 w-11 items-center rounded-full transition-colors",
+          checked ? "bg-[var(--system-blue)]" : "bg-[var(--system-gray-5)]",
+          disabled && "cursor-not-allowed",
+        )}
+      >
+        <span
+          className={clsx(
+            "inline-block h-5 w-5 transform rounded-full bg-white transition-transform",
+            checked ? "translate-x-5" : "translate-x-0.5",
+          )}
+        />
+      </button>
+    </label>
+  );
+}
+
 function formatBytes(value?: number | null) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "—";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -217,7 +267,9 @@ export function Settings({
   onImageGenerationModelChange,
   onImageModelChange,
   localModelConfig,
+  localModePerformanceSettings,
   onLocalModelConfigChange,
+  onLocalModePerformanceSettingsChange,
   localModel,
 }: Props) {
   const cachedWarmState = getCachedSettingsWarmState();
@@ -1464,13 +1516,52 @@ export function Settings({
 
       {localModelsMode && (
         <SettingsGroup title="Local Models">
-          <div className="p-4">
+          <div className="p-4 space-y-4">
             <LocalAiServiceForm
               config={{ ...localModelConfig, enabled: true }}
               onChange={(config) => {
                 onLocalModelConfigChange({ ...config, enabled: true });
               }}
             />
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] overflow-hidden">
+              <div className="px-4 py-3 border-b border-[var(--border-subtle)]">
+                <div className="text-[13px] font-semibold text-[var(--text-primary)]">
+                  Local Performance
+                </div>
+                <div className="text-[12px] text-[var(--text-secondary)] mt-1">
+                  Tune prompt size and sandbox behavior for local models. Chat toggles apply
+                  immediately. Sandbox defaults apply the next time the sandbox starts.
+                </div>
+              </div>
+              <SettingsToggleRow
+                label="Disable tools in local chat"
+                description="Keeps coding/file tool schemas out of normal local chat turns to shrink prompt size."
+                checked={localModePerformanceSettings.disableTools}
+                onChange={(checked) => {
+                  void onLocalModePerformanceSettingsChange({ disableTools: checked });
+                }}
+              />
+              <SettingsToggleRow
+                label="Use lightweight bootstrap context"
+                description="Sends a smaller bootstrap prompt for normal local chat turns."
+                checked={localModePerformanceSettings.lightweightBootstrap}
+                onChange={(checked) => {
+                  void onLocalModePerformanceSettingsChange({
+                    lightweightBootstrap: checked,
+                  });
+                }}
+              />
+              <SettingsToggleRow
+                label="Prefer lighter sandbox defaults"
+                description="Defaults local-model sandbox runs to lighter recall settings instead of heavier memory/context features."
+                checked={localModePerformanceSettings.lightRuntimeDefaults}
+                onChange={(checked) => {
+                  void onLocalModePerformanceSettingsChange({
+                    lightRuntimeDefaults: checked,
+                  });
+                }}
+              />
+            </div>
           </div>
         </SettingsGroup>
       )}

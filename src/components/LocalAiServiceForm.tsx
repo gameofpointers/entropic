@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronDown, Cpu, Key, Loader2, Shield } from "lucide-react";
+import { ChevronDown, Cpu, Key, Shield } from "lucide-react";
 import clsx from "clsx";
 import {
   DEFAULT_LOCAL_MODEL_API_KEY,
@@ -21,6 +21,12 @@ type Props = {
   className?: string;
 };
 
+type LocalModelRecommendation = {
+  label: string;
+  description: string;
+  modelId?: string;
+};
+
 export function LocalAiServiceForm({ config, onChange, className }: Props) {
   const [testStatus, setTestStatus] = useState<"idle" | "testing" | "success" | "error">("idle");
   const [testError, setTestError] = useState<string | null>(null);
@@ -33,6 +39,7 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
   const endpointBlocked =
     endpointSecurity.status === "non-local" && !config.allowNonLocal;
   const endpointInvalid = endpointSecurity.status === "invalid";
+  const recommendations = buildLocalModelRecommendations(suggestions);
 
   function requestApiKey(value: string): string | null {
     return value.trim() && value !== DEFAULT_LOCAL_MODEL_API_KEY ? value : null;
@@ -237,7 +244,7 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
         icon={Key}
         help={
           config.serviceType === "ollama"
-            ? "Example: http://localhost:11434/v1"
+            ? "Example: http://localhost:11434"
             : config.serviceType === "rnn-local"
               ? "Managed by Entropic on http://localhost:11445/v1"
             : "Example: http://localhost:1234/v1"
@@ -377,7 +384,9 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
               updateConfig({ ...config, enabled: true, modelName: event.target.value })
             }
             className={inputClassName}
-            placeholder={config.serviceType === "rnn-local" ? "rwkv7-g1d-2.9b-..." : "qwen3:14b"}
+            placeholder={
+              config.serviceType === "rnn-local" ? "rwkv7-g1d-2.9b-..." : "qwen3:8b"
+            }
           />
 
           {discoveryStatus === "success" && suggestions.length > 0 && (
@@ -393,6 +402,43 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
           {discoveryStatus === "error" && discoveryError && (
             <div className="text-xs text-red-500">{discoveryError}</div>
           )}
+          <div className="grid gap-2 pt-1 md:grid-cols-3">
+            {recommendations.map((recommendation) => {
+              const selected = recommendation.modelId && recommendation.modelId === config.modelName;
+              return (
+                <button
+                  key={recommendation.label}
+                  type="button"
+                  onClick={() => {
+                    if (!recommendation.modelId) return;
+                    updateConfig({
+                      ...config,
+                      enabled: true,
+                      modelName: recommendation.modelId,
+                    });
+                  }}
+                  disabled={!recommendation.modelId}
+                  className={clsx(
+                    "rounded-xl border px-3 py-2 text-left transition-colors",
+                    recommendation.modelId
+                      ? "border-[var(--border-subtle)] bg-[var(--bg-card)] hover:border-[var(--system-blue)]/50"
+                      : "border-[var(--border-subtle)]/60 bg-[var(--bg-card)]/60 opacity-80",
+                    selected && "border-[var(--system-blue)] bg-[var(--system-blue)]/8",
+                  )}
+                >
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)]">
+                    {recommendation.label}
+                  </div>
+                  <div className="mt-1 text-sm font-medium text-[var(--text-primary)]">
+                    {recommendation.modelId || "Use your preferred model"}
+                  </div>
+                  <div className="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
+                    {recommendation.description}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
         </div>
       </Field>
 
@@ -447,4 +493,50 @@ function Field({
       {help ? <div className="mt-1.5 text-xs text-[var(--text-secondary)]">{help}</div> : null}
     </label>
   );
+}
+
+function buildLocalModelRecommendations(suggestions: string[]): LocalModelRecommendation[] {
+  const pick = (...patterns: RegExp[]): string | undefined =>
+    suggestions.find((modelId) => patterns.every((pattern) => pattern.test(modelId)));
+  const pickWithout = (include: RegExp[], exclude: RegExp[]): string | undefined =>
+    suggestions.find(
+      (modelId) =>
+        include.every((pattern) => pattern.test(modelId)) &&
+        exclude.every((pattern) => !pattern.test(modelId)),
+    );
+
+  const fastChat =
+    pickWithout([/(?:^|[:/-])(7b|8b|4b|3b)\b/i], [/coder|codestral|codegemma|deepseek-coder/i]) ||
+    pickWithout([/mini|small/i], [/coder|codestral|codegemma|deepseek-coder/i]) ||
+    pickWithout([/qwen|llama|mistral|gemma/i], [/coder|codestral|codegemma|deepseek-coder/i]);
+  const coding =
+    pick(/coder|codestral|codegemma|deepseek-coder/i, /(?:^|[:/-])(7b|8b|14b)\b/i) ||
+    pick(/coder|codestral|codegemma|deepseek-coder/i);
+  const quality =
+    pickWithout([/(?:^|[:/-])(14b|32b|70b)\b/i], [/coder|codestral|codegemma|deepseek-coder/i]) ||
+    pickWithout([/qwen|llama|mistral/i, /(?:^|[:/-])14b\b/i], [/coder|codestral|codegemma|deepseek-coder/i]);
+
+  return [
+    {
+      label: "Fast Chat",
+      modelId: fastChat,
+      description: fastChat
+        ? "Good default when you want lower latency on a 12 GB GPU."
+        : "For a 12 GB GPU, start with a 7B-8B instruct model for the best responsiveness.",
+    },
+    {
+      label: "Coding",
+      modelId: coding,
+      description: coding
+        ? "Prefer a smaller coder-specialized model for edits, debugging, and tool-heavy work."
+        : "Prefer a 7B-8B coder model for code work instead of a larger general model.",
+    },
+    {
+      label: "Higher Quality",
+      modelId: quality,
+      description: quality
+        ? "Use a larger general model when quality matters more than speed."
+        : "Use 14B+ general models only if you can tolerate slower first-token latency.",
+    },
+  ];
 }

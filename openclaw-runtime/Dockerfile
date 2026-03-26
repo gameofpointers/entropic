@@ -83,15 +83,30 @@ COPY --chown=node:node dist ./dist
 # Copy bundled skills (seeded into /data/skills/ at startup by entrypoint)
 COPY --chown=node:node bundled-skills /app/bundled-skills
 
+# Keep pnpm available so compatibility dependencies can be added safely on top
+# of the pnpm-materialized node_modules tree copied from the host build.
+RUN corepack enable && \
+    corepack prepare "$(node -p "require('./package.json').packageManager")" --activate
+
 # Upstream's compiled root dist can statically import SDKs owned by optional
 # channel extensions, even when Nova chooses not to ship those extensions in the
 # runtime image. Install a compatibility dependency list generated from all
 # upstream extension manifests so /app/dist stays resolvable without modifying
 # upstream OpenClaw itself.
-RUN EXT_DEPS="$(tr '\n' ' ' </app/all-extension-runtime-deps.txt)" && \
-    if [ -n "$EXT_DEPS" ]; then \
+RUN set -eu; \
+    STORE_DIR="$(sed -n 's/^storeDir: //p' /app/node_modules/.modules.yaml | head -1)"; \
+    if [ -z "$STORE_DIR" ]; then \
+      echo "Could not determine pnpm storeDir from /app/node_modules/.modules.yaml" >&2; \
+      exit 1; \
+    fi; \
+    mkdir -p "$STORE_DIR"; \
+    if [ -s /app/all-extension-runtime-deps.txt ]; then \
       echo "Installing upstream extension compatibility deps into root node_modules..." && \
-      npm install --omit=dev --ignore-scripts --legacy-peer-deps --package-lock=false --no-save $EXT_DEPS; \
+      while IFS= read -r dep || [ -n "$dep" ]; do \
+        if [ -z "$dep" ]; then continue; fi; \
+        echo "  - $dep" && \
+        pnpm --store-dir "$STORE_DIR" add --prod --ignore-scripts "$dep"; \
+      done </app/all-extension-runtime-deps.txt; \
     fi
 
 # Install bundled skill dependencies (runs as root before USER node)

@@ -76,6 +76,10 @@ import {
 import { Store as TauriStore } from "@tauri-apps/plugin-store";
 import { getLocalCreditBalance } from "../lib/localCredits";
 import {
+  DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS,
+  type LocalModePerformanceSettings,
+} from "../lib/settingsStore";
+import {
   signInWithDiscord,
   signInWithEmail,
   signInWithGoogle,
@@ -695,6 +699,7 @@ const PRIVACY_URL = entropicSitePath("/privacy");
 const HISTORY_LIMIT = 500;
 const ACTIVE_RUN_IDLE_TIMEOUT_MS = 120_000;
 const LOCAL_MODEL_ACTIVE_RUN_IDLE_TIMEOUT_MS = 600_000;
+const LOCAL_FAST_CHAT_BOOTSTRAP_MODE: "lightweight" = "lightweight";
 const MAX_IMAGE_ATTACHMENTS_PER_MESSAGE = 4;
 const MAX_IMAGE_ATTACHMENT_BYTES = 5_000_000;
 const GENERATED_IMAGES_DEST_PATH = "generated-images";
@@ -1066,6 +1071,7 @@ export function Chat({
   connectionMode,
   onConnectionModeChange,
   localModelConfig,
+  localModePerformanceSettings,
   onLocalModelConfigChange,
   selectedModel,
   onModelChange: _onModelChange,
@@ -1088,6 +1094,7 @@ export function Chat({
   connectionMode: ConnectionMode;
   onConnectionModeChange?: (mode: ConnectionMode) => void | Promise<void>;
   localModelConfig?: LocalModelConfig | null;
+  localModePerformanceSettings?: LocalModePerformanceSettings;
   onLocalModelConfigChange?: (config: LocalModelConfig) => void | Promise<void>;
   selectedModel: string;
   onModelChange?: (model: string) => void;
@@ -1105,6 +1112,8 @@ export function Chat({
   const managedMode = connectionMode === "managed";
   const byokMode = connectionMode === "byok";
   const localModelsMode = connectionMode === "local-models";
+  const effectiveLocalModePerformanceSettings =
+    localModePerformanceSettings ?? DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS;
   const localModelReady = Boolean(
     localModelsMode &&
       localModelConfig?.enabled &&
@@ -2819,10 +2828,53 @@ export function Chat({
     return null;
   }
 
+  function formatAgentDiagnostic(evt: AgentEvent): string | null {
+    if (evt.stream !== "diagnostic") return null;
+    const kind = typeof evt.data.kind === "string" ? evt.data.kind : "";
+    if (kind !== "context") return null;
+    const readNumber = (value: unknown): number | null =>
+      typeof value === "number" && Number.isFinite(value) ? value : null;
+    const readString = (value: unknown): string | null =>
+      typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+
+    const numCtx = readNumber(evt.data.numCtx);
+    const systemPromptChars = readNumber(evt.data.systemPromptChars);
+    const promptChars = readNumber(evt.data.promptChars);
+    const historyTextChars = readNumber(evt.data.historyTextChars);
+    const messageCount = readNumber(evt.data.messageCount);
+    const toolCount = readNumber(evt.data.toolCount);
+    const toolSchemaChars = readNumber(evt.data.toolSchemaChars);
+    const skillsPromptChars = readNumber(evt.data.skillsPromptChars);
+    const provider = readString(evt.data.provider);
+    const model = readString(evt.data.model);
+    const bootstrapContextMode = readString(evt.data.bootstrapContextMode);
+    const disableTools = evt.data.disableTools === true;
+
+    const parts = [
+      `context ${provider && model ? `${provider}/${model}` : "run"}`,
+      numCtx !== null ? `num_ctx=${numCtx}` : null,
+      messageCount !== null ? `messages=${messageCount}` : null,
+      historyTextChars !== null ? `historyChars=${historyTextChars}` : null,
+      systemPromptChars !== null ? `systemChars=${systemPromptChars}` : null,
+      promptChars !== null ? `promptChars=${promptChars}` : null,
+      toolCount !== null ? `tools=${toolCount}` : null,
+      toolSchemaChars !== null ? `toolSchemaChars=${toolSchemaChars}` : null,
+      skillsPromptChars !== null ? `skillsChars=${skillsPromptChars}` : null,
+      `bootstrap=${bootstrapContextMode || "full"}`,
+      disableTools ? "disableTools=1" : "disableTools=0",
+    ].filter(Boolean);
+
+    return parts.join(" ");
+  }
+
   function handleAgentEvent(event: AgentEvent) {
     if (!event?.runId || event.runId !== activeRunIdRef.current) return;
     lastEventByRunIdRef.current[event.runId] = Date.now();
     refreshActiveRunTimeout(event.runId);
+    const diagnostic = formatAgentDiagnostic(event);
+    if (diagnostic) {
+      addDiag(diagnostic);
+    }
     const status = describeAgentActivity(event);
     if (status) {
       setThinkingStatus(status);
@@ -3811,11 +3863,32 @@ export function Chat({
     addDiag(
       `send -> session=${entry.sessionKey} len=${entry.outboundMessageContent.length} attachments=${entry.attachments.length}`,
     );
+    const sessionComposerMode =
+      composerModeBySessionRef.current[entry.sessionKey] || DEFAULT_COMPOSER_MODE;
+    const localChatSendOptions =
+      localModelsMode && sessionComposerMode === "chat"
+        ? {
+            disableTools: effectiveLocalModePerformanceSettings.disableTools,
+            bootstrapContextMode: effectiveLocalModePerformanceSettings.lightweightBootstrap
+              ? LOCAL_FAST_CHAT_BOOTSTRAP_MODE
+              : undefined,
+          }
+        : null;
+    const useLocalChatTuning =
+      Boolean(localChatSendOptions) &&
+      (localChatSendOptions?.disableTools === true ||
+        localChatSendOptions?.bootstrapContextMode === LOCAL_FAST_CHAT_BOOTSTRAP_MODE);
+    if (useLocalChatTuning) {
+      addDiag(
+        `local chat tuning: disableTools=${localChatSendOptions?.disableTools ? 1 : 0} bootstrap=${localChatSendOptions?.bootstrapContextMode || "full"}`,
+      );
+    }
     const runId = await liveClient.sendMessage(
       entry.sessionKey,
       entry.outboundMessageContent,
       entry.attachments,
       entry.idempotencyKey,
+      useLocalChatTuning ? localChatSendOptions ?? undefined : undefined,
     );
     if (!runId) {
       throw new Error("Failed to start response stream");
@@ -5534,7 +5607,7 @@ export function Chat({
                       enabled: true,
                       serviceType: "ollama",
                       apiMode: "ollama",
-                      baseUrl: "http://localhost:11434/v1",
+                      baseUrl: "http://localhost:11434",
                       apiKey: "local-placeholder",
                       modelName: "",
                       allowNonLocal: false,
