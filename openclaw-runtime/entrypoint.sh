@@ -430,6 +430,8 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
         # Strip colon-based tags (e.g. :7b) — OpenClaw uses colons as parameter separators
         LOCAL_MODEL_ID="${ENTROPIC_LOCAL_MODEL_NAME%%:*}"
         LOCAL_MODEL_ID_ESC="$(json_escape "${LOCAL_MODEL_ID}")"
+        LOCAL_CONTEXT_WINDOW="${ENTROPIC_LOCAL_MODEL_CONTEXT_WINDOW:-16384}"
+        LOCAL_SERVICE_TYPE="${ENTROPIC_LOCAL_MODEL_SERVICE_TYPE:-openai-compatible}"
         # Use 'openrouter' as the provider name — OpenClaw only recognizes built-in providers.
         # This is safe because local model mode and proxy mode are mutually exclusive in the if/elif chain.
         MODELS_BLOCK=",
@@ -439,9 +441,21 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
         \"baseUrl\": \"${LOCAL_BASE_URL_ESC}\",
         \"api\": \"openai-completions\",
         \"models\": [
-          { \"id\": \"${LOCAL_MODEL_ID_ESC}\", \"name\": \"${LOCAL_MODEL_ID_ESC}\", \"input\": [\"text\"], \"reasoning\": false, \"contextWindow\": 128000, \"maxTokens\": 4096, \"cost\": { \"input\": 0, \"output\": 0, \"cacheRead\": 0, \"cacheWrite\": 0 } }
+          { \"id\": \"${LOCAL_MODEL_ID_ESC}\", \"name\": \"${LOCAL_MODEL_ID_ESC}\", \"input\": [\"text\"], \"reasoning\": false, \"contextWindow\": ${LOCAL_CONTEXT_WINDOW}, \"maxTokens\": 4096, \"cost\": { \"input\": 0, \"output\": 0, \"cacheRead\": 0, \"cacheWrite\": 0 } }
         ]
-      }
+      }"
+        if [ "$LOCAL_SERVICE_TYPE" = "rnn-local" ]; then
+            MODELS_BLOCK="${MODELS_BLOCK},
+      \"rnn\": {
+        \"baseUrl\": \"${LOCAL_BASE_URL_ESC}\",
+        \"api\": \"openai-completions\",
+        \"apiKey\": \"local-placeholder\",
+        \"models\": [
+          { \"id\": \"${LOCAL_MODEL_ID_ESC}\", \"name\": \"${LOCAL_MODEL_ID_ESC}\", \"input\": [\"text\"], \"reasoning\": false, \"contextWindow\": ${LOCAL_CONTEXT_WINDOW}, \"maxTokens\": 8192, \"cost\": { \"input\": 0, \"output\": 0, \"cacheRead\": 0, \"cacheWrite\": 0 } }
+        ]
+      }"
+        fi
+        MODELS_BLOCK="${MODELS_BLOCK}
     }
   }"
     fi
@@ -567,6 +581,38 @@ try {
   console.error('[entrypoint] Failed to merge persisted openclaw config:', error?.message || error);
 }
 NODE
+fi
+
+# Start the managed-runtime Unix socket bridge when Entropic mounts one in.
+MANAGED_RUNTIME_UNIX_SOCKET="${ENTROPIC_MANAGED_RUNTIME_UNIX_SOCKET:-}"
+if [ -n "$MANAGED_RUNTIME_UNIX_SOCKET" ] && [ -f /app/managed_runtime_unix_proxy.py ]; then
+    MANAGED_RUNTIME_PROXY_PORT="${ENTROPIC_MANAGED_RUNTIME_PROXY_PORT:-11445}"
+    python3 /app/managed_runtime_unix_proxy.py \
+        --listen-host 127.0.0.1 \
+        --listen-port "$MANAGED_RUNTIME_PROXY_PORT" \
+        --unix-socket "$MANAGED_RUNTIME_UNIX_SOCKET" \
+        >/data/browser/managed-runtime-proxy.log 2>&1 &
+    managed_runtime_proxy_pid="$!"
+    managed_runtime_proxy_ready=0
+    managed_runtime_proxy_attempt=0
+    while [ "$managed_runtime_proxy_attempt" -lt 20 ]; do
+        if curl -fsS "http://127.0.0.1:${MANAGED_RUNTIME_PROXY_PORT}/healthz" >/dev/null 2>&1; then
+            managed_runtime_proxy_ready=1
+            break
+        fi
+        if ! kill -0 "$managed_runtime_proxy_pid" >/dev/null 2>&1; then
+            break
+        fi
+        managed_runtime_proxy_attempt=$((managed_runtime_proxy_attempt + 1))
+        sleep 0.3
+    done
+
+    if [ "$managed_runtime_proxy_ready" -ne 1 ]; then
+        echo "[entrypoint] Managed runtime proxy failed to become ready on 127.0.0.1:${MANAGED_RUNTIME_PROXY_PORT}" >&2
+        if [ -f /data/browser/managed-runtime-proxy.log ]; then
+            tail -n 40 /data/browser/managed-runtime-proxy.log >&2 || true
+        fi
+    fi
 fi
 
 # Start the browser service in the background for desktop/browser bridge commands.

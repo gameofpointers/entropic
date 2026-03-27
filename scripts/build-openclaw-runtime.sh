@@ -192,6 +192,7 @@ echo "Staging OpenClaw files..."
 # Copy Dockerfile and entrypoint
 rsync -a "$RUNTIME_DIR/Dockerfile" "$STAGING_DIR/Dockerfile"
 rsync -a "$RUNTIME_DIR/entrypoint.sh" "$STAGING_DIR/entrypoint.sh"
+rsync -a "$RUNTIME_DIR/managed_runtime_unix_proxy.py" "$STAGING_DIR/managed_runtime_unix_proxy.py"
 normalize_lf_file "$STAGING_DIR/entrypoint.sh"
 assert_no_crlf_file "$STAGING_DIR/entrypoint.sh"
 rsync -a --delete "$RUNTIME_DIR/browser-service/" "$STAGING_DIR/browser-service/"

@@ -17,7 +17,8 @@ import { RnnLocalModelManager } from "./RnnLocalModelManager";
 
 type Props = {
   config: LocalModelConfig;
-  onChange: (config: LocalModelConfig) => void;
+  onChange: (config: LocalModelConfig) => void | Promise<void>;
+  onManagedModelActivated?: (modelName: string) => void | Promise<void>;
   className?: string;
 };
 
@@ -27,7 +28,13 @@ type LocalModelRecommendation = {
   modelId?: string;
 };
 
-export function LocalAiServiceForm({ config, onChange, className }: Props) {
+export function LocalAiServiceForm({
+  config,
+  onChange,
+  onManagedModelActivated,
+  className,
+}: Props) {
+  const isManagedLocalRuntime = config.serviceType === "rnn-local";
   const [testStatus, setTestStatus] = useState<"idle" | "testing" | "success" | "error">("idle");
   const [testError, setTestError] = useState<string | null>(null);
   const [discoveryStatus, setDiscoveryStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
@@ -40,6 +47,10 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
     endpointSecurity.status === "non-local" && !config.allowNonLocal;
   const endpointInvalid = endpointSecurity.status === "invalid";
   const recommendations = buildLocalModelRecommendations(suggestions);
+  const recommendedModelIds = new Set(
+    recommendations.map((r) => r.modelId).filter(Boolean),
+  );
+  const remainingModels = suggestions.filter((id) => !recommendedModelIds.has(id));
 
   function requestApiKey(value: string): string | null {
     return value.trim() && value !== DEFAULT_LOCAL_MODEL_API_KEY ? value : null;
@@ -114,7 +125,13 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
   }
 
   useEffect(() => {
-    if (!config.enabled || !config.baseUrl.trim() || endpointInvalid || endpointBlocked) {
+    if (
+      isManagedLocalRuntime ||
+      !config.enabled ||
+      !config.baseUrl.trim() ||
+      endpointInvalid ||
+      endpointBlocked
+    ) {
       discoveryRequestRef.current += 1;
       setDiscoveryStatus("idle");
       setDiscoveryError(null);
@@ -143,6 +160,7 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
     config.apiKey,
     config.allowNonLocal,
     modelInventoryVersion,
+    isManagedLocalRuntime,
     endpointInvalid,
     endpointBlocked,
   ]);
@@ -172,9 +190,13 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
     "w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-card)] px-3 py-2.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] focus:outline-none focus:ring-2 focus:ring-[var(--system-blue)]/25";
 
   return (
-    <div className={clsx("space-y-4", className)}>
-      <div className="grid gap-4 md:grid-cols-2">
-        <Field label="Service Type" icon={Cpu}>
+    <div className={clsx("space-y-3", className)}>
+      <div className="grid gap-3 md:grid-cols-2">
+        <Field
+          label="Service Type"
+          icon={Cpu}
+          labelClassName="text-[14px] font-semibold tracking-[0.01em] text-[var(--text-primary)]"
+        >
           <div className="relative">
             <select
               value={config.serviceType}
@@ -226,271 +248,225 @@ export function LocalAiServiceForm({ config, onChange, className }: Props) {
               Ollama API
             </div>
           </Field>
-        ) : (
-          <Field
-            label="API Mode"
-            icon={Shield}
-            help="The managed RNN runtime exposes an OpenAI-compatible chat completions endpoint."
-          >
-            <div className={clsx(inputClassName, "flex items-center text-[var(--text-secondary)]")}>
-              Chat Completions
-            </div>
-          </Field>
-        )}
+        ) : null}
       </div>
 
-      <Field
-        label="Base URL"
-        icon={Key}
-        help={
-          config.serviceType === "ollama"
-            ? "Example: http://localhost:11434"
-            : config.serviceType === "rnn-local"
-              ? "Managed by Entropic on http://localhost:11445/v1"
-            : "Example: http://localhost:1234/v1"
-        }
-      >
-        <input
-          type="text"
-          value={config.baseUrl}
-          onChange={(event) =>
-            updateConfig({ ...config, enabled: true, baseUrl: event.target.value })
-          }
-          disabled={config.serviceType === "rnn-local"}
-          className={clsx(inputClassName, config.serviceType === "rnn-local" && "opacity-70")}
-          placeholder={defaultLocalModelBaseUrl(config.serviceType)}
-        />
-        {endpointSecurity.status === "local" && (
-          <div className="mt-2 text-xs text-green-600">
-            Loopback endpoint detected. Local model traffic stays on this machine.
-          </div>
-        )}
-        {endpointSecurity.status === "invalid" && (
-          <div className="mt-2 text-xs text-red-500">{endpointSecurity.message}</div>
-        )}
-        {endpointSecurity.status === "non-local" && (
-          <div className="mt-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs">
-            <div className="font-medium text-amber-700">Non-local endpoint detected</div>
-            <div className="mt-1 text-[var(--text-secondary)]">
-              {endpointSecurity.host} is not a loopback address. Requests may traverse your LAN or
-              another network.
-              {!endpointSecurity.encrypted
-                ? " This URL uses plain HTTP."
-                : " This URL uses HTTPS."}
+      {!isManagedLocalRuntime ? (
+        <>
+          <Field
+            label="Base URL"
+            icon={Key}
+            help={
+              config.serviceType === "ollama"
+                ? "Example: http://localhost:11434"
+                : "Example: http://localhost:1234/v1"
+            }
+          >
+            <input
+              type="text"
+              value={config.baseUrl}
+              onChange={(event) =>
+                updateConfig({ ...config, enabled: true, baseUrl: event.target.value })
+              }
+              className={inputClassName}
+              placeholder={defaultLocalModelBaseUrl(config.serviceType)}
+            />
+            {endpointSecurity.status === "local" && (
+              <div className="mt-2 text-xs text-green-600">
+                Loopback endpoint detected. Local model traffic stays on this machine.
+              </div>
+            )}
+            {endpointSecurity.status === "invalid" && (
+              <div className="mt-2 text-xs text-red-500">{endpointSecurity.message}</div>
+            )}
+            {endpointSecurity.status === "non-local" && (
+              <div className="mt-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs">
+                <div className="font-medium text-amber-700">Non-local endpoint detected</div>
+                <div className="mt-1 text-[var(--text-secondary)]">
+                  {endpointSecurity.host} is not a loopback address. Requests may traverse your LAN or
+                  another network.
+                  {!endpointSecurity.encrypted
+                    ? " This URL uses plain HTTP."
+                    : " This URL uses HTTPS."}
+                </div>
+                <label className="mt-3 flex items-start gap-2 text-[var(--text-primary)]">
+                  <input
+                    type="checkbox"
+                    checked={config.allowNonLocal}
+                    onChange={(event) =>
+                      updateConfig({
+                        ...config,
+                        enabled: true,
+                        allowNonLocal: event.target.checked,
+                      })
+                    }
+                    className="mt-0.5 h-4 w-4 rounded border-[var(--border-subtle)]"
+                  />
+                  <span>
+                    Allow non-local endpoint
+                    <span className="mt-1 block text-[var(--text-secondary)]">
+                      Use this only if you trust the server and network path.
+                    </span>
+                  </span>
+                </label>
+              </div>
+            )}
+          </Field>
+
+          <Field
+            label="API Key"
+            icon={Key}
+            help="Optional. Most local services don't require a key."
+          >
+            <input
+              type="password"
+              value={config.apiKey === DEFAULT_LOCAL_MODEL_API_KEY ? "" : config.apiKey}
+              onChange={(event) =>
+                updateConfig({
+                  ...config,
+                  enabled: true,
+                  apiKey: event.target.value || DEFAULT_LOCAL_MODEL_API_KEY,
+                })
+              }
+              className={inputClassName}
+              placeholder="Optional"
+            />
+          </Field>
+        </>
+      ) : null}
+
+      {!isManagedLocalRuntime ? (
+        <>
+          <Field
+            label="Model"
+            help="Models are detected automatically when available."
+          >
+            <div className="space-y-2">
+              {suggestions.length > 0 ? (
+                <div className="relative">
+                  <select
+                    value={suggestions.includes(config.modelName) ? config.modelName : ""}
+                    onChange={(event) =>
+                      updateConfig({ ...config, enabled: true, modelName: event.target.value })
+                    }
+                    className={selectClassName}
+                  >
+                    <option value="">Select a model...</option>
+                    {recommendations.some((r) => r.modelId) && (
+                      <optgroup label="Suggested">
+                        {recommendations
+                          .filter(
+                            (r): r is LocalModelRecommendation & { modelId: string } =>
+                              Boolean(r.modelId),
+                          )
+                          .map((r) => (
+                            <option key={r.modelId} value={r.modelId}>
+                              {r.modelId} — {r.label}
+                            </option>
+                          ))}
+                      </optgroup>
+                    )}
+                    {remainingModels.length > 0 && (
+                      <optgroup label="All Models">
+                        {remainingModels.map((modelId) => (
+                          <option key={modelId} value={modelId}>
+                            {modelId}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                  </select>
+                  <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
+                </div>
+              ) : (
+                <input
+                  type="text"
+                  value={config.modelName}
+                  onChange={(event) =>
+                    updateConfig({ ...config, enabled: true, modelName: event.target.value })
+                  }
+                  className={inputClassName}
+                  placeholder="qwen3:8b"
+                />
+              )}
+
+              {discoveryStatus === "loading" && (
+                <div className="text-xs text-[var(--text-tertiary)]">Discovering models...</div>
+              )}
+              {discoveryStatus === "success" && suggestions.length > 0 && (
+                <div className="text-xs text-[var(--text-secondary)]">
+                  Found {suggestions.length} model{suggestions.length === 1 ? "" : "s"}.
+                </div>
+              )}
+              {discoveryStatus === "success" && suggestions.length === 0 && (
+                <div className="text-xs text-[var(--text-secondary)]">
+                  Connected, but no models were found. Enter a model ID above.
+                </div>
+              )}
+              {discoveryStatus === "error" && discoveryError && (
+                <div className="text-xs text-red-500">{discoveryError}</div>
+              )}
             </div>
-            <label className="mt-3 flex items-start gap-2 text-[var(--text-primary)]">
-              <input
-                type="checkbox"
-                checked={config.allowNonLocal}
-                onChange={(event) =>
-                  updateConfig({
-                    ...config,
-                    enabled: true,
-                    allowNonLocal: event.target.checked,
-                  })
-                }
-                className="mt-0.5 h-4 w-4 rounded border-[var(--border-subtle)]"
-              />
-              <span>
-                Allow non-local endpoint
-                <span className="mt-1 block text-[var(--text-secondary)]">
-                  Use this only if you trust the server and network path.
-                </span>
+          </Field>
+
+          <div className="flex flex-wrap items-center gap-3 pt-1">
+            <button
+              type="button"
+              onClick={() => void testConnection()}
+              disabled={
+                testStatus === "testing" ||
+                !config.modelName.trim() ||
+                !config.baseUrl.trim() ||
+                endpointInvalid ||
+                endpointBlocked
+              }
+              className="rounded-xl bg-[var(--system-blue)] px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+            >
+              {testStatus === "testing" ? "Testing..." : "Test Connection"}
+            </button>
+            {testStatus === "success" && (
+              <span className="text-sm font-medium text-green-600">Connected</span>
+            )}
+            {testStatus === "error" && (
+              <span className="max-w-full text-sm text-red-500" title={testError || undefined}>
+                {testError}
               </span>
-            </label>
+            )}
           </div>
-        )}
-      </Field>
+        </>
+      ) : null}
 
-      <Field
-        label="API Key"
-        icon={Key}
-        help={
-          config.serviceType === "rnn-local"
-            ? "Optional Hugging Face token for gated downloads."
-            : "Optional. Most local services don't require a key."
-        }
-      >
-        <input
-          type="password"
-          value={config.apiKey === DEFAULT_LOCAL_MODEL_API_KEY ? "" : config.apiKey}
-          onChange={(event) =>
-            updateConfig({
-              ...config,
-              enabled: true,
-              apiKey: event.target.value || DEFAULT_LOCAL_MODEL_API_KEY,
-            })
-          }
-          className={inputClassName}
-          placeholder="Optional"
-        />
-      </Field>
-
-      {config.serviceType === "rnn-local" ? (
+      {isManagedLocalRuntime ? (
         <RnnLocalModelManager
           config={config}
           onChange={updateConfig}
           onCatalogChange={handleRnnCatalogChange}
+          onModelActivated={onManagedModelActivated}
         />
       ) : null}
-
-      <Field
-        label="Model ID"
-        icon={Cpu}
-        help={
-          config.serviceType === "rnn-local"
-            ? "Downloaded RNN models appear here automatically after refresh."
-            : "Models are detected automatically when available."
-        }
-      >
-        <div className="space-y-2">
-          <div className="relative">
-            <select
-              value={suggestions.includes(config.modelName) ? config.modelName : ""}
-              onChange={(event) =>
-                updateConfig({ ...config, enabled: true, modelName: event.target.value })
-              }
-              disabled={discoveryStatus === "loading" || suggestions.length === 0}
-              className={clsx(selectClassName, "disabled:opacity-60")}
-            >
-              <option value="">
-                {discoveryStatus === "loading"
-                  ? "Discovering models..."
-                  : endpointInvalid
-                    ? "Enter a valid base URL"
-                    : endpointBlocked
-                      ? "Allow non-local endpoint to continue"
-                      : !config.baseUrl.trim()
-                        ? "Enter a base URL first"
-                        : discoveryStatus === "error"
-                          ? "Could not detect models"
-                          : suggestions.length === 0
-                            ? "No models found"
-                            : "Select a model..."}
-              </option>
-              {suggestions.map((modelId) => (
-                <option key={modelId} value={modelId}>
-                  {modelId}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
-          </div>
-
-          <input
-            type="text"
-            value={config.modelName}
-            onChange={(event) =>
-              updateConfig({ ...config, enabled: true, modelName: event.target.value })
-            }
-            className={inputClassName}
-            placeholder={
-              config.serviceType === "rnn-local" ? "rwkv7-g1d-2.9b-..." : "qwen3:8b"
-            }
-          />
-
-          {discoveryStatus === "success" && suggestions.length > 0 && (
-            <div className="text-xs text-[var(--text-secondary)]">
-              Found {suggestions.length} model{suggestions.length === 1 ? "" : "s"} from this service.
-            </div>
-          )}
-          {discoveryStatus === "success" && suggestions.length === 0 && (
-            <div className="text-xs text-[var(--text-secondary)]">
-              Connected, but no models were found. Type a model ID below.
-            </div>
-          )}
-          {discoveryStatus === "error" && discoveryError && (
-            <div className="text-xs text-red-500">{discoveryError}</div>
-          )}
-          <div className="grid gap-2 pt-1 md:grid-cols-3">
-            {recommendations.map((recommendation) => {
-              const selected = recommendation.modelId && recommendation.modelId === config.modelName;
-              return (
-                <button
-                  key={recommendation.label}
-                  type="button"
-                  onClick={() => {
-                    if (!recommendation.modelId) return;
-                    updateConfig({
-                      ...config,
-                      enabled: true,
-                      modelName: recommendation.modelId,
-                    });
-                  }}
-                  disabled={!recommendation.modelId}
-                  className={clsx(
-                    "rounded-xl border px-3 py-2 text-left transition-colors",
-                    recommendation.modelId
-                      ? "border-[var(--border-subtle)] bg-[var(--bg-card)] hover:border-[var(--system-blue)]/50"
-                      : "border-[var(--border-subtle)]/60 bg-[var(--bg-card)]/60 opacity-80",
-                    selected && "border-[var(--system-blue)] bg-[var(--system-blue)]/8",
-                  )}
-                >
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)]">
-                    {recommendation.label}
-                  </div>
-                  <div className="mt-1 text-sm font-medium text-[var(--text-primary)]">
-                    {recommendation.modelId || "Use your preferred model"}
-                  </div>
-                  <div className="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
-                    {recommendation.description}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </Field>
-
-      <div className="flex flex-wrap items-center gap-3 pt-1">
-        <button
-          type="button"
-          onClick={() => void testConnection()}
-          disabled={
-            testStatus === "testing" ||
-            !config.modelName.trim() ||
-            !config.baseUrl.trim() ||
-            endpointInvalid ||
-            endpointBlocked
-          }
-          className="rounded-xl bg-[var(--system-blue)] px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
-        >
-          {testStatus === "testing" ? "Testing..." : "Test Connection"}
-        </button>
-        {testStatus === "success" && (
-          <span className="text-sm font-medium text-green-600">Connected</span>
-        )}
-        {testStatus === "error" && (
-          <span className="max-w-full text-sm text-red-500" title={testError || undefined}>
-            {testError}
-          </span>
-        )}
-      </div>
     </div>
   );
 }
 
 function Field({
   label,
-  icon: Icon,
   children,
   help,
+  labelClassName,
 }: {
   label: string;
-  icon: typeof Cpu | typeof Key | typeof Shield;
+  icon?: typeof Cpu | typeof Key | typeof Shield;
   children: ReactNode;
   help?: string;
+  labelClassName?: string;
 }) {
   return (
     <label className="block">
-      <div className="mb-1.5 flex items-center gap-2 text-sm font-medium text-[var(--text-primary)]">
-        <span className="flex h-7 w-7 items-center justify-center rounded-md bg-[var(--system-blue)]/10 text-[var(--system-blue)]">
-          <Icon className="h-4 w-4" />
-        </span>
-        <span>{label}</span>
+      <div className={clsx("mb-1 text-[13px] font-medium text-[var(--text-primary)]", labelClassName)}>
+        {label}
       </div>
       {children}
-      {help ? <div className="mt-1.5 text-xs text-[var(--text-secondary)]">{help}</div> : null}
+      {help ? <div className="mt-1 text-xs text-[var(--text-secondary)]">{help}</div> : null}
     </label>
   );
 }

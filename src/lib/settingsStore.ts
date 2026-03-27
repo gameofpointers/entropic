@@ -10,6 +10,10 @@ export type DesktopSettingsSnapshot = {
   localDisableTools?: boolean;
   localLightweightBootstrap?: boolean;
   localLightRuntimeDefaults?: boolean;
+  localDebugMode?: boolean;
+  localDebugDirectBypass?: boolean;
+  localDirectDebugChat?: boolean;
+  localCapturePromptPreview?: boolean;
   desktopWallpaper?: string;
   desktopCustomWallpaper?: string;
 };
@@ -18,12 +22,18 @@ export type LocalModePerformanceSettings = {
   disableTools: boolean;
   lightweightBootstrap: boolean;
   lightRuntimeDefaults: boolean;
+  debugMode: boolean;
+  debugDirectBypass: boolean;
+  capturePromptPreview: boolean;
 };
 
 export const DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS: LocalModePerformanceSettings = {
   disableTools: true,
   lightweightBootstrap: true,
   lightRuntimeDefaults: true,
+  debugMode: false,
+  debugDirectBypass: false,
+  capturePromptPreview: false,
 };
 
 const SETTINGS_FILE = "entropic-settings.json";
@@ -38,6 +48,10 @@ const SETTING_KEYS = [
   "localDisableTools",
   "localLightweightBootstrap",
   "localLightRuntimeDefaults",
+  "localDebugMode",
+  "localDebugDirectBypass",
+  "localDirectDebugChat",
+  "localCapturePromptPreview",
   "desktopWallpaper",
   "desktopCustomWallpaper",
 ] as const satisfies ReadonlyArray<keyof DesktopSettingsSnapshot>;
@@ -83,6 +97,15 @@ function normalizeDesktopSettings(
       typeof raw?.localLightRuntimeDefaults === "boolean"
         ? raw.localLightRuntimeDefaults
         : undefined,
+    localDebugMode: typeof raw?.localDebugMode === "boolean" ? raw.localDebugMode : undefined,
+    localDebugDirectBypass:
+      typeof raw?.localDebugDirectBypass === "boolean" ? raw.localDebugDirectBypass : undefined,
+    localDirectDebugChat:
+      typeof raw?.localDirectDebugChat === "boolean" ? raw.localDirectDebugChat : undefined,
+    localCapturePromptPreview:
+      typeof raw?.localCapturePromptPreview === "boolean"
+        ? raw.localCapturePromptPreview
+        : undefined,
     desktopWallpaper: normalizeString(raw?.desktopWallpaper),
     desktopCustomWallpaper: normalizeString(raw?.desktopCustomWallpaper),
   };
@@ -91,6 +114,8 @@ function normalizeDesktopSettings(
 export function resolveLocalModePerformanceSettings(
   raw: Partial<DesktopSettingsSnapshot> | null | undefined,
 ): LocalModePerformanceSettings {
+  const legacyDirectDebugChat =
+    typeof raw?.localDirectDebugChat === "boolean" ? raw.localDirectDebugChat : undefined;
   return {
     disableTools: raw?.localDisableTools ?? DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS.disableTools,
     lightweightBootstrap:
@@ -99,6 +124,15 @@ export function resolveLocalModePerformanceSettings(
     lightRuntimeDefaults:
       raw?.localLightRuntimeDefaults ??
       DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS.lightRuntimeDefaults,
+    debugMode:
+      raw?.localDebugMode ?? legacyDirectDebugChat ?? DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS.debugMode,
+    debugDirectBypass:
+      raw?.localDebugDirectBypass ??
+      legacyDirectDebugChat ??
+      DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS.debugDirectBypass,
+    capturePromptPreview:
+      raw?.localCapturePromptPreview ??
+      DEFAULT_LOCAL_MODE_PERFORMANCE_SETTINGS.capturePromptPreview,
   };
 }
 

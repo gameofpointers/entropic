@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { Key, Shield, Sparkles, Cpu, Image, ChevronRight, User, Palette, ChevronDown, ScrollText, LogIn, LogOut, Loader2, Trash2, AlertTriangle, Copy, Download, Sun, Moon, Monitor, RotateCcw } from "lucide-react";
+import { Key, Shield, Sparkles, Cpu, Image, ChevronRight, User, Palette, ChevronDown, ScrollText, LogIn, LogOut, Loader2, Trash2, AlertTriangle, Copy, Download, Sun, Moon, Monitor, RotateCcw, Activity } from "lucide-react";
 import clsx from "clsx";
 import {
   getProfileInitials,
@@ -32,10 +32,14 @@ import { resetIntegrationVaultSession } from "../lib/vault";
 import { Logs } from "./Logs";
 import {
   clearDiagnosticLogs,
+  clearOptimizationTraces,
   diagnosticsUpdatedEventName,
+  optimizationTracesUpdatedEventName,
   readDiagnosticLogs,
+  readOptimizationTraces,
   type DiagnosticLogEntry,
   type DiagnosticLogType,
+  type OptimizationTraceRecord,
 } from "../lib/diagnostics";
 import {
   loadDesktopSettings,
@@ -66,10 +70,11 @@ type Props = {
   onImageModelChange: (model: string) => void;
   localModelConfig: LocalModelConfig;
   localModePerformanceSettings: LocalModePerformanceSettings;
-  onLocalModelConfigChange: (config: LocalModelConfig) => void;
+  onLocalModelConfigChange: (config: LocalModelConfig) => void | Promise<void>;
   onLocalModePerformanceSettingsChange: (
     patch: Partial<LocalModePerformanceSettings>,
   ) => void | Promise<void>;
+  onManagedLocalRuntimeModelActivated?: (modelName: string) => void | Promise<void>;
   localModel?: import("../lib/auth").Model | null;
 };
 
@@ -270,6 +275,7 @@ export function Settings({
   localModePerformanceSettings,
   onLocalModelConfigChange,
   onLocalModePerformanceSettingsChange,
+  onManagedLocalRuntimeModelActivated,
   localModel,
 }: Props) {
   const cachedWarmState = getCachedSettingsWarmState();
@@ -779,7 +785,9 @@ export function Settings({
   const [isEditingPersonality, setIsEditingPersonality] = useState(false);
   const [logsExpanded, setLogsExpanded] = useState(false);
   const [gatewayDiagnosticsExpanded, setGatewayDiagnosticsExpanded] = useState(false);
+  const [optimizationTracesExpanded, setOptimizationTracesExpanded] = useState(false);
   const [gatewayDiagLogs, setGatewayDiagLogs] = useState<DiagnosticLogEntry[]>([]);
+  const [optimizationTraces, setOptimizationTraces] = useState<OptimizationTraceRecord[]>([]);
   const [diagTypeFilters, setDiagTypeFilters] = useState<Record<DiagnosticLogType, boolean>>({
     info: true,
     warn: true,
@@ -793,6 +801,16 @@ export function Settings({
     window.addEventListener(eventName, refreshDiagnostics);
     return () => {
       window.removeEventListener(eventName, refreshDiagnostics);
+    };
+  }, []);
+
+  useEffect(() => {
+    const refreshOptimizationTraces = () => setOptimizationTraces(readOptimizationTraces());
+    refreshOptimizationTraces();
+    const eventName = optimizationTracesUpdatedEventName();
+    window.addEventListener(eventName, refreshOptimizationTraces);
+    return () => {
+      window.removeEventListener(eventName, refreshOptimizationTraces);
     };
   }, []);
 
@@ -1002,6 +1020,11 @@ export function Settings({
     setGatewayDiagLogs([]);
   }
 
+  function handleClearOptimizationTraces() {
+    clearOptimizationTraces();
+    setOptimizationTraces([]);
+  }
+
   function formatGatewayDiagnostics(entries: DiagnosticLogEntry[]): string {
     return entries
       .map((entry) => `[${new Date(entry.ts).toISOString()}] [${entry.type.toUpperCase()}] ${entry.message}`)
@@ -1046,6 +1069,66 @@ export function Settings({
     } catch (error) {
       console.error("[Entropic] Failed to export diagnostics:", error);
       alert("Failed to export diagnostics.");
+    }
+  }
+
+  function formatOptimizationTrace(trace: OptimizationTraceRecord): string {
+    const header = [
+      "# Entropic Optimization Trace",
+      `id: ${trace.id}`,
+      `started: ${new Date(trace.startedTs).toISOString()}`,
+      `updated: ${new Date(trace.updatedTs).toISOString()}`,
+      `status: ${trace.status}`,
+      `mode: ${trace.mode}`,
+      `session: ${trace.sessionKey}`,
+      `model: ${trace.model}`,
+      trace.runId ? `runId: ${trace.runId}` : null,
+      "",
+    ].filter(Boolean);
+    const body = trace.entries.map(
+      (entry) => `[${new Date(entry.ts).toISOString()}] ${entry.message}`,
+    );
+    return [...header, ...body].join("\n");
+  }
+
+  async function copyOptimizationTrace(trace: OptimizationTraceRecord) {
+    const payload = formatOptimizationTrace(trace);
+    if (!payload.trim()) return;
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(payload);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = payload;
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      alert("Optimization trace copied.");
+    } catch (error) {
+      console.error("[Entropic] Failed to copy optimization trace:", error);
+      alert("Failed to copy optimization trace.");
+    }
+  }
+
+  function exportOptimizationTrace(trace: OptimizationTraceRecord) {
+    const payload = formatOptimizationTrace(trace);
+    if (!payload.trim()) return;
+    try {
+      const blob = new Blob([payload], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const ts = new Date(trace.startedTs).toISOString().replace(/[:.]/g, "-");
+      a.href = url;
+      a.download = `entropic-optimization-trace-${ts}.log`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("[Entropic] Failed to export optimization trace:", error);
+      alert("Failed to export optimization trace.");
     }
   }
 
@@ -1500,8 +1583,8 @@ export function Settings({
               void onConnectionModeChange(value);
             }}
           />
-          <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-4 py-3 text-sm text-[var(--text-secondary)]">
-            {managedMode
+          {(() => {
+            const connectionModeDescription = managedMode
               ? isAuthConfigured
                 ? proxyEnabled
                   ? `Managed Provider is active via ${getProxyUrl()}.`
@@ -1509,61 +1592,100 @@ export function Settings({
                 : "Managed Provider is unavailable in this build because hosted auth is not configured."
               : byokMode
                 ? "Bring Your Own Keys uses provider OAuth or API keys stored locally on this machine."
-                : "Local Models connects your own Ollama, LM Studio, vLLM, or OpenAI-compatible endpoint."}
-          </div>
+                : "";
+            return connectionModeDescription ? (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-4 py-3 text-sm text-[var(--text-secondary)]">
+                {connectionModeDescription}
+              </div>
+            ) : null;
+          })()}
         </div>
       </SettingsGroup>
 
       {localModelsMode && (
-        <SettingsGroup title="Local Models">
-          <div className="p-4 space-y-4">
-            <LocalAiServiceForm
-              config={{ ...localModelConfig, enabled: true }}
-              onChange={(config) => {
-                onLocalModelConfigChange({ ...config, enabled: true });
-              }}
-            />
-            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] overflow-hidden">
-              <div className="px-4 py-3 border-b border-[var(--border-subtle)]">
-                <div className="text-[13px] font-semibold text-[var(--text-primary)]">
-                  Local Performance
-                </div>
-                <div className="text-[12px] text-[var(--text-secondary)] mt-1">
-                  Tune prompt size and sandbox behavior for local models. Chat toggles apply
-                  immediately. Sandbox defaults apply the next time the sandbox starts.
-                </div>
-              </div>
-              <SettingsToggleRow
-                label="Disable tools in local chat"
-                description="Keeps coding/file tool schemas out of normal local chat turns to shrink prompt size."
-                checked={localModePerformanceSettings.disableTools}
-                onChange={(checked) => {
-                  void onLocalModePerformanceSettingsChange({ disableTools: checked });
+        <>
+          <SettingsGroup title="Local Models">
+            <div className="p-4">
+              <LocalAiServiceForm
+                config={{ ...localModelConfig, enabled: true }}
+                onChange={(config) => {
+                  return onLocalModelConfigChange({ ...config, enabled: true });
                 }}
-              />
-              <SettingsToggleRow
-                label="Use lightweight bootstrap context"
-                description="Sends a smaller bootstrap prompt for normal local chat turns."
-                checked={localModePerformanceSettings.lightweightBootstrap}
-                onChange={(checked) => {
-                  void onLocalModePerformanceSettingsChange({
-                    lightweightBootstrap: checked,
-                  });
-                }}
-              />
-              <SettingsToggleRow
-                label="Prefer lighter sandbox defaults"
-                description="Defaults local-model sandbox runs to lighter recall settings instead of heavier memory/context features."
-                checked={localModePerformanceSettings.lightRuntimeDefaults}
-                onChange={(checked) => {
-                  void onLocalModePerformanceSettingsChange({
-                    lightRuntimeDefaults: checked,
-                  });
-                }}
+                onManagedModelActivated={onManagedLocalRuntimeModelActivated}
               />
             </div>
-          </div>
-        </SettingsGroup>
+          </SettingsGroup>
+
+          <SettingsGroup title="Local Performance">
+            <div className="px-4 py-3 text-[12px] text-[var(--text-secondary)]">
+              Tune prompt size and sandbox behavior. Chat toggles apply immediately.
+              Sandbox defaults take effect the next time the sandbox starts.
+            </div>
+            <SettingsToggleRow
+              label="Disable tools in local chat"
+              description="Keeps coding/file tool schemas out of normal local chat turns to shrink prompt size."
+              checked={localModePerformanceSettings.disableTools}
+              onChange={(checked) => {
+                void onLocalModePerformanceSettingsChange({ disableTools: checked });
+              }}
+            />
+            <SettingsToggleRow
+              label="Use lightweight bootstrap context"
+              description="Sends a smaller bootstrap prompt for normal local chat turns."
+              checked={localModePerformanceSettings.lightweightBootstrap}
+              onChange={(checked) => {
+                void onLocalModePerformanceSettingsChange({
+                  lightweightBootstrap: checked,
+                });
+              }}
+            />
+            <SettingsToggleRow
+              label="Prefer lighter sandbox defaults"
+              description="Defaults local-model sandbox runs to lighter recall settings instead of heavier memory/context features."
+              checked={localModePerformanceSettings.lightRuntimeDefaults}
+              onChange={(checked) => {
+                void onLocalModePerformanceSettingsChange({
+                  lightRuntimeDefaults: checked,
+                });
+              }}
+            />
+            <SettingsToggleRow
+              label="Debug local chats"
+              description="Turn on local chat diagnostics and debug routing controls without changing the normal OpenClaw path by itself."
+              checked={localModePerformanceSettings.debugMode}
+              onChange={(checked) => {
+                void onLocalModePerformanceSettingsChange({
+                  debugMode: checked,
+                });
+              }}
+            />
+            <SettingsToggleRow
+              label="In debug mode, bypass OpenClaw"
+              description="Call the local model endpoint directly and reuse only recent chat history. Turn this off to debug the full OpenClaw path instead."
+              checked={localModePerformanceSettings.debugDirectBypass}
+              disabled={!localModePerformanceSettings.debugMode}
+              onChange={(checked) => {
+                void onLocalModePerformanceSettingsChange({
+                  debugDirectBypass: checked,
+                });
+              }}
+            />
+            <SettingsToggleRow
+              label="Capture OpenClaw prompt previews"
+              description="When debugging through OpenClaw, record truncated system/prompt previews in diagnostics so you can inspect what the agent actually sent."
+              checked={localModePerformanceSettings.capturePromptPreview}
+              disabled={
+                !localModePerformanceSettings.debugMode ||
+                localModePerformanceSettings.debugDirectBypass
+              }
+              onChange={(checked) => {
+                void onLocalModePerformanceSettingsChange({
+                  capturePromptPreview: checked,
+                });
+              }}
+            />
+          </SettingsGroup>
+        </>
       )}
 
       {byokMode && (
@@ -1952,6 +2074,108 @@ export function Settings({
                   ))
                 )}
               </div>
+            </div>
+          )}
+        </div>
+
+        <div>
+          <button
+            onClick={() => setOptimizationTracesExpanded((prev) => !prev)}
+            className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-7 h-7 rounded-md bg-[var(--system-gray-6)] text-[var(--text-tertiary)] flex items-center justify-center flex-shrink-0">
+                <Activity className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-[14px] font-medium text-[var(--text-primary)]">Optimization Traces</div>
+                <div className="text-[12px] text-[var(--text-secondary)]">Per-run local model traces recorded from Chat.</div>
+              </div>
+            </div>
+            <ChevronDown
+              className={clsx(
+                "w-4 h-4 text-[var(--text-tertiary)] transition-transform duration-200",
+                optimizationTracesExpanded ? "rotate-180" : "",
+              )}
+            />
+          </button>
+          {optimizationTracesExpanded && (
+            <div className="px-4 pb-4 space-y-3">
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  onClick={() => setOptimizationTraces(readOptimizationTraces())}
+                  className="px-2 py-1 text-xs rounded-md border border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)]"
+                >
+                  Refresh
+                </button>
+                <button
+                  onClick={handleClearOptimizationTraces}
+                  className="px-2 py-1 text-xs rounded-md border border-red-500/20 text-red-500 hover:bg-red-500/10"
+                >
+                  Clear
+                </button>
+              </div>
+
+              {optimizationTraces.length === 0 ? (
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] p-3 text-xs text-[var(--text-tertiary)]">
+                  No optimization traces yet. In Chat, click `Record Optimization Trace`, then send one local chat turn.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {optimizationTraces.map((trace) => (
+                    <div
+                      key={trace.id}
+                      className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] p-3 space-y-2"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-[var(--text-primary)]">
+                            {trace.model}
+                          </div>
+                          <div className="text-xs text-[var(--text-secondary)]">
+                            {trace.mode} · {trace.status} · {new Date(trace.startedTs).toLocaleString()}
+                          </div>
+                          {trace.runId ? (
+                            <div className="text-[11px] font-mono text-[var(--text-tertiary)]">
+                              runId {trace.runId}
+                            </div>
+                          ) : null}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => void copyOptimizationTrace(trace)}
+                            className="px-2 py-1 text-xs rounded-md border border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)] flex items-center gap-1"
+                          >
+                            <Copy className="w-3 h-3" />
+                            Copy
+                          </button>
+                          <button
+                            onClick={() => exportOptimizationTrace(trace)}
+                            className="px-2 py-1 text-xs rounded-md border border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--system-gray-6)] flex items-center gap-1"
+                          >
+                            <Download className="w-3 h-3" />
+                            Export
+                          </button>
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] max-h-48 overflow-auto p-2 space-y-1 font-mono text-[11px]">
+                        {trace.entries.length === 0 ? (
+                          <div className="text-[var(--text-tertiary)]">No trace entries captured.</div>
+                        ) : (
+                          trace.entries.map((entry, index) => (
+                            <div key={`${trace.id}-${entry.ts}-${index}`} className="text-[var(--text-secondary)] break-words">
+                              <span className="text-[var(--text-tertiary)]">
+                                {new Date(entry.ts).toLocaleTimeString()}
+                              </span>{" "}
+                              {entry.message}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>

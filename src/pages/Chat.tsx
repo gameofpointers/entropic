@@ -49,6 +49,7 @@ import {
   getCachedIntegrationProviders,
   getIntegrations,
   connectIntegration,
+  hasPendingIntegrationImports,
 } from "../lib/integrations";
 import {
   getVisibleQuickActions,
@@ -68,7 +69,13 @@ import {
   type TaskBoardChatIntent,
 } from "../lib/taskBoard";
 import { resolveGatewayAuth } from "../lib/gateway-auth";
-import { appendDiagnosticLog } from "../lib/diagnostics";
+import {
+  appendDiagnosticLog,
+  appendOptimizationTraceLine,
+  attachOptimizationTraceRunId,
+  beginOptimizationTrace,
+  finishOptimizationTrace,
+} from "../lib/diagnostics";
 import { entropicSitePath } from "../lib/buildProfile";
 import {
   workspaceBrowserUrl,
@@ -185,6 +192,22 @@ type ChatImageGenerationResponse = {
   }>;
 };
 
+type DirectLocalChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+type DirectLocalChatDebugResponse = {
+  text: string;
+  provider: string;
+  model: string;
+  baseUrl: string;
+  durationMs: number;
+  historyMessages: number;
+  inputChars: number;
+  responseChars: number;
+};
+
 const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
 const TERMINAL_DEFAULT_CWD = "/data/workspace";
 const DEFAULT_COMPOSER_MODE: ComposerMode = "chat";
@@ -196,6 +219,111 @@ const CHAT_WORKSPACE_PREFIXES = [
 const CHAT_WORKSPACE_PATH_RE = /((?:\/data\/(?:\.openclaw\/)?workspace|\/home\/node\/\.openclaw\/workspace)(?:\/[^\s`"'<>]+)?)/g;
 const FINAL_RESPONSE_RECOVERY_RETRY_MS = 1200;
 const FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS = 2;
+const ACTIVE_RUN_SETTLE_IDLE_MS = 2000;
+const DIRECT_LOCAL_DEBUG_HISTORY_LIMIT = 12;
+const DIRECT_LOCAL_DEBUG_HISTORY_CHAR_LIMIT = 12_000;
+const DIRECT_LOCAL_DEBUG_PREVIEW_LIMIT = 4;
+const DIRECT_LOCAL_DEBUG_PREVIEW_CHARS = 220;
+const OPTIMIZATION_TRACE_RESPONSE_PREVIEW_CHARS = 320;
+const DEBUG_THINK_BLOCK_PREVIEW_CHARS = 120;
+
+type LeadingThinkBlocks = {
+  thoughts: string[];
+  answer: string;
+};
+
+function buildDirectLocalDebugHistory(messages: Message[]): DirectLocalChatMessage[] {
+  const normalized = messages
+    .filter((message) => message.role === "user" || message.role === "assistant")
+    .filter((message) => message.kind !== "toolResult")
+    .map((message) => ({
+      role: message.role,
+      content: message.content.trim(),
+    }))
+    .filter((message) => message.content.length > 0);
+
+  const limited = normalized.slice(-DIRECT_LOCAL_DEBUG_HISTORY_LIMIT);
+  const result: DirectLocalChatMessage[] = [];
+  let charBudget = DIRECT_LOCAL_DEBUG_HISTORY_CHAR_LIMIT;
+
+  for (let index = limited.length - 1; index >= 0; index -= 1) {
+    const entry = limited[index]!;
+    if (charBudget <= 0) {
+      break;
+    }
+    const content =
+      entry.content.length > charBudget
+        ? entry.content.slice(entry.content.length - charBudget)
+        : entry.content;
+    result.unshift({
+      role: entry.role,
+      content,
+    });
+    charBudget -= content.length;
+  }
+
+  return result;
+}
+
+function buildDirectLocalDebugPreview(messages: DirectLocalChatMessage[]): string[] {
+  const truncate = (value: string): string => {
+    const normalized = value.replace(/\s+/g, " ").trim();
+    if (normalized.length <= DIRECT_LOCAL_DEBUG_PREVIEW_CHARS) {
+      return normalized;
+    }
+    return `${normalized.slice(0, Math.max(0, DIRECT_LOCAL_DEBUG_PREVIEW_CHARS - 1))}…`;
+  };
+
+  return messages
+    .slice(-DIRECT_LOCAL_DEBUG_PREVIEW_LIMIT)
+    .map((entry, index, items) => {
+      const ordinal = items.length - (items.length - index);
+      return `direct local debug payload[${ordinal + 1}/${items.length}] ${entry.role}=${JSON.stringify(truncate(entry.content))}`;
+    });
+}
+
+function splitLeadingThinkBlocks(raw: string): LeadingThinkBlocks | null {
+  let remaining = raw.trimStart();
+  const thoughts: string[] = [];
+
+  while (remaining.startsWith("<think>")) {
+    const endIndex = remaining.indexOf("</think>");
+    if (endIndex === -1) {
+      break;
+    }
+    const content = remaining.slice("<think>".length, endIndex).trim();
+    thoughts.push(content);
+    remaining = remaining.slice(endIndex + "</think>".length).replace(/^\s+/, "");
+  }
+
+  if (!thoughts.length) {
+    return null;
+  }
+
+  return {
+    thoughts,
+    answer: remaining,
+  };
+}
+
+function summarizeThinkBlock(raw: string): string {
+  const normalized = raw.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "No visible thought text";
+  }
+  if (normalized.length <= DEBUG_THINK_BLOCK_PREVIEW_CHARS) {
+    return normalized;
+  }
+  return `${normalized.slice(0, DEBUG_THINK_BLOCK_PREVIEW_CHARS - 1)}…`;
+}
+
+function truncateOptimizationTracePreview(value: string, maxChars = OPTIMIZATION_TRACE_RESPONSE_PREVIEW_CHARS): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxChars - 1))}…`;
+}
 
 function trimChatWorkspaceToken(raw: string): string {
   return raw
@@ -1170,6 +1298,7 @@ export function Chat({
   const [creditsCheckoutLoading, setCreditsCheckoutLoading] = useState(false);
   const [componentMountedAt] = useState(Date.now());
   const [showGatewayOfflineCta, setShowGatewayOfflineCta] = useState(false);
+  const [optimizationTraceArmed, setOptimizationTraceArmed] = useState(false);
   const runTimingsRef = useRef<Record<string, {
     startedAt: number;
     ackAt?: number;
@@ -1227,7 +1356,9 @@ export function Chat({
   const activeRunIdRef = useRef<string | null>(null);
   const activeRunSessionRef = useRef<string | null>(null);
   const activeRunTimeoutRef = useRef<number | null>(null);
+  const activeRunSettleTimerRef = useRef<number | null>(null);
   const runSessionKeyRef = useRef<Record<string, string>>({});
+  const runOptimizationTraceRef = useRef<Record<string, string>>({});
   const runHistoryRecoveryRef = useRef<Record<string, boolean>>({});
   const gatewaySessionKeysRef = useRef<Set<string>>(new Set());
   const visibleMessagesSessionRef = useRef<string | null>(null);
@@ -1240,6 +1371,24 @@ export function Chat({
   const activeComposerMode = currentSession
     ? composerModeBySession[currentSession] || DEFAULT_COMPOSER_MODE
     : DEFAULT_COMPOSER_MODE;
+  const localChatDebugModeActive =
+    localModelsMode &&
+    activeComposerMode === "chat" &&
+    effectiveLocalModePerformanceSettings.debugMode;
+  const directLocalDebugBypassActive =
+    localChatDebugModeActive && effectiveLocalModePerformanceSettings.debugDirectBypass;
+  const activeDirectLocalDebugHistory = useMemo(
+    () => buildDirectLocalDebugHistory(messages),
+    [messages],
+  );
+  const activeDirectLocalDebugHistoryChars = useMemo(
+    () => activeDirectLocalDebugHistory.reduce((total, entry) => total + entry.content.length, 0),
+    [activeDirectLocalDebugHistory],
+  );
+  const activeDirectLocalDebugPreview = useMemo(
+    () => buildDirectLocalDebugPreview(activeDirectLocalDebugHistory),
+    [activeDirectLocalDebugHistory],
+  );
   const activeTerminalState = currentSession
     ? terminalStateBySession[currentSession] || { cwd: TERMINAL_DEFAULT_CWD }
     : { cwd: TERMINAL_DEFAULT_CWD };
@@ -2111,6 +2260,46 @@ export function Chat({
     });
   }
 
+  function beginOptimizationTraceForSend(params: {
+    mode: "direct-local-debug" | "openclaw-local-chat";
+    sessionKey: string;
+    model: string;
+    lines?: string[];
+  }): string {
+    const traceId = beginOptimizationTrace({
+      mode: params.mode,
+      sessionKey: params.sessionKey,
+      model: params.model,
+    });
+    appendOptimizationTraceLine(
+      traceId,
+      `trace start mode=${params.mode} session=${params.sessionKey} model=${params.model}`,
+    );
+    for (const line of params.lines || []) {
+      appendOptimizationTraceLine(traceId, line);
+    }
+    return traceId;
+  }
+
+  function appendOptimizationTracePreview(traceId: string, prefix: string, value: string) {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    appendOptimizationTraceLine(
+      traceId,
+      `${prefix}=${JSON.stringify(truncateOptimizationTracePreview(trimmed))}`,
+    );
+  }
+
+  function completeRunOptimizationTrace(
+    runId: string,
+    status: "completed" | "error" | "aborted",
+  ) {
+    const traceId = runOptimizationTraceRef.current[runId];
+    if (!traceId) return;
+    finishOptimizationTrace(traceId, status);
+    delete runOptimizationTraceRef.current[runId];
+  }
+
   function sortOutboxEntries(entries: PersistedPendingSend[]): PersistedPendingSend[] {
     return [...entries].sort((a, b) => {
       if (a.nextAttemptAt !== b.nextAttemptAt) {
@@ -2212,6 +2401,124 @@ export function Chat({
       window.clearTimeout(activeRunTimeoutRef.current);
       activeRunTimeoutRef.current = null;
     }
+    if (activeRunSettleTimerRef.current) {
+      window.clearTimeout(activeRunSettleTimerRef.current);
+      activeRunSettleTimerRef.current = null;
+    }
+  }
+
+  function isRenderableAssistantMessage(message: Message | null | undefined): boolean {
+    if (!message || message.role !== "assistant") return false;
+    return Boolean(
+      message.content.trim() ||
+        (message.assistantPayload &&
+          (message.assistantPayload.events.length > 0 ||
+            message.assistantPayload.errors.length > 0)),
+    );
+  }
+
+  function findVisibleAssistantMessage(runId: string, sessionKey?: string | null): Message | null {
+    if (!runId) return null;
+    const sources: Message[][] = [];
+    const seen = new Set<Message[]>();
+    const pushSource = (items?: Message[] | null) => {
+      if (!items || seen.has(items)) return;
+      seen.add(items);
+      sources.push(items);
+    };
+
+    if (sessionKey) {
+      pushSource(sessionMessagesRef.current[sessionKey] || []);
+    }
+    if (currentSessionRef.current) {
+      pushSource(sessionMessagesRef.current[currentSessionRef.current] || []);
+    }
+    if (!sessionKey || currentSessionRef.current === sessionKey) {
+      pushSource(messages);
+    }
+
+    for (const items of sources) {
+      for (let index = items.length - 1; index >= 0; index -= 1) {
+        const message = items[index];
+        if (message?.id === runId && isRenderableAssistantMessage(message)) {
+          return message;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function finalizeVisibleAssistantRun(
+    runId: string,
+    sessionKey: string,
+    reason: string,
+    optimizationTraceId?: string,
+  ): boolean {
+    const visibleAssistant = findVisibleAssistantMessage(runId, sessionKey);
+    if (!visibleAssistant) {
+      return false;
+    }
+    setIsLoading(false);
+    setThinkingStatus(null);
+    setError(null);
+    addDiag(`${reason} runId=${runId} (using streamed assistant content)`);
+    schedulePersist();
+    if (optimizationTraceId) {
+      appendOptimizationTraceLine(
+        optimizationTraceId,
+        `${reason} runId=${runId} (using streamed assistant content)`,
+      );
+      appendOptimizationTracePreview(
+        optimizationTraceId,
+        "trace assistantPreview",
+        visibleAssistant.content,
+      );
+      completeRunOptimizationTrace(runId, "completed");
+    }
+    return true;
+  }
+
+  function scheduleActiveRunSettle(runId: string) {
+    if (!runId || activeRunIdRef.current !== runId) return;
+    if (activeRunSettleTimerRef.current) {
+      window.clearTimeout(activeRunSettleTimerRef.current);
+      activeRunSettleTimerRef.current = null;
+    }
+    activeRunSettleTimerRef.current = window.setTimeout(() => {
+      if (activeRunIdRef.current !== runId) return;
+      const lastActivity = lastEventByRunIdRef.current[runId] ?? 0;
+      if (Date.now() - lastActivity < ACTIVE_RUN_SETTLE_IDLE_MS) {
+        scheduleActiveRunSettle(runId);
+        return;
+      }
+      const sessionKey =
+        activeRunSessionRef.current ||
+        runSessionKeyRef.current[runId] ||
+        currentSessionRef.current ||
+        "";
+      const visibleAssistant = findVisibleAssistantMessage(runId, sessionKey);
+      if (!visibleAssistant) {
+        return;
+      }
+      setIsLoading(false);
+      setThinkingStatus(null);
+      addDiag(`auto-settled response after quiet period runId=${runId}`);
+      const optimizationTraceId = runOptimizationTraceRef.current[runId];
+      if (optimizationTraceId) {
+        appendOptimizationTraceLine(
+          optimizationTraceId,
+          `trace auto_settled_after_quiet_period=${ACTIVE_RUN_SETTLE_IDLE_MS}ms`,
+        );
+        appendOptimizationTracePreview(
+          optimizationTraceId,
+          "trace assistantPreview",
+          visibleAssistant.content,
+        );
+        completeRunOptimizationTrace(runId, "completed");
+      }
+      clearActiveRunTracking();
+    }, ACTIVE_RUN_SETTLE_IDLE_MS);
   }
 
   function recoverInterruptedActiveRun(reason: string) {
@@ -2625,23 +2932,9 @@ export function Chat({
         setConnected(true);
         setIsConnecting(false);
         setError(null);
+        setLastGatewayError(null);
         loadSessions();
-        syncAllIntegrationsToGateway()
-          .then((providers) => {
-            addDiag(`integrations synced: ${providers.length ? providers.join(", ") : "none"}`);
-            if (providers.length === 0) {
-              getCachedIntegrationProviders()
-                .then((cached) => {
-                  if (cached.length > 0) {
-                    addDiag("integrations missing secrets; reconnect in Integrations");
-                  }
-                })
-                .catch(() => {});
-            }
-          })
-          .catch((err) => {
-            addDiag(`integrations sync failed: ${String(err)}`);
-          });
+        void maybeSyncIntegrationsOnConnect();
         addDiag("gateway connected");
       };
       const onDisconnected = () => {
@@ -2828,14 +3121,35 @@ export function Chat({
     return null;
   }
 
-  function formatAgentDiagnostic(evt: AgentEvent): string | null {
-    if (evt.stream !== "diagnostic") return null;
+  function formatAgentDiagnostics(evt: AgentEvent): string[] {
+    if (evt.stream !== "diagnostic") return [];
     const kind = typeof evt.data.kind === "string" ? evt.data.kind : "";
-    if (kind !== "context") return null;
     const readNumber = (value: unknown): number | null =>
       typeof value === "number" && Number.isFinite(value) ? value : null;
     const readString = (value: unknown): string | null =>
       typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+
+    if (kind === "contextPreview") {
+      const provider = readString(evt.data.provider);
+      const model = readString(evt.data.model);
+      const systemPreview = readString(evt.data.systemPromptPreview);
+      const promptPreview = readString(evt.data.promptPreview);
+      const historyPreview = readString(evt.data.historyPreview);
+      const lines: string[] = [];
+      const target = provider && model ? `${provider}/${model}` : "run";
+      if (systemPreview) {
+        lines.push(`context preview ${target} system=${JSON.stringify(systemPreview)}`);
+      }
+      if (promptPreview) {
+        lines.push(`context preview ${target} prompt=${JSON.stringify(promptPreview)}`);
+      }
+      if (historyPreview) {
+        lines.push(`context preview ${target} history=${JSON.stringify(historyPreview)}`);
+      }
+      return lines;
+    }
+
+    if (kind !== "context") return [];
 
     const numCtx = readNumber(evt.data.numCtx);
     const systemPromptChars = readNumber(evt.data.systemPromptChars);
@@ -2864,20 +3178,27 @@ export function Chat({
       disableTools ? "disableTools=1" : "disableTools=0",
     ].filter(Boolean);
 
-    return parts.join(" ");
+    return [parts.join(" ")];
   }
 
   function handleAgentEvent(event: AgentEvent) {
     if (!event?.runId || event.runId !== activeRunIdRef.current) return;
     lastEventByRunIdRef.current[event.runId] = Date.now();
     refreshActiveRunTimeout(event.runId);
-    const diagnostic = formatAgentDiagnostic(event);
-    if (diagnostic) {
+    const diagnostics = formatAgentDiagnostics(event);
+    const optimizationTraceId = runOptimizationTraceRef.current[event.runId];
+    for (const diagnostic of diagnostics) {
       addDiag(diagnostic);
+      if (optimizationTraceId) {
+        appendOptimizationTraceLine(optimizationTraceId, diagnostic);
+      }
     }
     const status = describeAgentActivity(event);
     if (status) {
       setThinkingStatus(status);
+      if (optimizationTraceId) {
+        appendOptimizationTraceLine(optimizationTraceId, `trace status=${status}`);
+      }
     }
   }
 
@@ -2888,7 +3209,18 @@ export function Chat({
     runHistoryRecoveryRef.current[runId] = true;
     setIsLoading(true);
     try {
+      const optimizationTraceId = runOptimizationTraceRef.current[runId];
       for (let attempt = 0; attempt < FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS; attempt += 1) {
+        if (
+          finalizeVisibleAssistantRun(
+            runId,
+            sessionKey,
+            `final recovery satisfied from in-memory assistant attempt=${attempt + 1}`,
+            optimizationTraceId,
+          )
+        ) {
+          return;
+        }
         const client = clientRef.current;
         if (!client || !client.isConnected()) {
           if (attempt + 1 < FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS) {
@@ -2896,6 +3228,16 @@ export function Chat({
             addDiag(`final recovery waiting for reconnect runId=${runId} attempt=${attempt + 1}`);
             await delay(FINAL_RESPONSE_RECOVERY_RETRY_MS);
             continue;
+          }
+          if (
+            finalizeVisibleAssistantRun(
+              runId,
+              sessionKey,
+              `final recovery fell back to in-memory assistant after disconnect attempt=${attempt + 1}`,
+              optimizationTraceId,
+            )
+          ) {
+            return;
           }
           setError(
             buildNoVisibleResponseMessage({
@@ -2930,6 +3272,16 @@ export function Chat({
               await delay(FINAL_RESPONSE_RECOVERY_RETRY_MS);
               continue;
             }
+            if (
+              finalizeVisibleAssistantRun(
+                runId,
+                sessionKey,
+                `final recovery fell back to in-memory assistant after empty history attempt=${attempt + 1}`,
+                optimizationTraceId,
+              )
+            ) {
+              return;
+            }
             setError(
               buildNoVisibleResponseMessage({
                 lastGatewayError,
@@ -2947,6 +3299,16 @@ export function Chat({
               addDiag(`final recovery retry runId=${runId} (normalize failed)`);
               await delay(FINAL_RESPONSE_RECOVERY_RETRY_MS);
               continue;
+            }
+            if (
+              finalizeVisibleAssistantRun(
+                runId,
+                sessionKey,
+                `final recovery fell back to in-memory assistant after normalize failure attempt=${attempt + 1}`,
+                optimizationTraceId,
+              )
+            ) {
+              return;
             }
             setError(
               buildNoVisibleResponseMessage({
@@ -2970,6 +3332,16 @@ export function Chat({
               await delay(FINAL_RESPONSE_RECOVERY_RETRY_MS);
               continue;
             }
+            if (
+              finalizeVisibleAssistantRun(
+                runId,
+                sessionKey,
+                `final recovery fell back to in-memory assistant after empty normalized payload attempt=${attempt + 1}`,
+                optimizationTraceId,
+              )
+            ) {
+              return;
+            }
             setError(
               buildNoVisibleResponseMessage({
                 lastGatewayError,
@@ -2981,20 +3353,20 @@ export function Chat({
           }
 
           setMessages((prev) => {
+            let nextMessages: Message[];
             const existingIdx = prev.findIndex((m) => m.id === runId && m.role === "assistant");
             if (existingIdx >= 0) {
-              const updated = [...prev];
-              updated[existingIdx] = {
-                ...updated[existingIdx],
+              nextMessages = [...prev];
+              nextMessages[existingIdx] = {
+                ...nextMessages[existingIdx],
                 content: text,
-                kind: normalized.kind ?? updated[existingIdx].kind,
-                toolName: normalized.toolName ?? updated[existingIdx].toolName,
-                assistantPayload: normalized.assistantPayload ?? updated[existingIdx].assistantPayload,
-                sentAt: updated[existingIdx].sentAt ?? normalized.sentAt ?? Date.now(),
+                kind: normalized.kind ?? nextMessages[existingIdx].kind,
+                toolName: normalized.toolName ?? nextMessages[existingIdx].toolName,
+                assistantPayload: normalized.assistantPayload ?? nextMessages[existingIdx].assistantPayload,
+                sentAt: nextMessages[existingIdx].sentAt ?? normalized.sentAt ?? Date.now(),
               };
-              return updated;
-            }
-            return [
+            } else {
+              nextMessages = [
               ...prev,
               {
                 id: runId,
@@ -3005,7 +3377,10 @@ export function Chat({
                 assistantPayload: normalized.assistantPayload,
                 sentAt: normalized.sentAt ?? Date.now(),
               },
-            ];
+              ];
+            }
+            sessionMessagesRef.current[sessionKey] = nextMessages;
+            return nextMessages;
           });
           setThinkingStatus(null);
           setError(null);
@@ -3015,6 +3390,14 @@ export function Chat({
             setShowOutOfCreditsModal(true);
           }
           addDiag(`recovered final response from history runId=${runId} attempt=${attempt + 1}`);
+          if (optimizationTraceId) {
+            appendOptimizationTraceLine(
+              optimizationTraceId,
+              `trace recovered final response from history attempt=${attempt + 1}`,
+            );
+            appendOptimizationTracePreview(optimizationTraceId, "trace assistantPreview", text);
+            completeRunOptimizationTrace(runId, "completed");
+          }
           return;
         } catch (err) {
           if (attempt + 1 < FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS) {
@@ -3022,6 +3405,16 @@ export function Chat({
             addDiag(`final recovery retry runId=${runId}: ${String(err)}`);
             await delay(FINAL_RESPONSE_RECOVERY_RETRY_MS);
             continue;
+          }
+          if (
+            finalizeVisibleAssistantRun(
+              runId,
+              sessionKey,
+              `final recovery fell back to in-memory assistant after error attempt=${attempt + 1}`,
+              optimizationTraceId,
+            )
+          ) {
+            return;
           }
           setError(
             buildNoVisibleResponseMessage({
@@ -3031,6 +3424,13 @@ export function Chat({
           );
           setIsLoading(false);
           addDiag(`final recovery failed runId=${runId}: ${String(err)}`);
+          if (optimizationTraceId) {
+            appendOptimizationTraceLine(
+              optimizationTraceId,
+              `trace final recovery failed: ${String(err)}`,
+            );
+            completeRunOptimizationTrace(runId, "error");
+          }
           return;
         }
       }
@@ -3065,6 +3465,7 @@ export function Chat({
         : eventRunId
           ? runSessionKeyRef.current[eventRunId] || ""
           : "";
+    const optimizationTraceId = eventRunId ? runOptimizationTraceRef.current[eventRunId] : undefined;
     const isActiveRun = Boolean(eventRunId && activeRunIdRef.current === eventRunId);
     if (isActiveRun) {
       lastEventByRunIdRef.current[eventRunId!] = Date.now();
@@ -3109,6 +3510,10 @@ export function Chat({
       );
       if (text || hasRenderableAssistantPayload) {
         setThinkingStatus(null);
+        setLastGatewayError(null);
+        if (event.state === "delta" && eventRunId && activeRunIdRef.current === eventRunId) {
+          scheduleActiveRunSettle(eventRunId);
+        }
         if (isProxyAuthFailure(text)) {
           triggerProxyAuthRecovery("chat message");
         }
@@ -3117,23 +3522,29 @@ export function Chat({
           if (timings && !timings.firstDeltaAt) {
             timings.firstDeltaAt = Date.now();
             addDiag(`timing first_delta runId=${eventRunId} t=${timings.firstDeltaAt - timings.startedAt}ms`);
+            if (optimizationTraceId) {
+              appendOptimizationTraceLine(
+                optimizationTraceId,
+                `trace timing first_delta=${timings.firstDeltaAt - timings.startedAt}ms`,
+              );
+            }
           }
         }
         setMessages(prev => {
+          let nextMessages: Message[];
           const existingIdx = prev.findIndex(m => m.id === eventRunId && m.role === "assistant");
           if (existingIdx >= 0) {
-            const updated = [...prev];
-            updated[existingIdx] = {
-              ...updated[existingIdx],
+            nextMessages = [...prev];
+            nextMessages[existingIdx] = {
+              ...nextMessages[existingIdx],
               content: text,
-              kind: normalized?.kind ?? updated[existingIdx].kind,
-              toolName: normalized?.toolName ?? updated[existingIdx].toolName,
-              assistantPayload: normalized?.assistantPayload ?? updated[existingIdx].assistantPayload,
-              sentAt: updated[existingIdx].sentAt ?? normalized?.sentAt ?? Date.now(),
+              kind: normalized?.kind ?? nextMessages[existingIdx].kind,
+              toolName: normalized?.toolName ?? nextMessages[existingIdx].toolName,
+              assistantPayload: normalized?.assistantPayload ?? nextMessages[existingIdx].assistantPayload,
+              sentAt: nextMessages[existingIdx].sentAt ?? normalized?.sentAt ?? Date.now(),
             };
-            return updated;
-          }
-          return [
+          } else {
+            nextMessages = [
             ...prev,
             {
               id: eventRunId || crypto.randomUUID(),
@@ -3144,7 +3555,12 @@ export function Chat({
               assistantPayload: normalized?.assistantPayload,
               sentAt: normalized?.sentAt ?? Date.now(),
             },
-          ];
+            ];
+          }
+          if (knownSessionKey) {
+            sessionMessagesRef.current[knownSessionKey] = nextMessages;
+          }
+          return nextMessages;
         });
         if (keepComposerFocus) {
           requestAnimationFrame(() => {
@@ -3164,6 +3580,12 @@ export function Chat({
           if (timings && !timings.toolSeenAt) {
             timings.toolSeenAt = Date.now();
             addDiag(`timing tool_result runId=${eventRunId} t=${timings.toolSeenAt - timings.startedAt}ms`);
+            if (optimizationTraceId) {
+              appendOptimizationTraceLine(
+                optimizationTraceId,
+                `trace timing tool_result=${timings.toolSeenAt - timings.startedAt}ms`,
+              );
+            }
           }
         }
         // Throttled persist during streaming: save every 5s so partial responses
@@ -3175,11 +3597,22 @@ export function Chat({
           }, 5000);
         }
       } else if (event.state === "final" && eventRunId && knownSessionKey) {
-        addDiag(`final event missing payload runId=${eventRunId}; attempting history recovery`);
-        if (event.message) {
-          addDiag(`final raw runId=${eventRunId} ${summarizeGatewayMessageForDiag(event.message as GatewayMessage)}`);
+        if (
+          finalizeVisibleAssistantRun(
+            eventRunId,
+            knownSessionKey,
+            "final event missing payload; preserving streamed assistant",
+            optimizationTraceId,
+          )
+        ) {
+          addDiag(`final event missing payload runId=${eventRunId}; kept in-memory assistant`);
+        } else {
+          addDiag(`final event missing payload runId=${eventRunId}; attempting history recovery`);
+          if (event.message) {
+            addDiag(`final raw runId=${eventRunId} ${summarizeGatewayMessageForDiag(event.message as GatewayMessage)}`);
+          }
+          void recoverFinalRunFromHistory(eventRunId, knownSessionKey);
         }
-        void recoverFinalRunFromHistory(eventRunId, knownSessionKey);
       }
       if (event.state === "final") {
         setIsLoading(false);
@@ -3192,6 +3625,16 @@ export function Chat({
         if (timings && !timings.finalAt) {
           timings.finalAt = Date.now();
           addDiag(`timing final runId=${eventRunId} t=${timings.finalAt - timings.startedAt}ms`);
+          if (optimizationTraceId) {
+            appendOptimizationTraceLine(
+              optimizationTraceId,
+              `trace timing final=${timings.finalAt - timings.startedAt}ms`,
+            );
+          }
+        }
+        if (optimizationTraceId && (text || hasRenderableAssistantPayload)) {
+          appendOptimizationTracePreview(optimizationTraceId, "trace assistantPreview", text);
+          completeRunOptimizationTrace(eventRunId, "completed");
         }
         const revertModel = runRevertModelRef.current[eventRunId];
         if (revertModel && currentSessionRef.current && clientRef.current) {
@@ -3263,6 +3706,10 @@ export function Chat({
       } else {
         addDiag(`chat error: ${rawErrorMessage}`);
       }
+      if (optimizationTraceId) {
+        appendOptimizationTraceLine(optimizationTraceId, `trace error: ${rawErrorMessage}`);
+        completeRunOptimizationTrace(eventRunId, "error");
+      }
       if (isPolicyMessageRemovedError(rawErrorMessage)) {
         // The provider stripped all messages (e.g. internal-only history). Reset
         // the session context on the gateway so the next send starts clean.
@@ -3286,6 +3733,10 @@ export function Chat({
         delete runSessionKeyRef.current[eventRunId];
       }
       addDiag("chat aborted");
+      if (optimizationTraceId) {
+        appendOptimizationTraceLine(optimizationTraceId, "trace aborted");
+        completeRunOptimizationTrace(eventRunId, "aborted");
+      }
     }
 
   }
@@ -3841,6 +4292,36 @@ export function Chat({
     }
   }
 
+  async function maybeSyncIntegrationsOnConnect() {
+    const now = Date.now();
+    if (now - lastIntegrationsSyncRef.current <= 60_000) {
+      return;
+    }
+    let hasPending = false;
+    try {
+      hasPending = await hasPendingIntegrationImports();
+    } catch (err) {
+      addDiag(`integrations pending-import check failed: ${String(err)}`);
+      return;
+    }
+    if (!hasPending) {
+      return;
+    }
+    lastIntegrationsSyncRef.current = now;
+    try {
+      const providers = await syncAllIntegrationsToGateway();
+      addDiag(`integrations synced: ${providers.length ? providers.join(", ") : "none"}`);
+      if (providers.length === 0) {
+        const cached = await getCachedIntegrationProviders().catch(() => []);
+        if (cached.length > 0) {
+          addDiag("integrations missing secrets; reconnect in Integrations");
+        }
+      }
+    } catch (err) {
+      addDiag(`integrations sync failed: ${String(err)}`);
+    }
+  }
+
   async function dispatchPendingSend(entry: PersistedPendingSend): Promise<string> {
     const liveClient = clientRef.current;
     if (!liveClient || !liveClient.isConnected()) {
@@ -3865,6 +4346,14 @@ export function Chat({
     );
     const sessionComposerMode =
       composerModeBySessionRef.current[entry.sessionKey] || DEFAULT_COMPOSER_MODE;
+    const recordOptimizationTraceForSend =
+      optimizationTraceArmed && localModelsMode && sessionComposerMode === "chat";
+    const localChatDebugModeEnabled =
+      localModelsMode &&
+      sessionComposerMode === "chat" &&
+      effectiveLocalModePerformanceSettings.debugMode;
+    const localChatDirectBypassEnabled =
+      localChatDebugModeEnabled && effectiveLocalModePerformanceSettings.debugDirectBypass;
     const localChatSendOptions =
       localModelsMode && sessionComposerMode === "chat"
         ? {
@@ -3872,6 +4361,11 @@ export function Chat({
             bootstrapContextMode: effectiveLocalModePerformanceSettings.lightweightBootstrap
               ? LOCAL_FAST_CHAT_BOOTSTRAP_MODE
               : undefined,
+            debugPromptCapture:
+              (localChatDebugModeEnabled &&
+                !localChatDirectBypassEnabled &&
+                effectiveLocalModePerformanceSettings.capturePromptPreview) ||
+              recordOptimizationTraceForSend,
           }
         : null;
     const useLocalChatTuning =
@@ -3883,6 +4377,25 @@ export function Chat({
         `local chat tuning: disableTools=${localChatSendOptions?.disableTools ? 1 : 0} bootstrap=${localChatSendOptions?.bootstrapContextMode || "full"}`,
       );
     }
+    if (localChatSendOptions?.debugPromptCapture) {
+      addDiag("local chat debug: capturePromptPreview=1");
+    }
+    let optimizationTraceId: string | null = null;
+    if (recordOptimizationTraceForSend) {
+      const traceHistory = buildDirectLocalDebugHistory(sessionMessagesRef.current[entry.sessionKey] || []);
+      const traceLines = [
+        `trace settings disableTools=${localChatSendOptions?.disableTools ? 1 : 0} bootstrap=${localChatSendOptions?.bootstrapContextMode || "full"} capturePromptPreview=${localChatSendOptions?.debugPromptCapture ? 1 : 0}`,
+        `trace session payload messages=${traceHistory.length} inputChars=${traceHistory.reduce((total, item) => total + item.content.length, 0)}`,
+        ...buildDirectLocalDebugPreview(traceHistory),
+      ];
+      optimizationTraceId = beginOptimizationTraceForSend({
+        mode: "openclaw-local-chat",
+        sessionKey: entry.sessionKey,
+        model: localModelConfig?.modelName || chosenModel || "unknown",
+        lines: traceLines,
+      });
+      setOptimizationTraceArmed(false);
+    }
     const runId = await liveClient.sendMessage(
       entry.sessionKey,
       entry.outboundMessageContent,
@@ -3891,7 +4404,16 @@ export function Chat({
       useLocalChatTuning ? localChatSendOptions ?? undefined : undefined,
     );
     if (!runId) {
+      if (optimizationTraceId) {
+        appendOptimizationTraceLine(optimizationTraceId, "trace error: failed to start response stream");
+        finishOptimizationTrace(optimizationTraceId, "error");
+      }
       throw new Error("Failed to start response stream");
+    }
+    if (optimizationTraceId) {
+      attachOptimizationTraceRunId(optimizationTraceId, runId);
+      runOptimizationTraceRef.current[runId] = optimizationTraceId;
+      appendOptimizationTraceLine(optimizationTraceId, `trace runId=${runId}`);
     }
 
     scheduleActiveRunTimeout(runId, entry.sessionKey);
@@ -3899,6 +4421,13 @@ export function Chat({
     runTimingsRef.current[runId] = { startedAt: sendStart, ackAt: Date.now() };
     addDiag(`timing send_ack runId=${runId} t=${runTimingsRef.current[runId].ackAt! - sendStart}ms`);
     addDiag(`send ok runId=${runId}`);
+    if (optimizationTraceId) {
+      appendOptimizationTraceLine(
+        optimizationTraceId,
+        `trace timing send_ack=${runTimingsRef.current[runId].ackAt! - sendStart}ms`,
+      );
+      appendOptimizationTraceLine(optimizationTraceId, "trace send ok");
+    }
     setThinkingStatus("Starting");
     if (routingEnabled && chosenModel && fastModel && reasoningModel && chosenModel !== fastModel) {
       runRevertModelRef.current[runId] = fastModel;
@@ -3910,6 +4439,66 @@ export function Chat({
       }
     }, 15000);
     return runId;
+  }
+
+  async function dispatchDirectLocalDebugSend(sessionKey: string): Promise<void> {
+    const history = buildDirectLocalDebugHistory(sessionMessagesRef.current[sessionKey] || []);
+    const historyChars = history.reduce((total, entry) => total + entry.content.length, 0);
+    addDiag(
+      `direct local debug send session=${sessionKey} messages=${history.length} inputChars=${historyChars}`,
+    );
+    for (const line of buildDirectLocalDebugPreview(history)) {
+      addDiag(line);
+    }
+    const optimizationTraceId =
+      optimizationTraceArmed && localModelsMode
+        ? beginOptimizationTraceForSend({
+            mode: "direct-local-debug",
+            sessionKey,
+            model: localModelConfig?.modelName || "unknown",
+            lines: [
+              `trace session payload messages=${history.length} inputChars=${historyChars}`,
+              ...buildDirectLocalDebugPreview(history),
+            ],
+          })
+        : null;
+    if (optimizationTraceId) {
+      setOptimizationTraceArmed(false);
+    }
+    try {
+      const response = await invoke<DirectLocalChatDebugResponse>("debug_local_model_chat", {
+        messages: history,
+      });
+      addDiag(
+        `direct local debug ok ${response.provider}/${response.model} t=${response.durationMs}ms historyMessages=${response.historyMessages} inputChars=${response.inputChars} responseChars=${response.responseChars}`,
+      );
+      if (optimizationTraceId) {
+        appendOptimizationTraceLine(
+          optimizationTraceId,
+          `trace direct response provider=${response.provider}/${response.model} durationMs=${response.durationMs} historyMessages=${response.historyMessages} inputChars=${response.inputChars} responseChars=${response.responseChars}`,
+        );
+        appendOptimizationTracePreview(optimizationTraceId, "trace assistantPreview", response.text);
+        finishOptimizationTrace(optimizationTraceId, "completed");
+      }
+      appendLocalMessage(
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: response.text || "The local model returned no visible text.",
+          sentAt: Date.now(),
+        },
+        sessionKey,
+      );
+    } catch (error) {
+      if (optimizationTraceId) {
+        appendOptimizationTraceLine(
+          optimizationTraceId,
+          `trace direct error: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        finishOptimizationTrace(optimizationTraceId, "error");
+      }
+      throw error;
+    }
   }
 
   async function replayOutboxEntry(entry: PersistedPendingSend) {
@@ -4197,6 +4786,55 @@ export function Chat({
       return;
     }
 
+    const useDirectLocalDebugChat =
+      localModelsMode &&
+      composerMode === "chat" &&
+      effectiveLocalModePerformanceSettings.debugMode &&
+      effectiveLocalModePerformanceSettings.debugDirectBypass;
+
+    if (useDirectLocalDebugChat) {
+      if (hasAttachments) {
+        const message = "Direct local debug chat does not support image attachments yet.";
+        setError(message);
+        appendAssistantNotice(message, sendSession);
+        return;
+      }
+
+      const userMessage: Message = {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: userVisibleContent,
+        sentAt: Date.now(),
+      };
+      appendLocalMessage(userMessage, sendSession);
+
+      if (!content && sendSession) {
+        setDraftsBySession((prev) => ({ ...prev, [sendSession]: "" }));
+        if (textareaRef.current) {
+          textareaRef.current.style.height = "auto";
+          textareaRef.current.style.overflowY = "hidden";
+        }
+      }
+
+      setShowWelcome(false);
+      setIsLoading(true);
+      setThinkingStatus("Direct local model");
+      setError(null);
+
+      try {
+        await dispatchDirectLocalDebugSend(sendSession);
+      } catch (e) {
+        const message = formatUnknownUiError(e, "Direct local debug chat failed.");
+        setError(message);
+        addDiag(`direct local debug failed: ${message}`);
+        appendAssistantNotice(`Direct local debug failed: ${message}`, sendSession);
+      } finally {
+        setIsLoading(false);
+        setThinkingStatus(null);
+      }
+      return;
+    }
+
     const liveClient = clientRef.current;
     const shouldQueueForReconnect =
       gatewayStarting || isConnecting || connectInFlightRef.current || gatewayRunning;
@@ -4369,6 +5007,7 @@ export function Chat({
     setIsLoading(true);
     setThinkingStatus("Thinking");
     setError(null);
+    setLastGatewayError(null);
     try {
       await dispatchPendingSend(pendingSend);
     } catch (e) {
@@ -5266,6 +5905,34 @@ export function Chat({
       errors: message.assistantPayload?.errors ?? [],
       hadToolPayload: message.assistantPayload?.hadToolPayload ?? false,
     };
+    const leadingThinkBlocks =
+      localChatDebugModeActive && payload.cleanText
+        ? splitLeadingThinkBlocks(payload.cleanText)
+        : null;
+    const visibleAssistantText = leadingThinkBlocks ? leadingThinkBlocks.answer : payload.cleanText;
+    const renderCollapsedThinkBlocks = (thoughts: string[]) => (
+      <div className="space-y-2">
+        {thoughts.map((thought, index) => (
+          <details
+            key={`${message.id || "assistant"}-think-${index}`}
+            className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)]/70 px-3 py-2"
+          >
+            <summary className="cursor-pointer list-none text-xs font-medium uppercase tracking-wide text-[var(--text-tertiary)]">
+              <span>Think {thoughts.length > 1 ? index + 1 : ""}</span>
+              <span className="ml-2 normal-case tracking-normal text-[var(--text-quaternary)]">
+                {summarizeThinkBlock(thought)}
+              </span>
+            </summary>
+            <div className="mt-2 border-t border-[var(--border-subtle)] pt-2">
+              <MarkdownContent
+                content={thought}
+                onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
+              />
+            </div>
+          </details>
+        ))}
+      </div>
+    );
     if (payload.hadToolPayload && message.id) {
       const timings = runTimingsRef.current[message.id];
       if (timings && !timings.toolSeenAt) {
@@ -5275,12 +5942,15 @@ export function Chat({
     }
     if (!payload.events.length && !payload.errors.length) {
       return (
-        <div className="min-w-0 max-w-full">
+        <div className="min-w-0 max-w-full space-y-2">
           {renderMessageAttachments(message)}
-          <MarkdownContent
-            content={payload.cleanText}
-            onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
-          />
+          {leadingThinkBlocks ? renderCollapsedThinkBlocks(leadingThinkBlocks.thoughts) : null}
+          {visibleAssistantText ? (
+            <MarkdownContent
+              content={visibleAssistantText}
+              onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
+            />
+          ) : null}
         </div>
       );
     }
@@ -5290,16 +5960,19 @@ export function Chat({
           <span>{message.kind === "toolResult" ? "Tool Result" : "Assistant"}</span>
           {message.toolName ? <span className="text-[var(--text-quaternary)]">{message.toolName}</span> : null}
         </div>
-        {payload.cleanText ? (
+        {visibleAssistantText || leadingThinkBlocks ? (
           <div>
             {renderMessageAttachments(message)}
-            <MarkdownContent
-              content={payload.cleanText}
-              onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
-            />
+            {leadingThinkBlocks ? renderCollapsedThinkBlocks(leadingThinkBlocks.thoughts) : null}
+            {visibleAssistantText ? (
+              <MarkdownContent
+                content={visibleAssistantText}
+                onWorkspaceLinkClick={(link) => handoffWorkspacePathToDesktop(link)}
+              />
+            ) : null}
           </div>
         ) : null}
-        {!payload.cleanText ? renderMessageAttachments(message) : null}
+        {!visibleAssistantText && !leadingThinkBlocks ? renderMessageAttachments(message) : null}
         {payload.events.length > 0 && (
           <div className="rounded-xl border border-[var(--glass-border-subtle)] bg-[var(--glass-bg)] p-3 shadow-sm">
             <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-[var(--text-tertiary)] mb-2">
@@ -6089,6 +6762,83 @@ export function Chat({
               </div>
             ) : null}
           </div>
+          {localModelsMode && activeComposerMode === "chat" ? (
+            <div className="mt-2 space-y-1">
+              {localChatDebugModeActive ? (
+                <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] px-3 py-2 text-[11px] text-[var(--text-secondary)]">
+                  <div>
+                    Debug mode is on. Messages{" "}
+                    {directLocalDebugBypassActive ? (
+                      <>
+                        bypass OpenClaw and go straight to{" "}
+                        <span className="font-mono text-[var(--text-primary)]">
+                          {localModelConfig?.modelName || "the configured local model"}
+                        </span>
+                        .
+                      </>
+                    ) : (
+                      <>
+                        still go through OpenClaw before reaching{" "}
+                        <span className="font-mono text-[var(--text-primary)]">
+                          {localModelConfig?.modelName || "the configured local model"}
+                        </span>
+                        .
+                      </>
+                    )}
+                  </div>
+                  {directLocalDebugBypassActive ? (
+                    <>
+                      <div className="mt-1">
+                        Direct debug reuses this chat session&apos;s recent user/assistant history
+                        even after model switches. Start a new chat for a clean prompt.
+                      </div>
+                      <div className="mt-1 text-[var(--text-tertiary)]">
+                        Current payload: {activeDirectLocalDebugHistory.length} messages,{" "}
+                        {activeDirectLocalDebugHistoryChars} chars.
+                      </div>
+                      {activeDirectLocalDebugPreview.length ? (
+                        <div className="mt-2 space-y-1 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-primary)]/60 px-2 py-2 font-mono text-[10px] text-[var(--text-tertiary)]">
+                          {activeDirectLocalDebugPreview.map((line) => (
+                            <div key={line}>{line}</div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <div className="mt-1 text-[var(--text-tertiary)]">
+                      Use prompt preview capture or an optimization trace to inspect the OpenClaw
+                      context added on top of this chat session.
+                    </div>
+                  )}
+                </div>
+              ) : null}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setOptimizationTraceArmed((prev) => !prev)}
+                  className={clsx(
+                    "rounded-md border px-2 py-1 text-[11px]",
+                    optimizationTraceArmed
+                      ? "border-[var(--system-blue)] text-[var(--system-blue)] bg-[var(--system-blue)]/10"
+                      : "border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]",
+                  )}
+                >
+                  {optimizationTraceArmed ? "Optimization Trace Armed" : "Record Optimization Trace"}
+                </button>
+                <span className="text-[11px] text-[var(--text-tertiary)]">
+                  Exports from Settings → Diagnostics after the next local chat send.
+                </span>
+              </div>
+              {localChatDebugModeActive &&
+              !directLocalDebugBypassActive &&
+              effectiveLocalModePerformanceSettings.capturePromptPreview ? (
+                <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] px-3 py-2 text-[11px] text-[var(--text-secondary)]">
+                  Prompt preview capture is on. Truncated system/prompt previews will be written to
+                  Diagnostics for normal local chat turns.
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <div className="flex items-end gap-2">
             {activeComposerMode !== "shell" ? (
               <button

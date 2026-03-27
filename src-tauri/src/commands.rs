@@ -77,13 +77,23 @@ const DEFAULT_PROXY_OPENROUTER_GATEWAY_MODEL: &str = "openrouter/free";
 const DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL: &str = "anthropic/claude-opus-4-6:thinking";
 const DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL: &str = "openai-codex/gpt-5.3-codex";
 const DEFAULT_LOCAL_GOOGLE_GATEWAY_MODEL: &str = "google/gemini-2.5-pro";
-const RNN_RUNTIME_HOST: &str = "127.0.0.1";
+const RNN_RUNTIME_BIND_HOST: &str = "127.0.0.1";
+
 const RNN_RUNTIME_PORT: u16 = 11445;
 const RNN_RUNTIME_BASE_URL: &str = "http://127.0.0.1:11445/v1";
 const RNN_RUNTIME_ROOT_URL: &str = "http://127.0.0.1:11445";
 const RNN_RUNTIME_HEALTH_URL: &str = "http://127.0.0.1:11445/healthz";
+const RNN_RUNTIME_SOCKET_FILE_NAME: &str = "runtime.sock";
+const RNN_RUNTIME_CONTAINER_SOCKET_DIR: &str = "/data/managed-runtime-bridge";
+const RNN_RUNTIME_CONTAINER_SOCKET_PATH: &str = "/data/managed-runtime-bridge/runtime.sock";
+const RNN_RUNTIME_CONTAINER_PROXY_URL: &str = "http://127.0.0.1:11445/v1";
 const RNN_RUNTIME_DIR_NAME: &str = "rnn-runtime";
 const RNN_RUNTIME_SERVER_RELATIVE_PATH: &str = "share/rnn-runtime/server.py";
+const RNN_RUNTIME_REQUIREMENTS_BASE_RELATIVE_PATH: &str = "share/rnn-runtime/requirements-base.txt";
+const RNN_RUNTIME_REQUIREMENTS_VLLM_LINUX_RELATIVE_PATH: &str =
+    "share/rnn-runtime/requirements-vllm-linux.txt";
+const RNN_RUNTIME_REQUIREMENTS_LLAMA_CPP_LINUX_RELATIVE_PATH: &str =
+    "share/rnn-runtime/requirements-llama-cpp-linux.txt";
 
 static BROWSER_SERVICE_TOKEN_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static EMBEDDED_PREVIEW_STATE_CACHE: OnceLock<Mutex<Option<EmbeddedPreviewStatePayload>>> =
@@ -137,6 +147,25 @@ pub struct ChatImageGenerationAttachment {
     #[serde(alias = "mimeType")]
     pub mime_type: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectLocalChatDebugMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectLocalChatDebugResponsePayload {
+    pub text: String,
+    pub provider: String,
+    pub model: String,
+    pub base_url: String,
+    pub duration_ms: u64,
+    pub history_messages: usize,
+    pub input_chars: usize,
+    pub response_chars: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -9904,28 +9933,38 @@ pub async fn start_gateway(
         let mut local_model_config = read_local_model_config(&app)?.ok_or_else(|| {
             "Configure your local AI service in Settings before starting a local model.".to_string()
         })?;
-        local_model_config.model_name = model_name.to_string();
         if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+            if local_model_config.model_name != model_name {
+                println!(
+                    "[Entropic] Managed local runtime requested stale model {:?}; using configured model {:?} instead.",
+                    model_name,
+                    local_model_config.model_name
+                );
+            }
             ensure_rnn_runtime_ready(&app).await?;
             let available = discover_local_model_ids_inner(&local_model_config, None).await?;
-            if !available.iter().any(|value| value == model_name) {
+            if !available
+                .iter()
+                .any(|value| value == &local_model_config.model_name)
+            {
                 return Err(format!(
-                    "RNN model '{}' is not available locally. Download it from Settings before starting the local connector.",
-                    model_name
+                    "Managed local runtime model '{}' is not available locally. Download it from Settings before starting the local connector.",
+                    local_model_config.model_name
                 ));
             }
+        } else {
+            local_model_config.model_name = model_name.to_string();
         }
         Some(local_model_config)
     } else {
         None
     };
-    let local_model_context_window = if let Some(local_model_config) =
-        expected_local_model_config.as_ref()
-    {
-        Some(resolve_local_model_context_window(local_model_config).await)
-    } else {
-        None
-    };
+    let local_model_context_window =
+        if let Some(local_model_config) = expected_local_model_config.as_ref() {
+            Some(resolve_local_model_context_window(&app, local_model_config).await)
+        } else {
+            None
+        };
     let openclaw_model = if let Some(local_model_config) = expected_local_model_config.as_ref() {
         local_model_config.gateway_model_ref(None)
     } else {
@@ -9953,7 +9992,8 @@ pub async fn start_gateway(
         let current_local_model_name = read_container_env("ENTROPIC_LOCAL_MODEL_NAME");
         let current_local_service_type = read_container_env("ENTROPIC_LOCAL_MODEL_SERVICE_TYPE");
         let current_local_api = read_container_env("ENTROPIC_LOCAL_MODEL_API");
-        let current_local_context_window = read_container_env("ENTROPIC_LOCAL_MODEL_CONTEXT_WINDOW");
+        let current_local_context_window =
+            read_container_env("ENTROPIC_LOCAL_MODEL_CONTEXT_WINDOW");
         // Check legacy environment variable for backward compatibility during migration
         let legacy_proxy_mode = read_container_env("NOVA_PROXY_MODE");
         // Check if the Anthropic auth type matches (OAuth token vs API key)
@@ -9974,7 +10014,8 @@ pub async fn start_gateway(
             (Some(current), Some(latest)) => current == latest,
             _ => true,
         };
-        let expected_local_context_window = local_model_context_window.map(|value| value.to_string());
+        let expected_local_context_window =
+            local_model_context_window.map(|value| value.to_string());
         let local_config_matches = if let Some(expected_local_model_config) =
             &expected_local_model_config
         {
@@ -9986,9 +10027,9 @@ pub async fn start_gateway(
                     == Some(expected_local_model_config.api_key.as_str())
                 && current_local_service_type.as_deref()
                     == Some(expected_local_model_config.service_type_name())
-                && current_local_api.as_deref()
-                    == Some(expected_local_model_config.api_mode_name())
-                && current_local_context_window.as_deref() == expected_local_context_window.as_deref()
+                && current_local_api.as_deref() == Some(expected_local_model_config.api_mode_name())
+                && current_local_context_window.as_deref()
+                    == expected_local_context_window.as_deref()
         } else {
             current_local_base_url.is_none()
                 && current_local_api_key.is_none()
@@ -10141,6 +10182,11 @@ pub async fn start_gateway(
 
     // Local model support: pass service type, adapter, base URL, API key, and model name.
     let local_model_config = expected_local_model_config.clone();
+    let rnn_runtime_paths = local_model_config
+        .as_ref()
+        .filter(|config| config.service_type == LocalModelServiceType::RnnLocal)
+        .map(|_| rnn_runtime_paths(&app))
+        .transpose()?;
     let local_base_url_docker: String;
     let local_api_key: String;
     let local_model_name_str: String;
@@ -10153,14 +10199,24 @@ pub async fn start_gateway(
         local_model_name_str = local_model_config.model_name.clone();
         local_service_type_str = local_model_config.service_type_name().to_string();
         local_api_mode_str = local_model_config.api_mode_name().to_string();
-        local_context_window_str =
-            local_model_context_window.unwrap_or(LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK).to_string();
+        local_context_window_str = local_model_context_window
+            .unwrap_or(LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK)
+            .to_string();
         env_entries.push(("ENTROPIC_LOCAL_MODEL_BASE_URL", &local_base_url_docker));
         env_entries.push(("ENTROPIC_LOCAL_MODEL_API_KEY", &local_api_key));
         env_entries.push(("ENTROPIC_LOCAL_MODEL_NAME", &local_model_name_str));
         env_entries.push(("ENTROPIC_LOCAL_MODEL_SERVICE_TYPE", &local_service_type_str));
         env_entries.push(("ENTROPIC_LOCAL_MODEL_API", &local_api_mode_str));
-        env_entries.push(("ENTROPIC_LOCAL_MODEL_CONTEXT_WINDOW", &local_context_window_str));
+        env_entries.push((
+            "ENTROPIC_LOCAL_MODEL_CONTEXT_WINDOW",
+            &local_context_window_str,
+        ));
+        if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+            env_entries.push((
+                "ENTROPIC_MANAGED_RUNTIME_UNIX_SOCKET",
+                RNN_RUNTIME_CONTAINER_SOCKET_PATH,
+            ));
+        }
         if local_model_config.provider_id() == "ollama" {
             env_entries.push(("OLLAMA_API_KEY", &local_api_key));
         }
@@ -10211,6 +10267,14 @@ pub async fn start_gateway(
         ),
         "openclaw-runtime:latest".to_string(),
     ]);
+
+    if let Some(paths) = rnn_runtime_paths.as_ref() {
+        docker_args.insert(docker_args.len() - 1, "-v".to_string());
+        docker_args.insert(
+            docker_args.len() - 1,
+            openclaw_rnn_runtime_bridge_mount(paths),
+        );
+    }
 
     // Dev-only: bind-mount local OpenClaw dist/extensions to avoid image rebuilds
     if let Ok(source) = std::env::var("ENTROPIC_DEV_OPENCLAW_SOURCE") {
@@ -10705,15 +10769,29 @@ pub async fn start_gateway_with_proxy(
 /// Only works for same-provider changes (API keys stay the same).
 #[tauri::command]
 pub fn update_gateway_model(app: AppHandle, model: String) -> Result<(), String> {
-    let local_model_name = model.strip_prefix("local/").map(str::to_string);
-    let (base_model, thinking_enabled, reasoning_effort) = if let Some(model_name) =
-        local_model_name.as_deref()
+    let requested_local_model_name = model.strip_prefix("local/").map(str::to_string);
+    let (local_model_name, base_model, thinking_enabled, reasoning_effort) = if let Some(
+        model_name,
+    ) = requested_local_model_name.as_deref()
     {
         let local_model_config = read_local_model_config(&app)?.ok_or_else(|| {
             "Configure your local AI service in Settings before using a local model.".to_string()
         })?;
+        let effective_local_model_name = if local_model_config.service_type == LocalModelServiceType::RnnLocal
+            && local_model_config.model_name != model_name
+        {
+            println!(
+                "[Entropic] update_gateway_model: requested stale managed local model {:?}; using configured model {:?} instead.",
+                model_name,
+                local_model_config.model_name
+            );
+            local_model_config.model_name.clone()
+        } else {
+            model_name.to_string()
+        };
         (
-            local_model_config.gateway_model_ref(Some(model_name)),
+            Some(effective_local_model_name.clone()),
+            local_model_config.gateway_model_ref(Some(&effective_local_model_name)),
             false,
             String::new(),
         )
@@ -10725,6 +10803,7 @@ pub fn update_gateway_model(app: AppHandle, model: String) -> Result<(), String>
             .find_map(|s| s.strip_prefix("reasoning="))
             .unwrap_or("");
         (
+            None,
             base_model.to_string(),
             thinking_enabled,
             reasoning_effort.to_string(),
@@ -10919,8 +10998,12 @@ struct RnnRuntimePaths {
     root: PathBuf,
     models_dir: PathBuf,
     state_dir: PathBuf,
+    bridge_dir: PathBuf,
+    socket_path: PathBuf,
+    venv_dir: PathBuf,
     log_file: PathBuf,
     pid_file: PathBuf,
+    requirements_stamp_file: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -10941,6 +11024,13 @@ pub struct RnnRuntimeStatusPayload {
     pub state_dir: String,
     pub log_file: String,
     pub script_path: Option<String>,
+    pub runtime_name: Option<String>,
+    pub active_backend: Option<String>,
+    pub active_architecture: Option<String>,
+    pub active_model_info: Option<serde_json::Value>,
+    pub capabilities: Option<serde_json::Value>,
+    pub runtime_config: Option<serde_json::Value>,
+    pub python_command: Option<String>,
 }
 
 fn rnn_runtime_paths(app: &AppHandle) -> Result<RnnRuntimePaths, String> {
@@ -10952,8 +11042,12 @@ fn rnn_runtime_paths(app: &AppHandle) -> Result<RnnRuntimePaths, String> {
     Ok(RnnRuntimePaths {
         models_dir: root.join("models"),
         state_dir: root.join("state"),
+        bridge_dir: root.join("bridge"),
+        socket_path: root.join("bridge").join(RNN_RUNTIME_SOCKET_FILE_NAME),
+        venv_dir: root.join("venv"),
         log_file: root.join("runtime.log"),
         pid_file: root.join("runtime.pid"),
+        requirements_stamp_file: root.join("requirements.sha256"),
         root,
     })
 }
@@ -10965,7 +11059,37 @@ fn ensure_rnn_runtime_dirs(paths: &RnnRuntimePaths) -> Result<(), String> {
         .map_err(|e| format!("Failed to create RNN models directory: {}", e))?;
     fs::create_dir_all(&paths.state_dir)
         .map_err(|e| format!("Failed to create RNN state directory: {}", e))?;
+    fs::create_dir_all(&paths.bridge_dir)
+        .map_err(|e| format!("Failed to create RNN bridge directory: {}", e))?;
     Ok(())
+}
+
+fn clear_rnn_runtime_socket(paths: &RnnRuntimePaths) {
+    let _ = fs::remove_file(&paths.socket_path);
+}
+
+fn rnn_runtime_socket_ready(paths: &RnnRuntimePaths) -> bool {
+    fs::metadata(&paths.socket_path)
+        .map(|metadata| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileTypeExt;
+                metadata.file_type().is_socket()
+            }
+            #[cfg(not(unix))]
+            {
+                metadata.is_file()
+            }
+        })
+        .unwrap_or(false)
+}
+
+fn openclaw_rnn_runtime_bridge_mount(paths: &RnnRuntimePaths) -> String {
+    let mount_source = docker_host_path_for_command(&paths.bridge_dir);
+    format!(
+        "{}:{}:rw",
+        mount_source, RNN_RUNTIME_CONTAINER_SOCKET_DIR
+    )
 }
 
 fn resolve_rnn_runtime_server_script(app: &AppHandle) -> Result<PathBuf, String> {
@@ -11018,10 +11142,82 @@ fn resolve_rnn_runtime_server_script(app: &AppHandle) -> Result<PathBuf, String>
         }
     }
 
-    Err("RNN runtime server script was not found in bundled resources.".to_string())
+    Err("Managed local runtime server script was not found in bundled resources.".to_string())
 }
 
-fn resolve_rnn_runtime_python() -> Result<PythonCommandSpec, String> {
+fn resolve_rnn_runtime_resource_path(
+    app: &AppHandle,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("resources").join(relative_path));
+        candidates.push(resource_dir.join(relative_path));
+    }
+
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join(relative_path),
+    );
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            candidates.push(exe_dir.join("resources").join(relative_path));
+            candidates.push(
+                exe_dir
+                    .join("..")
+                    .join("..")
+                    .join("resources")
+                    .join(relative_path),
+            );
+            if let Some(contents_dir) = exe_dir.parent() {
+                let resources_dir = contents_dir.join("Resources");
+                candidates.push(resources_dir.join("resources").join(relative_path));
+                candidates.push(resources_dir.join(relative_path));
+            }
+        }
+    }
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!(
+        "Managed local runtime resource '{}' was not found in bundled resources.",
+        relative_path
+    ))
+}
+
+fn rnn_runtime_venv_python_path(paths: &RnnRuntimePaths) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        return paths.venv_dir.join("Scripts").join("python.exe");
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        paths.venv_dir.join("bin").join("python")
+    }
+}
+
+fn requirements_fingerprint(paths: &[PathBuf]) -> Result<String, String> {
+    let mut hasher = Sha256::new();
+    for path in paths {
+        hasher.update(path.display().to_string().as_bytes());
+        hasher.update(b"\n");
+        hasher.update(
+            fs::read(path)
+                .map_err(|e| format!("Failed to read managed runtime requirements: {}", e))?,
+        );
+        hasher.update(b"\n");
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn resolve_system_python_command() -> Result<PythonCommandSpec, String> {
     let mut candidates: Vec<PythonCommandSpec> = Vec::new();
     #[cfg(target_os = "windows")]
     {
@@ -11052,7 +11248,214 @@ fn resolve_rnn_runtime_python() -> Result<PythonCommandSpec, String> {
         }
     }
 
-    Err("Python 3 is required to run the local RNN runtime. Install python3 and retry.".to_string())
+    Err(
+        "Python 3 is required to run the managed local runtime. Install python3 and retry."
+            .to_string(),
+    )
+}
+
+fn resolve_rnn_runtime_python(paths: &RnnRuntimePaths) -> Result<PythonCommandSpec, String> {
+    let venv_python = rnn_runtime_venv_python_path(paths);
+    if venv_python.exists() {
+        return Ok(PythonCommandSpec {
+            program: venv_python.display().to_string(),
+            args: Vec::new(),
+        });
+    }
+    resolve_system_python_command()
+}
+
+fn ensure_rnn_runtime_python_env(
+    app: &AppHandle,
+    paths: &RnnRuntimePaths,
+) -> Result<PythonCommandSpec, String> {
+    let base_requirements =
+        resolve_rnn_runtime_resource_path(app, RNN_RUNTIME_REQUIREMENTS_BASE_RELATIVE_PATH)?;
+    let requirement_paths = vec![base_requirements];
+    let expected_fingerprint = requirements_fingerprint(&requirement_paths)?;
+    let venv_python = rnn_runtime_venv_python_path(paths);
+    let current_fingerprint = fs::read_to_string(&paths.requirements_stamp_file)
+        .ok()
+        .map(|value| value.trim().to_string());
+
+    if venv_python.exists() && current_fingerprint.as_deref() == Some(expected_fingerprint.as_str())
+    {
+        return Ok(PythonCommandSpec {
+            program: venv_python.display().to_string(),
+            args: Vec::new(),
+        });
+    }
+
+    let system_python = resolve_system_python_command()?;
+
+    if !venv_python.exists() {
+        let status = Command::new(&system_python.program)
+            .args(&system_python.args)
+            .arg("-m")
+            .arg("venv")
+            .arg(&paths.venv_dir)
+            .status()
+            .map_err(|e| format!("Failed to create managed runtime virtualenv: {}", e))?;
+        if !status.success() {
+            return Err("Failed to create the managed runtime virtualenv.".to_string());
+        }
+    }
+
+    let bootstrap_output = Command::new(&venv_python)
+        .args([
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--upgrade",
+            "pip",
+            "setuptools",
+            "wheel",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to bootstrap managed runtime pip: {}", e))?;
+    if !bootstrap_output.status.success() {
+        let stderr = String::from_utf8_lossy(&bootstrap_output.stderr);
+        return Err(format!(
+            "Failed to bootstrap the managed local runtime environment: {}",
+            stderr.trim()
+        ));
+    }
+
+    for requirement_path in &requirement_paths {
+        let output = Command::new(&venv_python)
+            .args(["-m", "pip", "install", "--disable-pip-version-check", "-r"])
+            .arg(requirement_path)
+            .output()
+            .map_err(|e| format!("Failed to install managed runtime dependencies: {}", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "Failed to install managed local runtime dependencies from {}: {}",
+                requirement_path.display(),
+                stderr.trim()
+            ));
+        }
+    }
+
+    fs::write(&paths.requirements_stamp_file, expected_fingerprint)
+        .map_err(|e| format!("Failed to persist managed runtime dependency state: {}", e))?;
+
+    Ok(PythonCommandSpec {
+        program: venv_python.display().to_string(),
+        args: Vec::new(),
+    })
+}
+
+fn install_rnn_runtime_backend_requirements(
+    app: &AppHandle,
+    paths: &RnnRuntimePaths,
+    backend: &str,
+) -> Result<PythonCommandSpec, String> {
+    let backend = backend.trim().to_lowercase();
+    let requirement_path = match backend.as_str() {
+        "vllm" => {
+            #[cfg(target_os = "linux")]
+            {
+                resolve_rnn_runtime_resource_path(
+                    app,
+                    RNN_RUNTIME_REQUIREMENTS_VLLM_LINUX_RELATIVE_PATH,
+                )?
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Err(
+                    "The managed vLLM backend is currently only bootstrapped on Linux.".to_string(),
+                );
+            }
+        }
+        "llama-cpp" => {
+            #[cfg(target_os = "linux")]
+            {
+                resolve_rnn_runtime_resource_path(
+                    app,
+                    RNN_RUNTIME_REQUIREMENTS_LLAMA_CPP_LINUX_RELATIVE_PATH,
+                )?
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Err(
+                    "The managed llama.cpp backend is currently only bootstrapped on Linux."
+                        .to_string(),
+                );
+            }
+        }
+        _ => return Err(format!("Unknown managed runtime backend '{}'.", backend)),
+    };
+
+    let python = ensure_rnn_runtime_python_env(app, paths)?;
+    let mut command = Command::new(&python.program);
+    command
+        .args(["-m", "pip", "install", "--disable-pip-version-check", "-r"])
+        .arg(&requirement_path);
+    if backend == "llama-cpp" {
+        let mut cmake_args = String::from("-DGGML_CUDA=on");
+        if let Some(nvcc_path) = resolve_rnn_runtime_nvcc_path() {
+            cmake_args.push_str(" -DCMAKE_CUDA_COMPILER=");
+            cmake_args.push_str(&nvcc_path);
+            command.env("CUDACXX", &nvcc_path);
+            if let Some(cuda_bin_dir) = Path::new(&nvcc_path).parent() {
+                if let Some(cuda_root) = cuda_bin_dir.parent() {
+                    command.env("CUDA_HOME", cuda_root);
+                    command.env("CUDA_PATH", cuda_root);
+                }
+            }
+        }
+        command.env("CMAKE_ARGS", cmake_args);
+        command.env("FORCE_CMAKE", "1");
+    }
+    let output = command.output().map_err(|e| {
+        format!(
+            "Failed to install managed runtime backend '{}': {}",
+            backend, e
+        )
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "Failed to install managed runtime backend '{}' from {}: {}",
+            backend,
+            requirement_path.display(),
+            stderr.trim()
+        ));
+    }
+    Ok(python)
+}
+
+fn resolve_rnn_runtime_nvcc_path() -> Option<String> {
+    if let Ok(cudacxx) = std::env::var("CUDACXX") {
+        let trimmed = cudacxx.trim();
+        if !trimmed.is_empty() && Path::new(trimmed).exists() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    for env_name in ["CUDA_HOME", "CUDA_PATH"] {
+        if let Ok(cuda_home) = std::env::var(env_name) {
+            let candidate = Path::new(&cuda_home).join("bin").join("nvcc");
+            if candidate.exists() {
+                return Some(candidate.display().to_string());
+            }
+        }
+    }
+
+    if let Ok(path) = which::which("nvcc") {
+        if path.exists() {
+            return Some(path.display().to_string());
+        }
+    }
+
+    let fallback = Path::new("/usr/local/cuda/bin/nvcc");
+    if fallback.exists() {
+        return Some(fallback.display().to_string());
+    }
+
+    None
 }
 
 fn read_rnn_runtime_pid(paths: &RnnRuntimePaths) -> Option<u32> {
@@ -11084,7 +11487,7 @@ fn rnn_runtime_port_conflict() -> Option<String> {
         .collect::<Vec<_>>()
         .join(", ");
     Some(format!(
-        "Port {} is already in use by {}. Stop that process or change the local RNN runtime port.",
+        "Port {} is already in use by {}. Stop that process or change the managed local runtime port.",
         RNN_RUNTIME_PORT, details
     ))
 }
@@ -11241,32 +11644,64 @@ fn build_rnn_runtime_status(
         script_path: resolve_rnn_runtime_server_script(app)
             .ok()
             .map(|path| path.display().to_string()),
+        runtime_name: health
+            .and_then(|value| value.get("runtimeName"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        active_backend: health
+            .and_then(|value| value.get("activeBackend"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        active_architecture: health
+            .and_then(|value| value.get("activeArchitecture"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        active_model_info: health
+            .and_then(|value| value.get("activeModelInfo"))
+            .cloned(),
+        capabilities: health.and_then(|value| value.get("capabilities")).cloned(),
+        runtime_config: health.and_then(|value| value.get("runtimeConfig")).cloned(),
+        python_command: resolve_rnn_runtime_python(&paths).ok().map(|spec| {
+            format!("{} {}", spec.program, spec.args.join(" "))
+                .trim()
+                .to_string()
+        }),
     })
 }
 
 async fn ensure_rnn_runtime_ready(app: &AppHandle) -> Result<RnnRuntimeStatusPayload, String> {
-    if let Ok(health) = rnn_runtime_health_payload().await {
-        return build_rnn_runtime_status(app, Some(&health));
-    }
-    let _guard = rnn_runtime_start_lock().lock().await;
-    if let Ok(health) = rnn_runtime_health_payload().await {
-        return build_rnn_runtime_status(app, Some(&health));
-    }
-
     let paths = rnn_runtime_paths(app)?;
     ensure_rnn_runtime_dirs(&paths)?;
 
-    if let Some(pid) = read_rnn_runtime_pid(&paths) {
-        if !rnn_process_is_running(pid) {
-            clear_rnn_runtime_pid(&paths);
+    if let Ok(health) = rnn_runtime_health_payload().await {
+        if rnn_runtime_socket_ready(&paths) {
+            return build_rnn_runtime_status(app, Some(&health));
         }
     }
+    let _guard = rnn_runtime_start_lock().lock().await;
+    if let Ok(health) = rnn_runtime_health_payload().await {
+        if rnn_runtime_socket_ready(&paths) {
+            return build_rnn_runtime_status(app, Some(&health));
+        }
+    }
+
+    if let Some(pid) = read_rnn_runtime_pid(&paths) {
+        if rnn_process_is_running(pid) {
+            stop_rnn_runtime_pid(pid)?;
+        } else {
+            clear_rnn_runtime_pid(&paths);
+        }
+    } else if let Some(pid) = listener_pids_for_port(RNN_RUNTIME_PORT).into_iter().next() {
+        stop_rnn_runtime_pid(pid)?;
+    }
+    clear_rnn_runtime_pid(&paths);
+    clear_rnn_runtime_socket(&paths);
 
     if let Some(conflict) = rnn_runtime_port_conflict() {
         return Err(conflict);
     }
 
-    let python = resolve_rnn_runtime_python()?;
+    let python = ensure_rnn_runtime_python_env(app, &paths)?;
     let script_path = resolve_rnn_runtime_server_script(app)?;
     let stdout = fs::OpenOptions::new()
         .create(true)
@@ -11281,9 +11716,11 @@ async fn ensure_rnn_runtime_ready(app: &AppHandle) -> Result<RnnRuntimeStatusPay
     cmd.args(&python.args)
         .arg(&script_path)
         .arg("--host")
-        .arg(RNN_RUNTIME_HOST)
+        .arg(RNN_RUNTIME_BIND_HOST)
         .arg("--port")
         .arg(RNN_RUNTIME_PORT.to_string())
+        .arg("--unix-socket")
+        .arg(&paths.socket_path)
         .arg("--models-dir")
         .arg(&paths.models_dir)
         .arg("--state-dir")
@@ -11291,26 +11728,44 @@ async fn ensure_rnn_runtime_ready(app: &AppHandle) -> Result<RnnRuntimeStatusPay
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
-        .env("PYTHONUNBUFFERED", "1");
+        .env("PYTHONUNBUFFERED", "1")
+        .env(
+            "TORCH_EXTENSIONS_DIR",
+            paths
+                .state_dir
+                .join("torch_extensions")
+                .display()
+                .to_string(),
+        )
+        .env(
+            "HF_HOME",
+            paths.state_dir.join("huggingface").display().to_string(),
+        )
+        .env(
+            "TRANSFORMERS_CACHE",
+            paths.state_dir.join("huggingface").display().to_string(),
+        );
     if let Some(parent) = script_path.parent() {
         cmd.current_dir(parent);
     }
 
     let child = cmd
         .spawn()
-        .map_err(|e| format!("Failed to start local RNN runtime: {}", e))?;
+        .map_err(|e| format!("Failed to start managed local runtime: {}", e))?;
     write_rnn_runtime_pid(&paths, child.id())?;
     drop(child);
 
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_millis(500)).await;
         if let Ok(health) = rnn_runtime_health_payload().await {
-            return build_rnn_runtime_status(app, Some(&health));
+            if rnn_runtime_socket_ready(&paths) {
+                return build_rnn_runtime_status(app, Some(&health));
+            }
         }
     }
 
     Err(format!(
-        "The local RNN runtime did not become healthy. Check {} for details.",
+        "The managed local runtime did not become healthy. Check {} for details.",
         paths.log_file.display()
     ))
 }
@@ -11370,7 +11825,7 @@ pub async fn load_rnn_model(
 ) -> Result<serde_json::Value, String> {
     let trimmed_model_name = model_name.trim();
     if trimmed_model_name.is_empty() {
-        return Err("Choose a local RNN model before loading it.".to_string());
+        return Err("Choose a managed-runtime model before loading it.".to_string());
     }
     ensure_rnn_runtime_ready(&app).await?;
     normalize_rnn_action_result(
@@ -11405,7 +11860,7 @@ pub async fn delete_rnn_model(
 ) -> Result<serde_json::Value, String> {
     let trimmed_model_name = model_name.trim();
     if trimmed_model_name.is_empty() {
-        return Err("Choose a local RNN model before deleting it.".to_string());
+        return Err("Choose a managed-runtime model before deleting it.".to_string());
     }
     ensure_rnn_runtime_ready(&app).await?;
     normalize_rnn_action_result(
@@ -11451,7 +11906,46 @@ pub async fn stop_rnn_runtime(app: AppHandle) -> Result<(), String> {
         stop_rnn_runtime_pid(pid)?;
     }
     clear_rnn_runtime_pid(&paths);
+    clear_rnn_runtime_socket(&paths);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn install_rnn_runtime_backend(
+    app: AppHandle,
+    backend: String,
+) -> Result<serde_json::Value, String> {
+    let paths = rnn_runtime_paths(&app)?;
+    ensure_rnn_runtime_dirs(&paths)?;
+    let backend = backend.trim().to_lowercase();
+    let python = install_rnn_runtime_backend_requirements(&app, &paths, &backend)?;
+    Ok(serde_json::json!({
+        "status": "installed",
+        "backend": backend,
+        "pythonCommand": format!("{} {}", python.program, python.args.join(" ")).trim(),
+    }))
+}
+
+#[tauri::command]
+pub async fn update_rnn_runtime_config(
+    app: AppHandle,
+    config: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    ensure_rnn_runtime_ready(&app).await?;
+    let runtime_config = if config.is_object() {
+        config
+    } else {
+        return Err("Managed runtime config must be a JSON object.".to_string());
+    };
+    normalize_rnn_action_result(
+        rnn_runtime_json_request(
+            reqwest::Method::POST,
+            "/api/rnn/runtime/config",
+            Some(serde_json::json!({ "runtimeConfig": runtime_config })),
+            60,
+        )
+        .await?,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11639,6 +12133,9 @@ impl LocalModelRuntimeConfig {
     }
 
     fn gateway_base_url(&self) -> String {
+        if self.service_type == LocalModelServiceType::RnnLocal {
+            return RNN_RUNTIME_CONTAINER_PROXY_URL.to_string();
+        }
         let rewritten = rewrite_localhost_for_docker(&self.base_url);
         let trimmed = rewritten.trim().trim_end_matches('/').to_string();
         if self.api_mode == LocalModelApiMode::Ollama {
@@ -11693,13 +12190,17 @@ fn default_local_model_api_mode(service_type: LocalModelServiceType) -> LocalMod
     }
 }
 
-// OpenClaw currently hard-blocks models below a 16k effective context window,
-// so local defaults need to stay at or above that floor.
+// External local providers still default to a 16k effective context window,
+// while the managed runtime can use model-specific contexts from its catalog.
 const LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK: usize = 16384;
-const LOCAL_MODEL_CONTEXT_WINDOW_CAP: usize = 16384;
+const EXTERNAL_LOCAL_MODEL_CONTEXT_WINDOW_CAP: usize = 16384;
 
-fn clamp_local_model_context_window(value: usize) -> usize {
-    value.max(1).min(LOCAL_MODEL_CONTEXT_WINDOW_CAP)
+fn normalize_local_model_context_window(value: usize) -> usize {
+    value.max(1)
+}
+
+fn cap_external_local_model_context_window(value: usize) -> usize {
+    normalize_local_model_context_window(value).min(EXTERNAL_LOCAL_MODEL_CONTEXT_WINDOW_CAP)
 }
 
 fn local_model_context_window_from_container_env() -> usize {
@@ -11707,7 +12208,7 @@ fn local_model_context_window_from_container_env() -> usize {
         .as_deref()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
-        .map(clamp_local_model_context_window)
+        .map(normalize_local_model_context_window)
         .unwrap_or(LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK)
 }
 
@@ -11767,7 +12268,7 @@ async fn query_ollama_context_window(
         if let Some(context_window) = value.as_u64() {
             let parsed = usize::try_from(context_window).ok().filter(|v| *v > 0);
             if let Some(parsed) = parsed {
-                return Ok(Some(clamp_local_model_context_window(parsed)));
+                return Ok(Some(cap_external_local_model_context_window(parsed)));
             }
         }
     }
@@ -11775,10 +12276,118 @@ async fn query_ollama_context_window(
     Ok(None)
 }
 
-async fn resolve_local_model_context_window(local_model_config: &LocalModelRuntimeConfig) -> usize {
+fn parse_context_window_from_model_name(model_name: &str) -> Option<usize> {
+    let trimmed = model_name
+        .trim()
+        .trim_end_matches(".pth")
+        .trim_end_matches(".safetensors")
+        .trim_end_matches(".gguf");
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lowered = trimmed.to_lowercase();
+    let ctx_index = lowered.rfind("ctx")?;
+    let suffix = lowered.get(ctx_index + 3..)?;
+    let digits: String = suffix.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    digits
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .map(normalize_local_model_context_window)
+}
+
+fn model_name_matches_rnn_catalog_entry(model_name: &str, entry: &serde_json::Value) -> bool {
+    let trimmed = model_name.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let hf_file_matches = entry
+        .get("hf_file")
+        .and_then(|value| value.as_str())
+        .map(|value| {
+            value.trim_end_matches(".pth")
+                .trim_end_matches(".safetensors")
+                .trim_end_matches(".gguf")
+                == trimmed
+        })
+        .unwrap_or(false);
+
+    hf_file_matches
+        || entry.get("id").and_then(|value| value.as_str()) == Some(trimmed)
+        || entry.get("name").and_then(|value| value.as_str()) == Some(trimmed)
+        || entry.get("display_name").and_then(|value| value.as_str()) == Some(trimmed)
+}
+
+fn extract_rnn_catalog_context_window(
+    payload: &serde_json::Value,
+    model_name: &str,
+) -> Option<usize> {
+    let trimmed = model_name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let catalog = payload.get("catalog").and_then(|value| value.as_array())?;
+    let local_catalog_id = payload
+        .get("local")
+        .and_then(|value| value.as_array())
+        .and_then(|entries| {
+            entries.iter().find_map(|entry| {
+                let local_name_matches =
+                    entry.get("name").and_then(|value| value.as_str()) == Some(trimmed)
+                        || entry.get("filename").and_then(|value| value.as_str()).map(|value| {
+                            value.trim_end_matches(".pth")
+                                .trim_end_matches(".safetensors")
+                                .trim_end_matches(".gguf")
+                                == trimmed
+                        }) == Some(true);
+                if local_name_matches {
+                    entry.get("catalog_id").and_then(|value| value.as_str())
+                } else {
+                    None
+                }
+            })
+        });
+
+    let matching_catalog_entry = if let Some(catalog_id) = local_catalog_id {
+        catalog
+            .iter()
+            .find(|entry| entry.get("id").and_then(|value| value.as_str()) == Some(catalog_id))
+    } else {
+        catalog
+            .iter()
+            .find(|entry| model_name_matches_rnn_catalog_entry(trimmed, entry))
+    }?;
+
+    matching_catalog_entry
+        .get("context")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .map(normalize_local_model_context_window)
+}
+
+async fn query_rnn_runtime_context_window(model_name: &str) -> Result<Option<usize>, String> {
+    if model_name.trim().is_empty() {
+        return Ok(None);
+    }
+    let payload = rnn_runtime_json_request(reqwest::Method::GET, "/api/rnn/catalog", None, 30).await?;
+    Ok(extract_rnn_catalog_context_window(&payload, model_name)
+        .or_else(|| parse_context_window_from_model_name(model_name)))
+}
+
+async fn resolve_local_model_context_window(
+    _app: &AppHandle,
+    local_model_config: &LocalModelRuntimeConfig,
+) -> usize {
     if local_model_config.service_type == LocalModelServiceType::Ollama {
-        match query_ollama_context_window(&local_model_config.base_url, &local_model_config.model_name)
-            .await
+        match query_ollama_context_window(
+            &local_model_config.base_url,
+            &local_model_config.model_name,
+        )
+        .await
         {
             Ok(Some(context_window)) => return context_window,
             Ok(None) => {}
@@ -11788,6 +12397,21 @@ async fn resolve_local_model_context_window(local_model_config: &LocalModelRunti
                     local_model_config.model_name, err
                 );
             }
+        }
+    } else if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+        match query_rnn_runtime_context_window(&local_model_config.model_name).await {
+            Ok(Some(context_window)) => return context_window,
+            Ok(None) => {}
+            Err(err) => {
+                println!(
+                    "[Entropic] Failed to inspect managed runtime context window for {}: {}",
+                    local_model_config.model_name, err
+                );
+            }
+        }
+        if let Some(context_window) = parse_context_window_from_model_name(&local_model_config.model_name)
+        {
+            return context_window;
         }
     }
     LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK
@@ -12163,6 +12787,195 @@ pub async fn test_local_model_connection(
     }
 
     Ok(())
+}
+
+fn build_openai_chat_completions_url(base_url: &str) -> String {
+    format!("{}/chat/completions", base_url.trim().trim_end_matches('/'))
+}
+
+fn build_ollama_chat_url(base_url: &str) -> String {
+    format!(
+        "{}/api/chat",
+        base_url
+            .trim()
+            .trim_end_matches('/')
+            .trim_end_matches("/v1")
+    )
+}
+
+fn extract_openai_chat_text(body: &serde_json::Value) -> Option<String> {
+    if let Some(content) = body
+        .get("choices")
+        .and_then(|value| value.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+    {
+        if let Some(text) = content.as_str() {
+            return Some(text.to_string());
+        }
+        if let Some(parts) = content.as_array() {
+            let joined = parts
+                .iter()
+                .filter_map(|part| {
+                    part.get("text")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            if !joined.is_empty() {
+                return Some(joined);
+            }
+        }
+    }
+
+    body.get("choices")
+        .and_then(|value| value.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("text"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn extract_ollama_chat_text(body: &serde_json::Value) -> Option<String> {
+    body.get("message")
+        .and_then(|value| value.get("content"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            body.get("response")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+}
+
+#[tauri::command]
+pub async fn debug_local_model_chat(
+    app: AppHandle,
+    messages: Vec<DirectLocalChatDebugMessage>,
+) -> Result<DirectLocalChatDebugResponsePayload, String> {
+    let local_model_config = read_local_model_config(&app)?
+        .ok_or_else(|| "Configure Local Models before using direct local debug chat.".to_string())?;
+    if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+        ensure_rnn_runtime_ready(&app).await?;
+    }
+
+    let normalized_messages = messages
+        .into_iter()
+        .filter_map(|message| {
+            let role = message.role.trim().to_lowercase();
+            let content = message.content.trim().to_string();
+            if content.is_empty() {
+                return None;
+            }
+            match role.as_str() {
+                "user" | "assistant" | "system" => {
+                    Some(serde_json::json!({ "role": role, "content": content }))
+                }
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if normalized_messages.is_empty() {
+        return Err("Add a message before running direct local debug chat.".to_string());
+    }
+
+    let request_api_key = if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+        None
+    } else {
+        let trimmed = local_model_config.api_key.trim();
+        if trimmed.is_empty() || trimmed == "local-placeholder" {
+            None
+        } else {
+            Some(trimmed)
+        }
+    };
+
+    let input_chars = normalized_messages
+        .iter()
+        .filter_map(|message| message.get("content").and_then(|value| value.as_str()))
+        .map(str::len)
+        .sum::<usize>();
+    let history_messages = normalized_messages.len();
+    let duration_started = Instant::now();
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let body = if local_model_config.api_mode == LocalModelApiMode::Ollama {
+        let context_window = resolve_local_model_context_window(&app, &local_model_config).await;
+        serde_json::json!({
+            "model": local_model_config.model_name,
+            "messages": normalized_messages,
+            "stream": false,
+            "options": {
+                "num_ctx": context_window,
+            }
+        })
+    } else {
+        serde_json::json!({
+            "model": local_model_config.model_name,
+            "messages": normalized_messages,
+            "stream": false,
+        })
+    };
+
+    let url = if local_model_config.api_mode == LocalModelApiMode::Ollama {
+        build_ollama_chat_url(&local_model_config.base_url)
+    } else {
+        build_openai_chat_completions_url(&local_model_config.base_url)
+    };
+
+    let mut req = client.post(&url).json(&body);
+    if let Some(api_key) = request_api_key {
+        req = req.header("Authorization", format!("Bearer {}", api_key));
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Direct local debug request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let error_body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "Direct local debug request failed with {}{}",
+            status,
+            if error_body.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", error_body.trim())
+            }
+        ));
+    }
+
+    let body = resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Direct local debug response parse failed: {}", e))?;
+
+    let text = if local_model_config.api_mode == LocalModelApiMode::Ollama {
+        extract_ollama_chat_text(&body)
+    } else {
+        extract_openai_chat_text(&body)
+    }
+    .unwrap_or_default();
+
+    Ok(DirectLocalChatDebugResponsePayload {
+        text: text.clone(),
+        provider: local_model_config.provider_id().to_string(),
+        model: local_model_config.model_name.clone(),
+        base_url: local_model_config.base_url.clone(),
+        duration_ms: duration_started.elapsed().as_millis() as u64,
+        history_messages,
+        input_chars,
+        response_chars: text.chars().count(),
+    })
 }
 
 #[tauri::command]

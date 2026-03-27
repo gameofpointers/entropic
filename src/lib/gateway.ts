@@ -38,7 +38,8 @@ function isUnsupportedChatSendOptionsError(error: unknown): boolean {
   }
   return (
     message.includes("unexpected property 'disableTools'") ||
-    message.includes("unexpected property 'bootstrapContextMode'")
+    message.includes("unexpected property 'bootstrapContextMode'") ||
+    message.includes("unexpected property 'debugPromptCapture'")
   );
 }
 
@@ -690,6 +691,7 @@ export class GatewayClient {
     options?: {
       disableTools?: boolean;
       bootstrapContextMode?: "full" | "lightweight";
+      debugPromptCapture?: boolean;
     },
   ): Promise<string> {
     const idempotency = idempotencyKey || crypto.randomUUID();
@@ -705,17 +707,24 @@ export class GatewayClient {
     if (options?.bootstrapContextMode) {
       params.bootstrapContextMode = options.bootstrapContextMode;
     }
+    if (options?.debugPromptCapture === true) {
+      params.debugPromptCapture = true;
+    }
 
     try {
       const result = await this.rpc<{ runId: string }>("chat.send", params);
       return result.runId;
     } catch (error) {
       if (
-        (options?.disableTools === true || options?.bootstrapContextMode) &&
+        (
+          options?.disableTools === true ||
+          options?.bootstrapContextMode ||
+          options?.debugPromptCapture === true
+        ) &&
         isUnsupportedChatSendOptionsError(error)
       ) {
         this.log(
-          "chat.send runtime rejected local chat tuning params; retrying without disableTools/bootstrapContextMode",
+          "chat.send runtime rejected local chat tuning/debug params; retrying without disableTools/bootstrapContextMode/debugPromptCapture",
         );
         const fallbackResult = await this.rpc<{ runId: string }>("chat.send", {
           sessionKey,

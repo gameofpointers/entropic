@@ -478,7 +478,7 @@ export const CONNECTION_MODE_OPTIONS: Array<{
   {
     value: "local-models",
     label: "Local Models",
-    description: "Use Ollama, LM Studio, vLLM, RNN Local, or another local service.",
+    description: "Use Ollama, LM Studio, vLLM, Managed Local Runtime, or another local service.",
   },
 ];
 
@@ -522,7 +522,7 @@ export const LOCAL_MODEL_SERVICE_OPTIONS: Array<{
   { value: "ollama", label: "Ollama" },
   { value: "lmstudio", label: "LM Studio" },
   { value: "vllm", label: "vLLM" },
-  { value: "rnn-local", label: "RNN Local" },
+  { value: "rnn-local", label: "Managed Local Runtime" },
   { value: "openai-compatible", label: "OpenAI-Compatible" },
 ];
 

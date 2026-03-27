@@ -1083,9 +1083,50 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         localDisableTools: next.disableTools,
         localLightweightBootstrap: next.lightweightBootstrap,
         localLightRuntimeDefaults: next.lightRuntimeDefaults,
+        localDebugMode: next.debugMode,
+        localDebugDirectBypass: next.debugDirectBypass,
+        localDirectDebugChat: undefined,
+        localCapturePromptPreview: next.capturePromptPreview,
       });
     } catch (error) {
       console.error("[Entropic] Failed to save local mode performance settings:", error);
+    }
+  }
+
+  async function handleManagedLocalRuntimeModelActivated(modelName: string) {
+    const runtimeModel = `local/${modelName}`;
+    setSelectedModel(runtimeModel);
+
+    if (connectionMode !== "local-models" || !gatewayRunning) {
+      return;
+    }
+
+    setIsTogglingGateway(true);
+    setStartupError(null);
+    clearGatewayRetry();
+    setShowGatewayStartup(true);
+    setGatewayStartupStage("launch");
+    markGatewayStarting("local");
+
+    try {
+      await invoke("restart_gateway", { model: runtimeModel });
+      setGatewayStartupStage("health");
+      await new Promise((r) => setTimeout(r, 2000));
+      await checkGateway();
+    } catch (error) {
+      console.error("[Entropic] Failed to switch managed local runtime model:", error);
+      const message = extractGatewayStartError(error);
+      const recoveredRuntime = await tryAutoRecoverRuntime(message);
+      if (recoveredRuntime) {
+        clearGatewayRetry();
+        scheduleGatewayRetry(() => {
+          void retryGatewayStartup();
+        });
+      } else {
+        setStartupError({ message });
+      }
+    } finally {
+      setIsTogglingGateway(false);
     }
   }
 
@@ -2073,6 +2114,10 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     setStartupError(null);
     try {
       gatewayHealthFailureStreakRef.current = 0;
+      const runtimeModel = ensureRuntimeModelConfigured();
+      if (!runtimeModel) {
+        return;
+      }
 
       if (!useLocalKeys && !isAuthConfigured) {
         setStartupError(buildProxyUnavailableStartupError());
@@ -2086,7 +2131,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
 
       if (proxyEnabled) {
         const started = await startGatewayProxyFlow({
-          model: selectedModel,
+          model: runtimeModel,
           image: imageModel,
           stopFirst: gatewayRunning,
           allowRetry: true,
@@ -2102,9 +2147,9 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         setGatewayStartupStage("launch");
         markGatewayStarting("local");
         if (gatewayRunning) {
-          await invoke("restart_gateway", { model: selectedModel });
+          await invoke("restart_gateway", { model: runtimeModel });
         } else {
-          await invoke("start_gateway", { model: selectedModel });
+          await invoke("start_gateway", { model: runtimeModel });
         }
       }
 
@@ -2518,6 +2563,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
           localModePerformanceSettings={localModePerformanceSettings}
           onLocalModelConfigChange={persistLocalModelConfig}
           onLocalModePerformanceSettingsChange={persistLocalModePerformanceSettings}
+          onManagedLocalRuntimeModelActivated={handleManagedLocalRuntimeModelActivated}
           localModel={localModelConfig.enabled && localModelConfig.modelName
             ? {
                 id: `local/${localModelConfig.modelName}`,
