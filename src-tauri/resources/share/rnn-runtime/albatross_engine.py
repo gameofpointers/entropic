@@ -69,8 +69,8 @@ class AlbatrossEngine(InferenceEngine):
             return
         system_prompt = (
             "You are a helpful, knowledgeable AI assistant.\n\n"
-            "User: Hello!\n\n"
-            "Assistant: Hello! How can I help you today?\n\n"
+            "User: Please reply briefly and clearly.\n\n"
+            "Assistant: Certainly.\n\n"
         )
         self.reset()
         for token in self.tokenizer.encode(system_prompt):
@@ -98,10 +98,14 @@ class AlbatrossEngine(InferenceEngine):
             raise RuntimeError("Albatross forward pass failed")
 
         all_tokens: List[int] = []
-        stop_pattern = re.compile(r"(?:\r?\n)+\s*(?:User|Assistant|System|Tool)(?:\s*:|\b)")
+        stop_pattern = re.compile(
+            r"(?:\r?\n)+\s*(?:User|Assistant|System|Tool)(?:\s*:|\b)|(?:^|\n)\s*#{1,3}\s*Context Checkpoint\b|<\|endoftext\|>",
+            re.IGNORECASE,
+        )
         trailing_turn_pattern = re.compile(
             r"(?:\r?\n)+\s*(?:User|Assistant|System|Tool)\s*:?\s*$"
         )
+        checkpoint_pattern = re.compile(r"(?is)(?:^|\n)\s*#{1,3}\s*Context Checkpoint\b.*$")
         emitted_text = ""
         holdback_chars = 24
         in_thinking = emit_initial_think
@@ -145,6 +149,8 @@ class AlbatrossEngine(InferenceEngine):
                 break
 
         final_text = self.tokenizer.decode(all_tokens, utf8_errors="replace")
+        final_text = re.sub(r"(?is)<\|endoftext\|>.*$", "", final_text)
+        final_text = checkpoint_pattern.sub("", final_text)
         final_text = trailing_turn_pattern.sub("", final_text).rstrip()
         final_delta = final_text[len(emitted_text) :]
         if final_delta and "\ufffd" not in final_delta:

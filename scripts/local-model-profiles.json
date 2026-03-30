@@ -49,6 +49,22 @@
       }
     },
     {
+      "id": "managed-qwen3-8b",
+      "description": "Managed Local Runtime via Entropic using Qwen3 8B GGUF.",
+      "connectionMode": "local-models",
+      "harnessMode": "live",
+      "selectedModel": "local/Qwen3-8B-Q4_K_M",
+      "localModelConfig": {
+        "enabled": true,
+        "serviceType": "rnn-local",
+        "apiMode": "openai-completions",
+        "baseUrl": "http://localhost:11445/v1",
+        "apiKey": "local-placeholder",
+        "modelName": "Qwen3-8B-Q4_K_M",
+        "allowNonLocal": false
+      }
+    },
+    {
       "id": "local-models-openai-compatible-template",
       "description": "Template for Local Models mode against a standalone OpenAI-compatible local endpoint.",
       "template": true,

@@ -220,49 +220,51 @@ const RECOMMENDATION_PROFILES: Record<string, RecommendationProfile> = {
     bestFor: "Smallest broadly useful starter model in the list.",
   },
   "nemotron3-nano-4b-q4-k-m": {
-    toolScore: 7.8,
+    toolScore: 7.4,
     speedScore: 8.3,
     lowVramScore: 8.9,
-    overallBonus: 0.4,
+    overallBonus: 0.2,
     strengths: ["current info", "edge", "small GPU"],
     bestFor: "Compact current-info and browser-heavy workflows.",
     caution: "Needs stronger prompt control than Qwen or Phi.",
   },
   "rwkv7-world-2.9b": {
-    toolScore: 5.4,
-    speedScore: 8.3,
-    lowVramScore: 7.6,
-    overallBonus: 0.1,
+    toolScore: 4.3,
+    speedScore: 7.9,
+    lowVramScore: 6.4,
+    overallBonus: -0.5,
     strengths: ["RWKV", "multilingual", "steady decode"],
-    bestFor: "Lean recurrent model for constrained VRAM.",
-    caution: "Less reliable for tools than the best small transformers.",
+    bestFor: "Recurrent local-chat experiment when VRAM is tight.",
+    caution: "Good experiment path, but not a first-choice tool model for OpenClaw.",
   },
   "rwkv7-g1-2.9b": {
-    toolScore: 5.1,
-    speedScore: 7.8,
-    lowVramScore: 7.2,
+    toolScore: 4.0,
+    speedScore: 7.4,
+    lowVramScore: 6.2,
     strengths: ["RWKV", "thinking", "local runtime"],
-    bestFor: "Reasoning-oriented RWKV option when you want Albatross.",
+    bestFor: "Reasoning-oriented RWKV experiment when you want Albatross.",
+    caution: "Still behind the best small transformers for reliable tools.",
   },
   "rwkv6-world-1.6b": {
-    toolScore: 3.9,
-    speedScore: 7.2,
-    lowVramScore: 6.4,
+    toolScore: 3.2,
+    speedScore: 6.8,
+    lowVramScore: 5.8,
     strengths: ["legacy RWKV", "small footprint", "baseline"],
     bestFor: "Legacy RWKV baseline if you specifically want Finch compatibility.",
     caution: "Fits small GPUs, but RWKV-7 is a better default and Finch is not a first recommendation for tools.",
   },
   "rwkv7-g1e-7.2b-q4-k-m-gguf": {
-    toolScore: 5.2,
+    toolScore: 4.1,
     speedScore: 6.7,
-    lowVramScore: 6.3,
+    lowVramScore: 5.7,
     strengths: ["RWKV", "GGUF", "experiments"],
     bestFor: "Larger GGUF RWKV experiment on 8-12 GB GPUs.",
+    caution: "Experiment-first relative to Qwen, Phi, Llama, and Nemotron.",
   },
   "rwkv7-g1e-13.3b-q4-k-m": {
-    toolScore: 4.7,
+    toolScore: 3.8,
     speedScore: 5.4,
-    lowVramScore: 3.5,
+    lowVramScore: 2.9,
     strengths: ["RWKV", "large context experiments"],
     bestFor: "Large local RWKV experiment when 12 GB VRAM is available.",
     caution: "Tight fit on 12 GB cards and not a first recommendation.",
@@ -599,6 +601,19 @@ function hardwareFitForEntry(
   };
 }
 
+function hardwareFitBadgeClass(tone: HardwareFit["tone"]): string {
+  if (tone === "good") {
+    return "border-emerald-500/25 bg-emerald-500/10 text-emerald-600";
+  }
+  if (tone === "warn") {
+    return "border-amber-500/25 bg-amber-500/10 text-amber-600";
+  }
+  if (tone === "bad") {
+    return "border-red-500/25 bg-red-500/10 text-red-600";
+  }
+  return "border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-secondary)]";
+}
+
 function recommendationScore(
   entry: RnnCatalogEntry,
   slot: RecommendationSlot,
@@ -899,6 +914,15 @@ export function RnnLocalModelManager({
           }),
         );
         await Promise.resolve(onModelActivated?.(nextModel));
+        setMessage(`Loaded ${nextModel}. Warming it up...`);
+        void invoke("warm_rnn_model", { modelName: nextModel })
+          .then(async () => {
+            await refreshCatalog({ quiet: true });
+            setMessage(`Loaded and warmed ${nextModel}.`);
+          })
+          .catch((warmError) => {
+            setError(String(warmError));
+          });
       }
       if (
         nextBusyAction.kind === "delete" &&
@@ -1157,6 +1181,44 @@ export function RnnLocalModelManager({
     if (rightScore !== leftScore) return rightScore - leftScore;
     return formatCatalogName(left).localeCompare(formatCatalogName(right));
   });
+  const groupedCatalogEntries: Array<{
+    family: string;
+    series: Array<{
+      series: string;
+      entries: RnnCatalogEntry[];
+      downloadedCount: number;
+      loadedCount: number;
+    }>;
+    downloadedCount: number;
+    loadedCount: number;
+  }> = [];
+  const groupedCatalogFamilyMap = new Map<string, (typeof groupedCatalogEntries)[number]>();
+  for (const entry of rankedCatalogEntries) {
+    const family = catalogFamily(entry);
+    const series = catalogSeries(entry);
+    let familyGroup = groupedCatalogFamilyMap.get(family);
+    if (!familyGroup) {
+      familyGroup = { family, series: [], downloadedCount: 0, loadedCount: 0 };
+      groupedCatalogFamilyMap.set(family, familyGroup);
+      groupedCatalogEntries.push(familyGroup);
+    }
+    let seriesGroup = familyGroup.series.find((candidate) => candidate.series === series);
+    if (!seriesGroup) {
+      seriesGroup = { series, entries: [], downloadedCount: 0, loadedCount: 0 };
+      familyGroup.series.push(seriesGroup);
+    }
+    seriesGroup.entries.push(entry);
+    const localEntry = localByCatalogId.get(entry.id);
+    const isLoaded =
+      snapshot?.loadedModel === localEntry?.name || entry.loaded === true || localEntry?.loaded === true;
+    if (isLoaded) {
+      familyGroup.loadedCount += 1;
+      seriesGroup.loadedCount += 1;
+    } else if (localEntry) {
+      familyGroup.downloadedCount += 1;
+      seriesGroup.downloadedCount += 1;
+    }
+  }
   const hardwareSummary =
     preferredDevice === "cuda" && gpuMemoryTotalMiB
       ? `${formatMemory(gpuMemoryTotalMiB)} ${gpuMemoryName ? `· ${gpuMemoryName}` : "GPU"}`
@@ -1284,81 +1346,251 @@ export function RnnLocalModelManager({
         )}
       </div>
 
+      {recommendedModels.length ? (
+        <div className="space-y-1 pt-3 border-t border-[var(--border-subtle)]">
+          <div className="text-[13px] font-semibold text-[var(--text-primary)]">
+            Recommended
+          </div>
+          <div className="grid gap-2 grid-cols-3">
+            {recommendedModels.map((item) => {
+              const localEntry = localByCatalogId.get(item.entry.id);
+              const isLoaded =
+                snapshot?.loadedModel === localEntry?.name ||
+                item.entry.loaded === true ||
+                localEntry?.loaded === true;
+              const activeDownload =
+                snapshot?.downloadState?.catalogId === item.entry.id ? snapshot.downloadState : null;
+              const isDownloading = activeDownload?.status === "downloading";
+              return (
+                <div
+                  key={`${item.slot}:${item.entry.id}`}
+                  className={clsx(
+                    "rounded-xl border p-3 flex flex-col",
+                    isLoaded
+                      ? "border-emerald-500/30 bg-emerald-500/5"
+                      : "border-[var(--border-subtle)] bg-[var(--bg-panel)]/50",
+                  )}
+                >
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
+                    {RECOMMENDATION_LABELS[item.slot]}
+                  </div>
+                  <div className="mt-1 text-[13px] font-semibold text-[var(--text-primary)] truncate">
+                    {formatCatalogName(item.entry)}
+                  </div>
+                  <div className="mt-1 text-[11px] text-[var(--text-tertiary)]">
+                    {[formatSize(item.entry.size_gb), formatBackend(item.entry.backend)].filter(Boolean).join(" · ")}
+                  </div>
+                  <div className="mt-auto pt-3">
+                    {isLoaded ? (
+                      <span className="text-[11px] font-medium text-emerald-600">Active</span>
+                    ) : localEntry ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void runAction(
+                            { kind: "load", target: localEntry.name },
+                            () => invoke("load_rnn_model", { modelName: localEntry.name }),
+                            `Loaded ${localEntry.display_name || localEntry.name}.`,
+                          )
+                        }
+                        disabled={busyAction !== null}
+                        className={buttonClassName}
+                      >
+                        <Cpu className="h-3.5 w-3.5" />
+                        Load
+                      </button>
+                    ) : isDownloading ? (
+                      <span className="flex items-center gap-1.5 text-[11px] text-[var(--system-blue)]">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void startDownload(item.entry.id, formatCatalogName(item.entry))}
+                        disabled={busyAction !== null || snapshot?.downloadState?.status === "downloading"}
+                        className={buttonClassName}
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        Download
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+
       <div className="space-y-1 pt-3 border-t border-[var(--border-subtle)]">
         <div className="flex items-center justify-between gap-2">
           <div className="text-[13px] font-semibold text-[var(--text-primary)]">
             Available Models
           </div>
           <div className="text-[11px] text-[var(--text-tertiary)]">
-            {catalogEntries.length}
+            {catalogEntries.length} · {hardwareSummary}
           </div>
         </div>
         {catalogEntries.length ? (
           <div className="rounded-xl border border-[var(--border-subtle)] divide-y divide-[var(--border-subtle)] overflow-hidden">
-            {rankedCatalogEntries.map((entry) => {
-              const localEntry = localByCatalogId.get(entry.id);
-              const activeDownload =
-                snapshot?.downloadState?.catalogId === entry.id ? snapshot.downloadState : null;
-              const isDownloading = activeDownload?.status === "downloading";
-              const progressLabel = isDownloading
-                ? typeof activeDownload?.progressPercent === "number"
-                  ? `${activeDownload.progressPercent.toFixed(0)}%`
-                  : null
-                : null;
-              return (
-                <details key={entry.id} className="group">
-                  <summary className="flex items-center justify-between gap-2 px-3 py-2 cursor-pointer list-none">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <ChevronDown className="w-3 h-3 text-[var(--text-tertiary)] transition-transform group-open:rotate-180 flex-shrink-0" />
-                      <span className="text-[13px] font-medium text-[var(--text-primary)] truncate">
-                        {entry.display_name || entry.name}
-                      </span>
-                      {formatSize(entry.size_gb) && (
-                        <span className="text-[11px] text-[var(--text-tertiary)] flex-shrink-0">
-                          {formatSize(entry.size_gb)}
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.preventDefault()}>
-                      {localEntry ? (
-                        <span className="text-[11px] font-medium text-[var(--system-blue)]">Downloaded</span>
-                      ) : isDownloading ? (
-                        <span className="flex items-center gap-1.5 text-[11px] text-[var(--system-blue)]">
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                          {progressLabel || "..."}
-                        </span>
-                      ) : (
-                        <button type="button" onClick={(e) => { e.stopPropagation(); void startDownload(entry.id, entry.display_name || entry.name); }} disabled={busyAction !== null || snapshot?.downloadState?.status === "downloading"} className={buttonClassName}>
-                          <Download className="h-3.5 w-3.5" />
-                          Download
-                        </button>
-                      )}
-                    </div>
-                  </summary>
-                  <div className="px-3 pb-2.5 pt-1 pl-8 border-t border-[var(--border-subtle)] bg-[var(--bg-secondary)]/50">
-                    <div className="text-[11px] text-[var(--text-secondary)] leading-relaxed">
-                      {[
-                        formatBackend(entry.backend),
-                        formatArchitecture(entry.architecture),
-                        entry.params,
-                        entry.hf_repo ? formatProvider(entry.hf_repo) : null,
-                      ].filter(Boolean).join(" · ")}
-                    </div>
-                    {entry.description && (
-                      <div className="mt-1 text-[11px] text-[var(--text-tertiary)] leading-relaxed">{entry.description}</div>
-                    )}
-                    {isDownloading && (
-                      <div className="mt-2 h-1 overflow-hidden rounded-full bg-[var(--border-subtle)]">
-                        <div
-                          className="h-full rounded-full bg-[var(--system-blue)] transition-all"
-                          style={{ width: typeof activeDownload?.progressPercent === "number" ? `${Math.max(4, Math.min(100, activeDownload.progressPercent))}%` : "20%" }}
-                        />
-                      </div>
-                    )}
+            {groupedCatalogEntries.map((familyGroup) => (
+              <details key={familyGroup.family} className="group" open={familyGroup.loadedCount > 0}>
+                <summary className="flex items-center justify-between gap-2 px-3 py-2.5 cursor-pointer list-none bg-[var(--bg-panel)]/35">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <ChevronDown className="w-3 h-3 text-[var(--text-tertiary)] transition-transform group-open:rotate-180 flex-shrink-0" />
+                    <span className="text-[13px] font-semibold text-[var(--text-primary)] truncate">
+                      {familyGroup.family}
+                    </span>
                   </div>
-                </details>
-              );
-            })}
+                  <div className="flex items-center gap-2 text-[11px] text-[var(--text-tertiary)]">
+                    {familyGroup.loadedCount > 0 ? <span>{familyGroup.loadedCount} active</span> : null}
+                    {familyGroup.downloadedCount > 0 ? <span>{familyGroup.downloadedCount} downloaded</span> : null}
+                    <span>{familyGroup.series.reduce((sum, series) => sum + series.entries.length, 0)} models</span>
+                  </div>
+                </summary>
+                <div className="border-t border-[var(--border-subtle)] bg-[var(--bg-secondary)]/40">
+                  {familyGroup.series.map((seriesGroup) => (
+                    <details
+                      key={`${familyGroup.family}:${seriesGroup.series}`}
+                      className="group/series border-b border-[var(--border-subtle)] last:border-b-0"
+                      open={seriesGroup.loadedCount > 0}
+                    >
+                      <summary className="flex items-center justify-between gap-2 px-4 py-2 cursor-pointer list-none">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <ChevronDown className="w-3 h-3 text-[var(--text-tertiary)] transition-transform group-open/series:rotate-180 flex-shrink-0" />
+                          <span className="text-[12px] font-medium text-[var(--text-primary)] truncate">
+                            {seriesGroup.series}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 text-[11px] text-[var(--text-tertiary)]">
+                          {seriesGroup.loadedCount > 0 ? <span>{seriesGroup.loadedCount} active</span> : null}
+                          {seriesGroup.downloadedCount > 0 ? <span>{seriesGroup.downloadedCount} downloaded</span> : null}
+                          <span>{seriesGroup.entries.length}</span>
+                        </div>
+                      </summary>
+                      <div className="border-t border-[var(--border-subtle)] divide-y divide-[var(--border-subtle)] bg-[var(--bg-card)]/35">
+                        {seriesGroup.entries.map((entry) => {
+                          const localEntry = localByCatalogId.get(entry.id);
+                          const activeDownload =
+                            snapshot?.downloadState?.catalogId === entry.id ? snapshot.downloadState : null;
+                          const isDownloading = activeDownload?.status === "downloading";
+                          const progressLabel = isDownloading
+                            ? typeof activeDownload?.progressPercent === "number"
+                              ? `${activeDownload.progressPercent.toFixed(0)}%`
+                              : null
+                            : null;
+                          const fit = hardwareFitForEntry(entry, gpuMemoryTotalMiB, preferredDevice);
+                          const profile = recommendationProfileForEntry(entry);
+                          const backendReady = backendReadyForEntry(entry, runtimeStatus);
+                          const recommendationLabel = recommendedModelLabels.get(entry.id) || null;
+                          return (
+                            <details key={entry.id} className="group/model">
+                              <summary className="flex items-center justify-between gap-2 px-5 py-2 cursor-pointer list-none">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <ChevronDown className="w-3 h-3 text-[var(--text-tertiary)] transition-transform group-open/model:rotate-180 flex-shrink-0" />
+                                  <span className="text-[13px] font-medium text-[var(--text-primary)] truncate">
+                                    {formatCatalogName(entry)}
+                                  </span>
+                                  {formatSize(entry.size_gb) ? (
+                                    <span className="text-[11px] text-[var(--text-tertiary)] flex-shrink-0">
+                                      {formatSize(entry.size_gb)}
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <div className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.preventDefault()}>
+                                  {localEntry ? (
+                                    <span className="text-[11px] font-medium text-[var(--system-blue)]">Downloaded</span>
+                                  ) : isDownloading ? (
+                                    <span className="flex items-center gap-1.5 text-[11px] text-[var(--system-blue)]">
+                                      <Loader2 className="h-3 w-3 animate-spin" />
+                                      {progressLabel || "..."}
+                                    </span>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        void startDownload(entry.id, formatCatalogName(entry));
+                                      }}
+                                      disabled={busyAction !== null || snapshot?.downloadState?.status === "downloading"}
+                                      className={buttonClassName}
+                                    >
+                                      <Download className="h-3.5 w-3.5" />
+                                      Download
+                                    </button>
+                                  )}
+                                </div>
+                              </summary>
+                              <div className="px-5 pb-3 pt-1 border-t border-[var(--border-subtle)] bg-[var(--bg-secondary)]/50">
+                                <div className="flex flex-wrap gap-1.5">
+                                  {recommendationLabel ? (
+                                    <span className="inline-flex items-center rounded-full bg-[var(--system-blue)]/10 px-2 py-0.5 text-[10px] font-semibold text-[var(--system-blue)]">
+                                      {recommendationLabel}
+                                    </span>
+                                  ) : null}
+                                  <span className={clsx(badgeClassName, hardwareFitBadgeClass(fit.tone))}>
+                                    {fit.label}
+                                  </span>
+                                  {!backendReady ? (
+                                    <span className="inline-flex items-center rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-600">
+                                      Install backend first
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <div className="mt-2 text-[11px] text-[var(--text-secondary)] leading-relaxed">
+                                  {[
+                                    formatBackend(entry.backend),
+                                    formatArchitecture(entry.architecture),
+                                    entry.params,
+                                    entry.hf_repo ? formatProvider(entry.hf_repo) : null,
+                                    fit.estimatedVramGb ? `Est. ${fit.estimatedVramGb.toFixed(1)} GB VRAM` : null,
+                                  ].filter(Boolean).join(" · ")}
+                                </div>
+                                {entry.description ? (
+                                  <div className="mt-1 text-[11px] text-[var(--text-tertiary)] leading-relaxed">
+                                    {entry.description}
+                                  </div>
+                                ) : null}
+                                {profile.bestFor ? (
+                                  <div className="mt-2 text-[12px] text-[var(--text-primary)] leading-relaxed">
+                                    {profile.bestFor}
+                                  </div>
+                                ) : null}
+                                <div className="mt-2 flex flex-wrap gap-1">
+                                  {profile.strengths.slice(0, 4).map((strength) => (
+                                    <span key={strength} className={badgeClassName}>
+                                      {strength}
+                                    </span>
+                                  ))}
+                                </div>
+                                {profile.caution ? (
+                                  <div className="mt-2 text-[11px] text-[var(--text-tertiary)] leading-relaxed">
+                                    {profile.caution}
+                                  </div>
+                                ) : null}
+                                {isDownloading ? (
+                                  <div className="mt-2 h-1 overflow-hidden rounded-full bg-[var(--border-subtle)]">
+                                    <div
+                                      className="h-full rounded-full bg-[var(--system-blue)] transition-all"
+                                      style={{
+                                        width:
+                                          typeof activeDownload?.progressPercent === "number"
+                                            ? `${Math.max(4, Math.min(100, activeDownload.progressPercent))}%`
+                                            : "20%",
+                                      }}
+                                    />
+                                  </div>
+                                ) : null}
+                              </div>
+                            </details>
+                          );
+                        })}
+                      </div>
+                    </details>
+                  ))}
+                </div>
+              </details>
+            ))}
           </div>
         ) : (
           <div className="py-2 text-xs text-[var(--text-secondary)]">

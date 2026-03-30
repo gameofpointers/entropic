@@ -82,8 +82,53 @@ LIVE_INFO_REQUEST_RE = re.compile(
     r"\b(weather|forecast|temperature|rain|snow|news|headline|stock|price|market|score|scores|schedule|current|currently|latest|today|tonight|right now)\b",
     re.IGNORECASE,
 )
+SIMPLE_CHAT_REQUEST_RE = re.compile(
+    r"^\s*(?:hi|hello|hey|yo|sup|how are you(?: doing)?|how's it going|hows it going|what's up|whats up|ok|okay|thanks|thank you|good morning|good afternoon|good evening)[.!?]*\s*$",
+    re.IGNORECASE,
+)
 MEMORY_REQUEST_RE = re.compile(r"\bmemory\b", re.IGNORECASE)
+SPREADSHEET_REQUEST_RE = re.compile(
+    r"\b(excel|spreadsheet|workbook|csv|xlsx|xls)\b",
+    re.IGNORECASE,
+)
+SPREADSHEET_ACTION_RE = re.compile(
+    r"\b(create|build|make|generate|write|save|export|list|put|add|fill)\b",
+    re.IGNORECASE,
+)
+LOCAL_FILE_HINT_RE = re.compile(
+    r"\b(local|workspace|file\s*system|filesystem|on\s+disk|on\s+my\s+machine|locally|file\s+path|folder|directory)\b",
+    re.IGNORECASE,
+)
+CLOUD_SPREADSHEET_HINT_RE = re.compile(
+    r"\b(google\s+sheets?|google\s+drive|sheets_(?:create|append|read|write)|drive_(?:list|search|upload|download))\b",
+    re.IGNORECASE,
+)
+CLOUD_SPREADSHEET_NEGATION_RE = re.compile(
+    r"\b(?:not|don't|do\s+not|dont|without|no)\b[^.!?\n]{0,60}\b(?:google\s+sheets?|google\s+drive)\b",
+    re.IGNORECASE,
+)
+FILE_LOCATION_FOLLOWUP_RE = re.compile(
+    r"\b(where\s+is\s+it|where\s+did\s+you\s+save|what(?:'s|\s+is)\s+the\s+path|file\s+path|where\s+is\s+the\s+file)\b",
+    re.IGNORECASE,
+)
+NAME_REQUEST_RE = re.compile(
+    r"\b(?:what(?:'s|\s+is)\s+your\s+name|who\s+are\s+you)\b",
+    re.IGNORECASE,
+)
 URL_RE = re.compile(r"https?://[^\s<>'\")\]]+", re.IGNORECASE)
+WORKSPACE_FILE_SECTION_RE = re.compile(
+    r"(?ms)^##\s+(/data/\.openclaw/workspace/[^\n]+)\n(.*?)(?=^##\s+/data/\.openclaw/workspace/|\Z)"
+)
+IDENTITY_NAME_RE = re.compile(r"^\s*-\s*\*\*Name:\*\*\s*(.+?)\s*$", re.MULTILINE)
+SOUL_ABOUT_RE = re.compile(r"^\s*#\s*About\s+(.+?)\s*$", re.MULTILINE)
+WRITE_SUCCESS_PATH_RE = re.compile(
+    r"\bSuccessfully wrote\s+\d+\s+bytes\s+to\s+(.+?)(?:\s*$|\n)",
+    re.IGNORECASE,
+)
+LOCAL_SPREADSHEET_PATH_RE = re.compile(
+    r"([^\s\"']+\.(?:csv|xlsx|xls))\b",
+    re.IGNORECASE,
+)
 LEGACY_LLAMA_CPP_N_CTX = 8192
 DEFAULT_LLAMA_CPP_N_CTX = 32768
 IGNORED_TOOL_NAMES = {
@@ -755,6 +800,25 @@ def _latest_user_message_text(messages: List[Dict[str, Any]]) -> str:
     return ""
 
 
+def _is_simple_chat_request(
+    messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None
+) -> bool:
+    if tools:
+        return False
+    latest_user_text = _latest_user_message_text(messages)
+    if not latest_user_text or len(latest_user_text) > 80:
+        return False
+    if LIVE_INFO_REQUEST_RE.search(latest_user_text):
+        return False
+    if MEMORY_REQUEST_RE.search(latest_user_text):
+        return False
+    if SPREADSHEET_REQUEST_RE.search(latest_user_text):
+        return False
+    if URL_RE.search(latest_user_text):
+        return False
+    return bool(SIMPLE_CHAT_REQUEST_RE.match(latest_user_text))
+
+
 def _messages_include_tool_result(messages: List[Dict[str, Any]]) -> bool:
     for message in messages:
         if not isinstance(message, dict):
@@ -854,6 +918,51 @@ def _summarize_tool_description(description: str) -> str:
     return (first_sentence or text)[:160].rstrip()
 
 
+def _extract_workspace_persona_context(text: str) -> Dict[str, str]:
+    if not text or "/data/.openclaw/workspace/" not in text:
+        return {}
+
+    sections: Dict[str, str] = {}
+    for match in WORKSPACE_FILE_SECTION_RE.finditer(text):
+        section_path = (match.group(1) or "").strip()
+        body = (match.group(2) or "").strip()
+        if section_path:
+            sections[section_path] = body
+
+    identity_body = sections.get("/data/.openclaw/workspace/IDENTITY.md", "")
+    soul_body = sections.get("/data/.openclaw/workspace/SOUL.md", "")
+
+    name = ""
+    if identity_body:
+        name_match = IDENTITY_NAME_RE.search(identity_body)
+        if name_match:
+            candidate = name_match.group(1).strip()
+            if candidate and candidate not in {"_", "(optional)"}:
+                name = candidate
+
+    if not name and soul_body:
+        soul_about_match = SOUL_ABOUT_RE.search(soul_body)
+        if soul_about_match:
+            candidate = soul_about_match.group(1).strip()
+            if candidate:
+                name = candidate
+
+    soul_lines: List[str] = []
+    if soul_body:
+        for raw_line in soul_body.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            soul_lines.append(line)
+            if len(soul_lines) >= 2:
+                break
+
+    return {
+        "name": name,
+        "soulSummary": " ".join(soul_lines).strip(),
+    }
+
+
 def _render_tooling_section(tools: Optional[List[Dict[str, Any]]]) -> str:
     lines = [
         "## Tooling",
@@ -886,8 +995,24 @@ def _compact_openclaw_system_prompt(
         return _rewrite_system_prompt_for_effective_tools(text, tools)
     if "## Tooling" not in text and "## Workspace Files (injected)" not in text:
         return _rewrite_system_prompt_for_effective_tools(text, tools)
+    persona = _extract_workspace_persona_context(text)
     lines = [
         "You are a personal assistant running inside OpenClaw.",
+    ]
+    if persona.get("name"):
+        lines.extend(
+            [
+                "## Persona",
+                f"- Your assigned workspace name is {persona['name']}.",
+                f"- If asked your name or who you are, answer with {persona['name']}, not OpenClaw.",
+                "- OpenClaw is the runtime/platform you run inside, not your personal name.",
+            ]
+        )
+    if persona.get("soulSummary"):
+        if "## Persona" not in lines:
+            lines.append("## Persona")
+        lines.append(f"- {persona['soulSummary']}")
+    lines.extend([
         _render_tooling_section(tools),
         "## Behavior",
         "- Answer the user directly, clearly, and briefly.",
@@ -896,12 +1021,14 @@ def _compact_openclaw_system_prompt(
         "- Ignore bootstrap, heartbeat, reply-tag, and workspace bootstrap instructions unless the user explicitly asks about them.",
         "- For current information requests, use an available web/browser tool before answering.",
         "- For memory or prior-context requests, use memory_search first; use memory_get only if a follow-up snippet is needed.",
+        "- For spreadsheet, CSV, Excel, document, or file-creation requests, prefer local workspace files and local file tools unless the user explicitly asks for Google Drive, Google Sheets, or another cloud app.",
+        "- When you create a local file, report the exact local path or filename in the final answer.",
         "- After a tool result is available, answer from the tool result plainly and concisely.",
         "- If no tool is needed, answer normally in plain text.",
         "## Output",
         "- Return either a valid tool call or a normal assistant answer.",
         "- Do not narrate the tool call before or after making it.",
-    ]
+    ])
     return "\n".join(lines)
 
 
@@ -931,6 +1058,22 @@ def _should_force_tool_choice_required(
     if not latest_user_text:
         return False
     latest_tool_text = _latest_tool_message_text(messages)
+    local_workspace_tools = available_tools.intersection({"write", "edit", "read", "exec", "process"})
+
+    if (
+        SPREADSHEET_REQUEST_RE.search(latest_user_text)
+        and SPREADSHEET_ACTION_RE.search(latest_user_text)
+        and local_workspace_tools
+        and _conversation_prefers_local_spreadsheet(messages)
+    ):
+        if (
+            FILE_LOCATION_FOLLOWUP_RE.search(latest_user_text)
+            and not SPREADSHEET_ACTION_RE.search(latest_user_text)
+            and latest_tool_text
+            and not _tool_message_indicates_error(latest_tool_text)
+        ):
+            return False
+        return True
 
     if _is_explicit_browser_request(latest_user_text):
         if not available_tools.intersection({"browser", "web_fetch"}):
@@ -972,6 +1115,99 @@ def _extract_memory_topic_from_text(latest_user_text: str) -> str:
     return topic or "that topic"
 
 
+def _all_user_message_text(messages: List[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "").strip().lower() != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            parts.append(content.strip())
+        elif content is not None:
+            parts.append(str(content).strip())
+    return "\n".join(part for part in parts if part)
+
+
+def _conversation_prefers_local_spreadsheet(messages: List[Dict[str, Any]]) -> bool:
+    conversation_text = _all_user_message_text(messages)
+    if not conversation_text:
+        return False
+    if CLOUD_SPREADSHEET_NEGATION_RE.search(conversation_text):
+        return True
+    if CLOUD_SPREADSHEET_HINT_RE.search(conversation_text):
+        return False
+    if LOCAL_FILE_HINT_RE.search(conversation_text):
+        return True
+    return bool(SPREADSHEET_REQUEST_RE.search(conversation_text))
+
+
+def _conversation_requests_cloud_spreadsheet(messages: List[Dict[str, Any]]) -> bool:
+    conversation_text = _all_user_message_text(messages)
+    if CLOUD_SPREADSHEET_NEGATION_RE.search(conversation_text):
+        return False
+    return bool(CLOUD_SPREADSHEET_HINT_RE.search(conversation_text))
+
+
+def _extract_local_file_path_from_tool_text(text: str) -> str:
+    stripped = (text or "").strip()
+    if not stripped:
+        return ""
+
+    success_match = WRITE_SUCCESS_PATH_RE.search(stripped)
+    if success_match:
+        return success_match.group(1).strip().strip('`"')
+
+    spreadsheet_match = LOCAL_SPREADSHEET_PATH_RE.search(stripped)
+    if spreadsheet_match:
+        return spreadsheet_match.group(1).strip().strip('`"')
+
+    if stripped[0] in "{[":
+        try:
+            parsed = json.loads(stripped)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            for key in ("file_path", "path", "file", "filename"):
+                raw = parsed.get(key)
+                if isinstance(raw, str):
+                    candidate = raw.strip()
+                    if LOCAL_SPREADSHEET_PATH_RE.search(candidate):
+                        return candidate.strip('`"')
+    return ""
+
+
+def _tool_text_matches_local_spreadsheet_result(text: str) -> bool:
+    path = _extract_local_file_path_from_tool_text(text)
+    if not path:
+        return False
+    return bool(LOCAL_SPREADSHEET_PATH_RE.search(path))
+
+
+def _extract_assigned_name_from_messages(messages: List[Dict[str, Any]]) -> str:
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").strip().lower()
+        if role != "system":
+            continue
+        content = str(message.get("content") or "")
+        for pattern in (
+            re.compile(r"assigned workspace name is\s+([A-Za-z0-9_.-]+)", re.IGNORECASE),
+            re.compile(r"answer with\s+([A-Za-z0-9_.-]+),\s+not\s+openclaw", re.IGNORECASE),
+            re.compile(r"-\s*\*\*Name:\*\*\s*([^\n]+)", re.IGNORECASE),
+            re.compile(r"#\s*About\s+([^\n]+)", re.IGNORECASE),
+        ):
+            match = pattern.search(content)
+            if not match:
+                continue
+            candidate = match.group(1).strip().strip("`\"'.,:;!?")
+            if candidate and candidate.lower() != "openclaw":
+                return candidate
+    return ""
+
+
 def _build_memory_followup_answer(messages: List[Dict[str, Any]]) -> Optional[str]:
     latest_user_text = _latest_user_message_text(messages)
     if not latest_user_text or not MEMORY_REQUEST_RE.search(latest_user_text):
@@ -1009,10 +1245,42 @@ def _build_memory_followup_answer(messages: List[Dict[str, Any]]) -> Optional[st
     return None
 
 
+def _build_identity_followup_answer(messages: List[Dict[str, Any]]) -> Optional[str]:
+    latest_user_text = _latest_user_message_text(messages)
+    if not latest_user_text or not NAME_REQUEST_RE.search(latest_user_text):
+        return None
+    assigned_name = _extract_assigned_name_from_messages(messages)
+    if not assigned_name:
+        return None
+    return f"My name is {assigned_name}."
+
+
+def _build_local_file_followup_answer(messages: List[Dict[str, Any]]) -> Optional[str]:
+    latest_user_text = _latest_user_message_text(messages)
+    latest_tool_text = _latest_tool_message_text(messages)
+    if not latest_user_text or not latest_tool_text or _tool_message_indicates_error(latest_tool_text):
+        return None
+    if (
+        not FILE_LOCATION_FOLLOWUP_RE.search(latest_user_text)
+        or SPREADSHEET_ACTION_RE.search(latest_user_text)
+    ):
+        return None
+    path = _extract_local_file_path_from_tool_text(latest_tool_text)
+    if not path:
+        return None
+    return f"I saved it as `{path}` in the local workspace."
+
+
 def _build_web_followup_answer(messages: List[Dict[str, Any]]) -> Optional[str]:
     latest_user_text = _latest_user_message_text(messages)
     latest_tool_text = _latest_tool_message_text(messages)
     if not latest_user_text or not latest_tool_text or _tool_message_indicates_error(latest_tool_text):
+        return None
+    if not (
+        LIVE_INFO_REQUEST_RE.search(latest_user_text)
+        or _is_explicit_browser_request(latest_user_text)
+        or _is_explicit_web_fetch_request(latest_user_text)
+    ):
         return None
     summary_text = sanitize_tool_result_text(latest_tool_text, max_chars=1200)
     if not summary_text:
@@ -1099,6 +1367,11 @@ def _select_llama_cpp_tools(
     if not tools:
         return tools
     latest_user_text = _latest_user_message_text(messages)
+    if latest_user_text and (
+        NAME_REQUEST_RE.search(latest_user_text)
+        or _is_simple_chat_request(messages, None)
+    ):
+        return None
     by_name: Dict[str, Dict[str, Any]] = {}
     for tool in tools:
         if not isinstance(tool, dict):
@@ -1112,6 +1385,41 @@ def _select_llama_cpp_tools(
         by_name[name] = tool
 
     latest_tool_text = _latest_tool_message_text(messages)
+    if latest_user_text and (
+        SPREADSHEET_REQUEST_RE.search(latest_user_text)
+        or FILE_LOCATION_FOLLOWUP_RE.search(latest_user_text)
+    ):
+        if (
+            FILE_LOCATION_FOLLOWUP_RE.search(latest_user_text)
+            and not SPREADSHEET_ACTION_RE.search(latest_user_text)
+            and latest_tool_text
+            and not _tool_message_indicates_error(latest_tool_text)
+            and _tool_text_matches_local_spreadsheet_result(latest_tool_text)
+        ):
+            return None
+        if (
+            latest_tool_text
+            and not _tool_message_indicates_error(latest_tool_text)
+            and _tool_text_matches_local_spreadsheet_result(latest_tool_text)
+            and not SPREADSHEET_ACTION_RE.search(latest_user_text)
+        ):
+            return None
+        if _conversation_prefers_local_spreadsheet(messages):
+            preferred_names = ["write", "edit", "read", "exec", "process"]
+            selected = [by_name[name] for name in preferred_names if name in by_name]
+            return selected or tools
+        if _conversation_requests_cloud_spreadsheet(messages):
+            preferred_names = [
+                "sheets_create",
+                "sheets_write",
+                "sheets_append",
+                "sheets_read",
+                "drive_list",
+                "drive_search",
+            ]
+            selected = [by_name[name] for name in preferred_names if name in by_name]
+            return selected or tools
+
     if latest_user_text and MEMORY_REQUEST_RE.search(latest_user_text):
         has_memory_tools = "memory_search" in by_name or "memory_get" in by_name
         if has_memory_tools:
@@ -1836,6 +2144,10 @@ TOOL_NARRATION_MARKERS = (
     "let me ",
 )
 
+RWKV_META_RESPONSE_RE = re.compile(
+    r"(?is)(?:^|\n)\s*#{1,3}\s*Context Checkpoint\b[\s\S]*$"
+)
+
 
 def sanitize_llama_cpp_tool_answer(text: str) -> str:
     raw_text = text or ""
@@ -1878,6 +2190,21 @@ def sanitize_llama_cpp_tool_answer(text: str) -> str:
         break
     cleaned = " ".join(sentence.strip() for sentence in sentences if sentence.strip()).strip()
     cleaned = ROLE_LINE_RE.sub("", cleaned).strip()
+    if ROLE_ONLY_RE.match(cleaned):
+        return ""
+    return cleaned
+
+
+def sanitize_generated_chat_answer(text: str) -> str:
+    cleaned = text or ""
+    think_split = re.split(r"(?i)</think>", cleaned)
+    if len(think_split) > 1:
+        cleaned = think_split[-1]
+    cleaned = strip_llama_cpp_tool_markup(cleaned)
+    cleaned = re.sub(r"(?is)<\|endoftext\|>.*$", "", cleaned)
+    cleaned = RWKV_META_RESPONSE_RE.sub("", cleaned)
+    cleaned = ROLE_LINE_RE.sub("", cleaned).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     if ROLE_ONLY_RE.match(cleaned):
         return ""
     return cleaned
@@ -2592,9 +2919,15 @@ def make_handler(runtime: RuntimeManager):
                 normalized_messages, effective_tools, tool_choice
             ):
                 effective_tool_choice = "required"
+            if _is_simple_chat_request(normalized_messages, effective_tools):
+                max_tokens = min(max_tokens, 96)
             direct_followup_answer = None
             if not effective_tools:
-                direct_followup_answer = _build_memory_followup_answer(normalized_messages)
+                direct_followup_answer = _build_identity_followup_answer(normalized_messages)
+                if direct_followup_answer is None:
+                    direct_followup_answer = _build_local_file_followup_answer(normalized_messages)
+                if direct_followup_answer is None:
+                    direct_followup_answer = _build_memory_followup_answer(normalized_messages)
                 if direct_followup_answer is None:
                     direct_followup_answer = _build_web_followup_answer(normalized_messages)
             started_at = time.perf_counter()
@@ -2905,6 +3238,8 @@ def make_handler(runtime: RuntimeManager):
                     self._json_response(500, {"error": {"message": str(error)}})
                     return
                 text = "".join(parts)
+                text = sanitize_generated_chat_answer(text)
+                output_chars = len(text)
                 elapsed_ms = round((time.perf_counter() - started_at) * 1000)
                 stats = runtime.generation_stats()
                 stats_summary = ""
@@ -2953,6 +3288,7 @@ def make_handler(runtime: RuntimeManager):
             output_chars = 0
             first_token_logged = False
             streamed_parts: List[str] = []
+            last_clean_text = ""
             try:
                 send_event(
                     {
@@ -3013,6 +3349,7 @@ def make_handler(runtime: RuntimeManager):
                 self.wfile.flush()
                 elapsed_ms = round((time.perf_counter() - started_at) * 1000)
                 text = "".join(streamed_parts)
+                last_clean_text = sanitize_generated_chat_answer(text)
                 stats = runtime.generation_stats()
                 stats_summary = ""
                 generated_tokens = stats.get("generatedTokens")
@@ -3024,7 +3361,7 @@ def make_handler(runtime: RuntimeManager):
                 log_runtime(
                     f"chat done request={request_id} model={model_name} stream=1 "
                     f"elapsedMs={elapsed_ms} chunks={chunk_count} outputChars={output_chars}"
-                    f"{stats_summary} preview={json.dumps(summarize_log_preview(text))}"
+                    f"{stats_summary} preview={json.dumps(summarize_log_preview(last_clean_text or text))}"
                 )
             except BrokenPipeError as error:
                 elapsed_ms = round((time.perf_counter() - started_at) * 1000)

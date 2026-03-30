@@ -66,6 +66,33 @@
       ]
     },
     {
+      "tool": "write",
+      "category": "workspace",
+      "risk": "fixture",
+      "defaultEnabled": true,
+      "acceptedToolNames": ["write", "edit", "read", "exec"],
+      "disallowedToolNames": ["sheets_create", "sheets_write", "sheets_append", "drive_list", "drive_search", "drive_upload"],
+      "passOnAcceptedToolNames": true,
+      "fuzzFamilies": ["direct", "polite", "tool_hint", "followup"],
+      "cases": [
+        {
+          "id": "spreadsheet_local_dogs",
+          "description": "Create a local spreadsheet-compatible file instead of using Google Sheets.",
+          "messages": [
+            "Create an Excel-compatible spreadsheet in the local workspace listing 10 dog breeds. Use a local CSV or XLSX-compatible file, not Google Drive or Google Sheets, and tell me the file path."
+          ]
+        },
+        {
+          "id": "spreadsheet_local_followup",
+          "description": "Spreadsheet creation plus a follow-up asking where the file is.",
+          "messages": [
+            "Create an Excel-compatible spreadsheet in the local workspace listing 10 dog breeds. Use a local CSV or XLSX-compatible file, not Google Drive or Google Sheets, and tell me the file path.",
+            "Where is it?"
+          ]
+        }
+      ]
+    },
+    {
       "tool": "browser",
       "category": "browser_canvas",
       "risk": "safe",

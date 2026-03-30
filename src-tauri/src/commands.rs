@@ -10014,8 +10014,9 @@ pub async fn start_gateway(
             (Some(current), Some(latest)) => current == latest,
             _ => true,
         };
-        let expected_local_context_window =
-            local_model_context_window.map(|value| value.to_string());
+        let expected_local_context_window = local_model_context_window
+            .map(advertised_local_model_context_window)
+            .map(|value| value.to_string());
         let local_config_matches = if let Some(expected_local_model_config) =
             &expected_local_model_config
         {
@@ -10199,9 +10200,10 @@ pub async fn start_gateway(
         local_model_name_str = local_model_config.model_name.clone();
         local_service_type_str = local_model_config.service_type_name().to_string();
         local_api_mode_str = local_model_config.api_mode_name().to_string();
-        local_context_window_str = local_model_context_window
-            .unwrap_or(LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK)
-            .to_string();
+        local_context_window_str = advertised_local_model_context_window(
+            local_model_context_window.unwrap_or(LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK),
+        )
+        .to_string();
         env_entries.push(("ENTROPIC_LOCAL_MODEL_BASE_URL", &local_base_url_docker));
         env_entries.push(("ENTROPIC_LOCAL_MODEL_API_KEY", &local_api_key));
         env_entries.push(("ENTROPIC_LOCAL_MODEL_NAME", &local_model_name_str));
@@ -12313,6 +12315,7 @@ fn normalize_local_model_api_mode(
 // while the managed runtime can use model-specific contexts from its catalog.
 const LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK: usize = 16384;
 const EXTERNAL_LOCAL_MODEL_CONTEXT_WINDOW_CAP: usize = 16384;
+const OPENCLAW_LOCAL_MODEL_CONTEXT_WINDOW_MIN: usize = 16000;
 
 fn normalize_local_model_context_window(value: usize) -> usize {
     value.max(1)
@@ -12322,13 +12325,17 @@ fn cap_external_local_model_context_window(value: usize) -> usize {
     normalize_local_model_context_window(value).min(EXTERNAL_LOCAL_MODEL_CONTEXT_WINDOW_CAP)
 }
 
+fn advertised_local_model_context_window(value: usize) -> usize {
+    normalize_local_model_context_window(value).max(OPENCLAW_LOCAL_MODEL_CONTEXT_WINDOW_MIN)
+}
+
 fn local_model_context_window_from_container_env() -> usize {
     read_container_env("ENTROPIC_LOCAL_MODEL_CONTEXT_WINDOW")
         .as_deref()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
-        .map(normalize_local_model_context_window)
-        .unwrap_or(LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK)
+        .map(advertised_local_model_context_window)
+        .unwrap_or_else(|| advertised_local_model_context_window(LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK))
 }
 
 fn local_model_prefers_light_defaults(

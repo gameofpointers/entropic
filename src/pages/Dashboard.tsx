@@ -1975,17 +1975,18 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         (liveBootstrap?.gatewayContainerRunning ?? bootstrapState.gatewayContainerRunning) &&
         (liveBootstrap?.gatewayLaunchMode ?? bootstrapState.gatewayLaunchMode) !== "stopped"
       ) {
+        const nextHealthStatus =
+          (liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus) === "healthy"
+            ? "starting"
+            : (liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus);
         updateGatewayState({
-          gatewayRunning: false,
+          gatewayRunning,
           gatewayContainerRunning: true,
           gatewayLaunchMode: liveBootstrap?.gatewayLaunchMode ?? bootstrapState.gatewayLaunchMode,
-          gatewayHealthStatus:
-            (liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus) === "healthy"
-              ? "starting"
-              : (liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus),
+          gatewayHealthStatus: nextHealthStatus,
         });
         console.log("[Entropic] Gateway health check: container still recovering");
-        return false;
+        return gatewayRunning;
       }
 
       markGatewayStopped();
@@ -2029,16 +2030,17 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         (liveBootstrap?.gatewayContainerRunning ?? bootstrapState.gatewayContainerRunning) &&
         (liveBootstrap?.gatewayLaunchMode ?? bootstrapState.gatewayLaunchMode) !== "stopped"
       ) {
+        const nextHealthStatus =
+          (liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus) === "healthy"
+            ? "starting"
+            : (liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus);
         updateGatewayState({
-          gatewayRunning: false,
+          gatewayRunning,
           gatewayContainerRunning: true,
           gatewayLaunchMode: liveBootstrap?.gatewayLaunchMode ?? bootstrapState.gatewayLaunchMode,
-          gatewayHealthStatus:
-            (liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus) === "healthy"
-              ? "starting"
-              : (liveBootstrap?.gatewayHealthStatus ?? bootstrapState.gatewayHealthStatus),
+          gatewayHealthStatus: nextHealthStatus,
         });
-        return false;
+        return gatewayRunning;
       }
 
       markGatewayStopped();
@@ -2501,6 +2503,7 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     const gatewayStarting =
       gatewayBootstrapPending ||
       gatewayRecovering ||
+      bootstrapState.gatewayHealthStatus.trim().toLowerCase() === "starting" ||
       showGatewayStartup ||
       (isTogglingGateway && !gatewayRunning) ||
       gatewayRetryIn !== null;

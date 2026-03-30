@@ -32,6 +32,22 @@ LIVE_INFO_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 MEMORY_REQUEST_RE = re.compile(r"\bmemory\b", re.IGNORECASE)
+SPREADSHEET_REQUEST_RE = re.compile(
+    r"\b(excel|spreadsheet|workbook|csv|xlsx|xls)\b",
+    re.IGNORECASE,
+)
+LOCAL_FILE_HINT_RE = re.compile(
+    r"\b(local|workspace|file\s*system|filesystem|on\s+disk|on\s+my\s+machine|locally|file\s+path|folder|directory)\b",
+    re.IGNORECASE,
+)
+CLOUD_SPREADSHEET_HINT_RE = re.compile(
+    r"\b(google\s+sheets?|google\s+drive|sheets_(?:create|append|read|write)|drive_(?:list|search|upload|download))\b",
+    re.IGNORECASE,
+)
+CLOUD_SPREADSHEET_NEGATION_RE = re.compile(
+    r"\b(?:not|don't|do\s+not|dont|without|no)\b[^.!?\n]{0,60}\b(?:google\s+sheets?|google\s+drive)\b",
+    re.IGNORECASE,
+)
 
 
 def _latest_user_message_text(messages: list) -> str:
@@ -64,6 +80,21 @@ def _latest_tool_message_text(messages: list) -> str:
             return ""
         return str(content).strip()
     return ""
+
+
+def _all_user_message_text(messages: list) -> str:
+    parts = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "").strip().lower() != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            parts.append(content.strip())
+        elif content is not None:
+            parts.append(str(content).strip())
+    return "\n".join(part for part in parts if part)
 
 
 def _extract_available_tool_names(tools: Optional[list]) -> set[str]:
@@ -322,8 +353,10 @@ class LlamaCppEngine(InferenceEngine):
         if tools:
             live_info_guidance = None
             memory_guidance = None
+            spreadsheet_guidance = None
             latest_user_text = _latest_user_message_text(normalized_messages)
             latest_tool_text = _latest_tool_message_text(normalized_messages)
+            conversation_user_text = _all_user_message_text(normalized_messages)
             available_tool_names = _extract_available_tool_names(tools)
             if latest_user_text and LIVE_INFO_REQUEST_RE.search(latest_user_text):
                 live_info_guidance = (
@@ -341,6 +374,28 @@ class LlamaCppEngine(InferenceEngine):
                     "Only use memory_get if you specifically need to fetch a snippet or read a returned entry. "
                     "After a successful MEMORY result, answer directly from that result instead of calling memory_search again."
                 )
+            if latest_user_text and SPREADSHEET_REQUEST_RE.search(latest_user_text):
+                if CLOUD_SPREADSHEET_NEGATION_RE.search(conversation_user_text):
+                    spreadsheet_guidance = (
+                        "Latest user request is for a spreadsheet and the user explicitly rejected Google Sheets or Drive. "
+                        "Use local workspace tools only. Create a local CSV or XLSX-compatible file and report the exact local path."
+                    )
+                elif CLOUD_SPREADSHEET_HINT_RE.search(conversation_user_text):
+                    spreadsheet_guidance = (
+                        "Latest user request is for a spreadsheet and the user explicitly mentioned Google Sheets or Drive. "
+                        "Prefer the matching Sheets or Drive tool and report the created sheet id or link."
+                    )
+                else:
+                    spreadsheet_guidance = (
+                        "Latest user request is for a spreadsheet or Excel-compatible file. "
+                        "Prefer local workspace tools such as write, edit, read, or exec. "
+                        "Do not assume Google Sheets or Google Drive unless the user explicitly asked for them. "
+                        "Create a local CSV or XLSX-compatible file when practical and report the exact local file path in the final answer."
+                    )
+                    if LOCAL_FILE_HINT_RE.search(conversation_user_text):
+                        spreadsheet_guidance += (
+                            " The user explicitly wants a local filesystem or workspace result, so do not use cloud spreadsheet tools."
+                        )
             fallback_guidance = None
             if (
                 latest_tool_text
@@ -363,6 +418,7 @@ class LlamaCppEngine(InferenceEngine):
                 {"role": "system", "content": LOCAL_TOOL_USE_SYSTEM_GUIDANCE},
                 *([{"role": "system", "content": live_info_guidance}] if live_info_guidance else []),
                 *([{"role": "system", "content": memory_guidance}] if memory_guidance else []),
+                *([{"role": "system", "content": spreadsheet_guidance}] if spreadsheet_guidance else []),
                 *([{"role": "system", "content": fallback_guidance}] if fallback_guidance else []),
                 *normalized_messages,
             ]

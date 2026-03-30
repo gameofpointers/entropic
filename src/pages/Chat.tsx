@@ -360,26 +360,126 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-function buildNoVisibleResponseMessage(params: {
+type NoVisibleResponseState = {
+  reason:
+    | "invalid_history_path"
+    | "startup_grace_period"
+    | "gateway_starting"
+    | "gateway_connecting"
+    | "gateway_not_running"
+    | "socket_closed_during_connect"
+    | "connection_lost_mid_response"
+    | "gateway_disconnected"
+    | "no_visible_reply";
+  message: string;
+  detail?: string;
+};
+
+function summarizeNoVisibleResponseDetail(raw?: string | null): string | undefined {
+  const normalized = sanitizeGatewayErrorMessage(raw || "");
+  if (!normalized) return undefined;
+  return normalized.length > 140 ? `${normalized.slice(0, 137)}...` : normalized;
+}
+
+function classifyNoVisibleResponseState(params: {
   lastGatewayError?: string | null;
   connected: boolean;
-}): string {
+  gatewayStarting?: boolean;
+  isConnecting?: boolean;
+  gatewayRunning?: boolean;
+  inStartupGracePeriod?: boolean;
+}): NoVisibleResponseState {
   const lastGatewayError = params.lastGatewayError || "";
   const normalized = sanitizeGatewayErrorMessage(lastGatewayError);
+  const detail = summarizeNoVisibleResponseDetail(lastGatewayError);
   if (
     /conversation history path was invalid/i.test(normalized) ||
     /session file path must be within sessions directory/i.test(lastGatewayError)
   ) {
-    return "The conversation history path was invalid. Restart the sandbox and retry.";
+    return {
+      reason: "invalid_history_path",
+      message: "The conversation history path was invalid. Restart the sandbox and retry.",
+      detail,
+    };
   }
-  if (
-    !params.connected ||
-    isTransientGatewayConnectCloseMessage(lastGatewayError) ||
-    /connection lost while waiting for response/i.test(normalized)
-  ) {
-    return "The response was interrupted while the sandbox was reconnecting. Please retry.";
+  if (params.inStartupGracePeriod) {
+    return {
+      reason: "startup_grace_period",
+      message: "The response finished before the sandbox startup checks settled. Please retry in a moment.",
+      detail,
+    };
   }
-  return "The assistant finished without a visible reply. Retry once; if it keeps happening, check Billing, auth, and network.";
+  if (params.gatewayStarting) {
+    return {
+      reason: "gateway_starting",
+      message: "The response was interrupted because the sandbox gateway was still starting. Please retry.",
+      detail,
+    };
+  }
+  if (params.isConnecting) {
+    return {
+      reason: "gateway_connecting",
+      message: "The response was interrupted because Entropic was reconnecting to the sandbox gateway. Please retry.",
+      detail,
+    };
+  }
+  if (params.gatewayRunning === false) {
+    return {
+      reason: "gateway_not_running",
+      message: "The response was interrupted because the sandbox gateway was not running. Restart it and retry.",
+      detail,
+    };
+  }
+  if (isTransientGatewayConnectCloseMessage(lastGatewayError)) {
+    return {
+      reason: "socket_closed_during_connect",
+      message: "The response was interrupted because the gateway socket closed while connecting. Please retry.",
+      detail,
+    };
+  }
+  if (/connection lost while waiting for response/i.test(normalized)) {
+    return {
+      reason: "connection_lost_mid_response",
+      message: "The response was interrupted because the gateway connection dropped mid-response. Please retry.",
+      detail,
+    };
+  }
+  if (!params.connected) {
+    return {
+      reason: "gateway_disconnected",
+      message: "The response was interrupted because the sandbox gateway disconnected. Please retry.",
+      detail,
+    };
+  }
+  return {
+    reason: "no_visible_reply",
+    message:
+      "The assistant finished without a visible reply. Retry once; if it keeps happening, check Diagnostics for the gateway error and final recovery state.",
+    detail,
+  };
+}
+
+function buildNoVisibleResponseMessage(params: {
+  lastGatewayError?: string | null;
+  connected: boolean;
+  gatewayStarting?: boolean;
+  isConnecting?: boolean;
+  gatewayRunning?: boolean;
+  inStartupGracePeriod?: boolean;
+}): string {
+  return classifyNoVisibleResponseState(params).message;
+}
+
+function summarizeNoVisibleResponseReason(params: {
+  lastGatewayError?: string | null;
+  connected: boolean;
+  gatewayStarting?: boolean;
+  isConnecting?: boolean;
+  gatewayRunning?: boolean;
+  inStartupGracePeriod?: boolean;
+}): string {
+  const classified = classifyNoVisibleResponseState(params);
+  return classified.detail ? `${classified.reason} (${classified.detail})` : classified.reason;
 }
 
 function extractWorkspaceChatReferences(content: string): WorkspaceChatReference[] {
@@ -2460,6 +2560,33 @@ export function Chat({
     return null;
   }
 
+  function gatewayMessageRole(raw: any): string {
+    return typeof raw?.role === "string" ? raw.role.trim().toLowerCase() : "";
+  }
+
+  function gatewayMessageRunId(raw: any): string {
+    const direct =
+      typeof raw?.runId === "string"
+        ? raw.runId
+        : typeof raw?.run_id === "string"
+          ? raw.run_id
+          : typeof raw?.messageRunId === "string"
+            ? raw.messageRunId
+            : "";
+    if (direct.trim()) return direct.trim();
+    const meta = raw?.meta;
+    if (meta && typeof meta === "object") {
+      const nested =
+        typeof meta.runId === "string"
+          ? meta.runId
+          : typeof meta.run_id === "string"
+            ? meta.run_id
+            : "";
+      if (nested.trim()) return nested.trim();
+    }
+    return "";
+  }
+
   function finalizeVisibleAssistantRun(
     runId: string,
     sessionKey: string,
@@ -2842,7 +2969,6 @@ export function Chat({
   useEffect(() => {
     if (gatewayStarting) {
       setError(null);
-      setIsConnecting(true);
     }
   }, [gatewayStarting]);
 
@@ -3234,6 +3360,14 @@ export function Chat({
     setIsLoading(true);
     try {
       const optimizationTraceId = runOptimizationTraceRef.current[runId];
+      const noVisibleResponseParams = (overrideError?: string | null) => ({
+        lastGatewayError: overrideError ?? lastGatewayError,
+        connected,
+        gatewayStarting,
+        isConnecting,
+        gatewayRunning,
+        inStartupGracePeriod: Date.now() - componentMountedAt < 15_000,
+      });
       for (let attempt = 0; attempt < FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS; attempt += 1) {
         if (
           finalizeVisibleAssistantRun(
@@ -3263,21 +3397,26 @@ export function Chat({
           ) {
             return;
           }
-          setError(
-            buildNoVisibleResponseMessage({
-              lastGatewayError,
-              connected,
-            }),
-          );
-          addDiag(`final recovery missed runId=${runId} (client disconnected)`);
+          const responseState = summarizeNoVisibleResponseReason(noVisibleResponseParams());
+          setError(buildNoVisibleResponseMessage(noVisibleResponseParams()));
+          addDiag(`final recovery missed runId=${runId} (client disconnected) classification=${responseState}`);
           return;
         }
 
         try {
           const history = await client.getChatHistory(sessionKey, 40);
-          const fallback = [...history].reverse().find((item) => {
-            const role = typeof item?.role === "string" ? item.role.toLowerCase() : "";
+          const latestUserIndex = history.reduce((foundIndex, item, index) => {
+            return gatewayMessageRole(item) === "user" ? index : foundIndex;
+          }, -1);
+          const recoveryWindow =
+            latestUserIndex >= 0 ? history.slice(latestUserIndex + 1) : history;
+          const fallback = [...recoveryWindow].reverse().find((item) => {
+            const role = gatewayMessageRole(item);
             if (role !== "assistant" && role !== "toolresult" && role !== "tool_result" && role !== "tool") {
+              return false;
+            }
+            const messageRunId = gatewayMessageRunId(item);
+            if (messageRunId && messageRunId !== runId) {
               return false;
             }
             const normalized = normalizeGatewayMessage(item as GatewayMessage, runId);
@@ -3306,13 +3445,11 @@ export function Chat({
             ) {
               return;
             }
-            setError(
-              buildNoVisibleResponseMessage({
-                lastGatewayError,
-                connected,
-              }),
+            const responseState = summarizeNoVisibleResponseReason(noVisibleResponseParams());
+            setError(buildNoVisibleResponseMessage(noVisibleResponseParams()));
+            addDiag(
+              `final recovery missed runId=${runId} (no assistant payload after latest user) classification=${responseState}`,
             );
-            addDiag(`final recovery missed runId=${runId} (no assistant payload in history)`);
             return;
           }
 
@@ -3334,13 +3471,9 @@ export function Chat({
             ) {
               return;
             }
-            setError(
-              buildNoVisibleResponseMessage({
-                lastGatewayError,
-                connected,
-              }),
-            );
-            addDiag(`final recovery missed runId=${runId} (normalize failed)`);
+            const responseState = summarizeNoVisibleResponseReason(noVisibleResponseParams());
+            setError(buildNoVisibleResponseMessage(noVisibleResponseParams()));
+            addDiag(`final recovery missed runId=${runId} (normalize failed) classification=${responseState}`);
             return;
           }
 
@@ -3366,13 +3499,11 @@ export function Chat({
             ) {
               return;
             }
-            setError(
-              buildNoVisibleResponseMessage({
-                lastGatewayError,
-                connected,
-              }),
+            const responseState = summarizeNoVisibleResponseReason(noVisibleResponseParams());
+            setError(buildNoVisibleResponseMessage(noVisibleResponseParams()));
+            addDiag(
+              `final recovery missed runId=${runId} (empty normalized payload) classification=${responseState}`,
             );
-            addDiag(`final recovery missed runId=${runId} (empty normalized payload)`);
             return;
           }
 
@@ -3441,14 +3572,12 @@ export function Chat({
           ) {
             return;
           }
-          setError(
-            buildNoVisibleResponseMessage({
-              lastGatewayError: err instanceof Error ? err.message : lastGatewayError,
-              connected,
-            }),
+          const responseState = summarizeNoVisibleResponseReason(
+            noVisibleResponseParams(err instanceof Error ? err.message : lastGatewayError),
           );
+          setError(buildNoVisibleResponseMessage(noVisibleResponseParams(err instanceof Error ? err.message : lastGatewayError)));
           setIsLoading(false);
-          addDiag(`final recovery failed runId=${runId}: ${String(err)}`);
+          addDiag(`final recovery failed runId=${runId}: ${String(err)} classification=${responseState}`);
           if (optimizationTraceId) {
             appendOptimizationTraceLine(
               optimizationTraceId,
@@ -4911,6 +5040,19 @@ export function Chat({
           }))
         : undefined,
     };
+    const supersededActiveRunId = activeRunIdRef.current;
+    const supersededActiveRunSession = activeRunSessionRef.current;
+    if (supersededActiveRunId) {
+      supersededRunIdsRef.current.add(supersededActiveRunId);
+      autoSettledRunIdsRef.current.delete(supersededActiveRunId);
+      addDiag(`superseding in-flight run on new send: ${supersededActiveRunId}`);
+      clearActiveRunTracking();
+      if (liveClient && supersededActiveRunSession) {
+        liveClient.abortChat(supersededActiveRunSession, supersededActiveRunId).catch((err) => {
+          addDiag(`abort superseded run failed: ${String(err)}`);
+        });
+      }
+    }
     if (autoSettledRunIdsRef.current.size > 0) {
       for (const runId of autoSettledRunIdsRef.current) {
         supersededRunIdsRef.current.add(runId);
@@ -6612,12 +6754,13 @@ export function Chat({
     }
   }, [activeComposerMode, dragActive]);
 
-  if (isConnecting) return renderConnecting();
   if (localTrialLoading) return renderConnecting("Checking managed provider access...");
   if (!connectedProvider && !proxyEnabled && !localModelReady) return renderNoProvider();
   const autoStartExpected = proxyEnabled && !gatewayRunning;
   const showGatewayWarmupBanner =
     gatewayStarting || autoStartExpected || (!gatewayRunning && !showGatewayOfflineCta);
+  const hasVisibleChatState = messages.length > 0 || sessions.length > 0;
+  if (isConnecting && !showGatewayWarmupBanner && !hasVisibleChatState) return renderConnecting();
   const showBillingAction = Boolean(error && isBillingIssueMessage(error));
   const showSignInAction = Boolean(
     error && isBillingIssueMessage(error) && !isAuthenticated && isAuthConfigured

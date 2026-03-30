@@ -351,8 +351,8 @@ class RWKVEngine(InferenceEngine):
         self.state = self._make_state()
         system_prompt = (
             "You are a helpful, knowledgeable AI assistant.\n\n"
-            "User: Hello!\n\n"
-            "Assistant: Hello! How can I help you today?\n\n"
+            "User: Please reply briefly and clearly.\n\n"
+            "Assistant: Certainly.\n\n"
         )
         for token in self.tokenizer.encode(system_prompt):
             self._forward(token)
@@ -550,7 +550,10 @@ class RWKVEngine(InferenceEngine):
             raise RuntimeError("RWKV forward pass failed")
 
         all_tokens: List[int] = []
-        stop_pattern = re.compile(r"\n\s*User\s*:")
+        stop_pattern = re.compile(
+            r"\n\s*User\s*:|(?:^|\n)\s*#{1,3}\s*Context Checkpoint\b|<\|endoftext\|>",
+            re.IGNORECASE,
+        )
         in_thinking = emit_initial_think
 
         for _ in range(max_tokens):

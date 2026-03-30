@@ -85,5 +85,22 @@
     "messages": [
       "List the top-level files in the workspace and tell me what kind of project this is."
     ]
+  },
+  {
+    "id": "spreadsheet_local_dogs",
+    "description": "Local spreadsheet creation request that should prefer workspace tools over Google Drive or Sheets.",
+    "messages": [
+      "Can you help me build an excel sheet?",
+      "Create an Excel-compatible spreadsheet in the local workspace listing 10 dog breeds and tell me the file path."
+    ]
+  },
+  {
+    "id": "spreadsheet_local_followup",
+    "description": "Spreadsheet creation followed by a location/status follow-up.",
+    "messages": [
+      "Can you help me build an excel sheet?",
+      "Create an Excel-compatible spreadsheet in the local workspace listing 10 dog breeds and tell me the file path.",
+      "Where is it?"
+    ]
   }
 ]

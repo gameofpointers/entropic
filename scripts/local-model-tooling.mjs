@@ -662,8 +662,10 @@ function evaluateRun(toolEntry, summary, captures, exitCode) {
   }
 
   const accepted = new Set((toolEntry.acceptedToolNames || [toolEntry.tool]).map((value) => normalizeText(value)));
+  const disallowed = new Set((toolEntry.disallowedToolNames || []).map((value) => normalizeText(value)));
   const targetSeen = parsedToolNames.has(normalizeText(toolEntry.tool));
   const acceptedSeen = Array.from(parsedToolNames).some((name) => accepted.has(name));
+  const disallowedSeen = Array.from(parsedToolNames).some((name) => disallowed.has(name));
   const toolResultSeen = Boolean(
     (summary?.turnSummaries || []).some((turn) => turn.hasToolResult),
   );
@@ -701,9 +703,13 @@ function evaluateRun(toolEntry, summary, captures, exitCode) {
   let status = "fail";
   if (blockedReason) {
     status = "blocked";
+  } else if (disallowedSeen) {
+    status = "fail";
   } else if (!modelMatched) {
     status = "invalid";
   } else if (targetSeen) {
+    status = toolResultSeen && assistantLooksFinal ? "pass" : "partial";
+  } else if (toolEntry.passOnAcceptedToolNames && acceptedSeen) {
     status = toolResultSeen && assistantLooksFinal ? "pass" : "partial";
   } else if (acceptedSeen) {
     status = "partial";
@@ -718,6 +724,7 @@ function evaluateRun(toolEntry, summary, captures, exitCode) {
     parsedToolNames: Array.from(parsedToolNames),
     targetSeen,
     acceptedSeen,
+    disallowedSeen,
     toolResultSeen,
     assistantText,
     assistantLooksFinal,
@@ -966,6 +973,9 @@ function printRunResults(results, asJson) {
       console.log(`  blocked: ${item.evaluation.blockedReason}`);
     }
     console.log(`  parsed tool names: ${item.evaluation.parsedToolNames.join(", ") || "<none>"}`);
+    if (item.evaluation.disallowedSeen) {
+      console.log("  disallowed tool seen: yes");
+    }
     if (item.evaluation.formatHints.length > 0) {
       console.log(`  format hints: ${item.evaluation.formatHints.join(", ")}`);
     }
@@ -1020,6 +1030,7 @@ function buildBatchSummary({ command, packId, results, selectedProfiles, selecte
       tool: entry.tool,
       category: entry.category,
       acceptedToolNames: entry.acceptedToolNames,
+      disallowedToolNames: entry.disallowedToolNames || [],
       risk: entry.risk,
     })),
     counts: {
