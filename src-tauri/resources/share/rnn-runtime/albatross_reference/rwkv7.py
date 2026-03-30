@@ -35,7 +35,7 @@ from torch.utils.cpp_extension import load
 HEAD_SIZE = 64
 
 load(name="rwkv7_state_fwd_fp16", sources=[f"{current_path}/cuda/rwkv7_state_fwd_fp16.cpp", f"{current_path}/cuda/rwkv7_state_fwd_fp16.cu"], is_python_module=False,
-                    verbose=True, extra_cuda_cflags=["-res-usage", "--use_fast_math", "-O3", "--extra-device-vectorization", f"-D_N_={HEAD_SIZE}"] + (["-Xptxas -O3"] if os.name != "nt" else []))
+                    extra_cuda_cflags=["-res-usage", "--use_fast_math", "-O3", "--extra-device-vectorization", f"-D_N_={HEAD_SIZE}"] + (["-Xptxas -O3"] if os.name != "nt" else []))
 class WKV_7(torch.autograd.Function):
     @staticmethod
     def forward(ctx, state, r, w, k, v, a, b):
@@ -113,7 +113,6 @@ class RWKV_x070(MyModule):
             if kk[0] == 'blocks':
                 max_layer = max(max_layer, int(kk[1]))
         args.n_layer = max_layer + 1
-        print(args)
         self.n_layer, self.n_embd = args.n_layer, args.n_embd
 
         z['emb.weight'] = F.layer_norm(z['emb.weight'], (args.n_embd,), weight=z['blocks.0.ln0.weight'], bias=z['blocks.0.ln0.bias'])

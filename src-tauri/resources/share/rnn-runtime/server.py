@@ -2335,6 +2335,12 @@ class RuntimeManager:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.runtime_config_path = self.state_dir / "runtime-config.json"
         self.tool_bridge_capture_path = self.state_dir / "tool-bridge-captures.jsonl"
+        self.capture_tool_bridge = os.environ.get("ENTROPIC_CAPTURE_TOOL_BRIDGE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         self.manager = ModelManager(str(self.models_dir))
         self.lock = threading.RLock()
         self.active_engine = None
@@ -2370,6 +2376,16 @@ class RuntimeManager:
         with open(self.tool_bridge_capture_path, "a", encoding="utf-8") as handle:
             json.dump(record, handle, ensure_ascii=False)
             handle.write("\n")
+
+    def should_capture_tool_bridge(self, request_body: Dict[str, Any]) -> bool:
+        if self.capture_tool_bridge:
+            return True
+        if not isinstance(request_body, dict):
+            return False
+        return bool(
+            request_body.get("debugPromptCapture")
+            or request_body.get("captureToolBridge")
+        )
 
     def _build_engine(self, local_entry: Dict[str, Any]):
         architecture = str(local_entry.get("architecture") or "").strip().lower()
@@ -3036,39 +3052,40 @@ def make_handler(runtime: RuntimeManager):
                     for tool_call in parsed_tool_calls
                     if isinstance(tool_call, dict)
                 ]
-                try:
-                    runtime.append_tool_bridge_capture(
-                        {
-                            "requestId": request_id,
-                            "model": model_name,
-                            "backend": prompt_info.get("backend"),
-                            "architecture": prompt_info.get("architecture"),
-                            "stream": stream,
-                            "temperature": temperature,
-                            "topP": top_p,
-                            "maxTokens": max_tokens,
-                            "toolChoiceRequested": tool_choice,
-                            "toolChoiceEffective": effective_tool_choice,
-                            "inputChars": input_chars,
-                            "promptChars": prompt_info.get("promptChars"),
-                            "latestUserText": _latest_user_message_text(normalized_messages),
-                            "messages": messages,
-                            "normalizedMessages": normalized_messages,
-                            "tools": tools or [],
-                            "effectiveTools": effective_tools or [],
-                            "toolNamesAvailable": sorted(_extract_available_tool_names(effective_tools)),
-                            "rawContent": raw_content,
-                            "cleanedContent": cleaned_content,
-                            "finishReason": finish_reason,
-                            "syntheticToolCalls": synthetic_tool_calls,
-                            "parsedToolCalls": parsed_tool_calls,
-                            "parsedToolCallNames": tool_call_names,
-                        }
-                    )
-                except Exception as capture_error:
-                    log_runtime(
-                        f"tool-bridge capture failed request={request_id} error={capture_error!r}"
-                    )
+                if runtime.should_capture_tool_bridge(body):
+                    try:
+                        runtime.append_tool_bridge_capture(
+                            {
+                                "requestId": request_id,
+                                "model": model_name,
+                                "backend": prompt_info.get("backend"),
+                                "architecture": prompt_info.get("architecture"),
+                                "stream": stream,
+                                "temperature": temperature,
+                                "topP": top_p,
+                                "maxTokens": max_tokens,
+                                "toolChoiceRequested": tool_choice,
+                                "toolChoiceEffective": effective_tool_choice,
+                                "inputChars": input_chars,
+                                "promptChars": prompt_info.get("promptChars"),
+                                "latestUserText": _latest_user_message_text(normalized_messages),
+                                "messages": messages,
+                                "normalizedMessages": normalized_messages,
+                                "tools": tools or [],
+                                "effectiveTools": effective_tools or [],
+                                "toolNamesAvailable": sorted(_extract_available_tool_names(effective_tools)),
+                                "rawContent": raw_content,
+                                "cleanedContent": cleaned_content,
+                                "finishReason": finish_reason,
+                                "syntheticToolCalls": synthetic_tool_calls,
+                                "parsedToolCalls": parsed_tool_calls,
+                                "parsedToolCallNames": tool_call_names,
+                            }
+                        )
+                    except Exception as capture_error:
+                        log_runtime(
+                            f"tool-bridge capture failed request={request_id} error={capture_error!r}"
+                        )
                 log_runtime(
                     f"chat first_token request={request_id} model={model_name} "
                     f"stream={int(stream)} firstTokenMs={elapsed_ms}"

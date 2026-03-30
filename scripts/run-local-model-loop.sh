@@ -27,6 +27,7 @@ rm -f "${SOCKET_PATH}"
 : > "${LOG_PATH}"
 
 env \
+  ENTROPIC_CAPTURE_TOOL_BRIDGE=1 \
   PYTHONUNBUFFERED=1 \
   TORCH_EXTENSIONS_DIR="${STATE_DIR}/torch_extensions" \
   HF_HOME="${STATE_DIR}/huggingface" \
