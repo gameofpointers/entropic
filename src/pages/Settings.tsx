@@ -411,6 +411,10 @@ export function Settings({
   const [runtimeVersionLoading, setRuntimeVersionLoading] = useState(false);
   const [authMetaLoading, setAuthMetaLoading] = useState(false);
   const [runtimeFetchLoading, setRuntimeFetchLoading] = useState(false);
+  const [managedRuntimeRestarting, setManagedRuntimeRestarting] = useState(false);
+  const [managedRuntimeNotice, setManagedRuntimeNotice] = useState<string | null>(null);
+  const [managedRuntimeError, setManagedRuntimeError] = useState<string | null>(null);
+  const [managedRuntimeRefreshKey, setManagedRuntimeRefreshKey] = useState(0);
   const [appUpdateState, setAppUpdateState] = useState<UpdaterStatus | null>(() => readUpdaterStatus());
   const [appUpdateNotice, setAppUpdateNotice] = useState<string | null>(null);
   const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
@@ -907,6 +911,25 @@ export function Settings({
     error: true,
   });
 
+  async function restartManagedLocalRuntime() {
+    if (managedRuntimeRestarting) return;
+    setManagedRuntimeRestarting(true);
+    setManagedRuntimeError(null);
+    setManagedRuntimeNotice("Restarting Entropic Local Runtime...");
+    try {
+      await invoke("stop_rnn_runtime");
+      await invoke("get_rnn_runtime_status");
+      setManagedRuntimeRefreshKey((value) => value + 1);
+      setManagedRuntimeNotice("Entropic Local Runtime restarted.");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setManagedRuntimeError(detail);
+      setManagedRuntimeNotice(null);
+    } finally {
+      setManagedRuntimeRestarting(false);
+    }
+  }
+
   useEffect(() => {
     const refreshDiagnostics = () => setGatewayDiagLogs(readDiagnosticLogs());
     refreshDiagnostics();
@@ -1246,8 +1269,39 @@ export function Settings({
   }
 
   function renderLocalDebugSettings() {
+    const showManagedRuntimeControls = localModelConfig.serviceType === "rnn-local";
     return (
       <SettingsGroup title="Developer">
+        {showManagedRuntimeControls ? (
+          <>
+            <SettingsRow
+              label="Runtime Process"
+              icon={Activity}
+              description="Restart the managed local model runtime without restarting the sandbox."
+            >
+              <button
+                type="button"
+                onClick={() => { void restartManagedLocalRuntime(); }}
+                disabled={managedRuntimeRestarting}
+                className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] text-[var(--text-primary)] hover:bg-[var(--system-gray-6)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+              >
+                {managedRuntimeRestarting ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RotateCcw className="h-3.5 w-3.5" />
+                )}
+                <span>Restart Runtime</span>
+              </button>
+            </SettingsRow>
+            {managedRuntimeError ? (
+              <div className="px-4 pb-4 pt-2 text-xs text-red-500">
+                Failed to restart Entropic Local Runtime: {managedRuntimeError}
+              </div>
+            ) : managedRuntimeNotice ? (
+              <div className="px-4 pb-4 pt-2 text-xs text-green-500">{managedRuntimeNotice}</div>
+            ) : null}
+          </>
+        ) : null}
         <SettingsToggleRow
           label="Debug mode"
           description="Enable local-chat diagnostics and developer tracing."
@@ -1866,6 +1920,7 @@ export function Settings({
       <div className={clsx(!(localModelsMode && localModelConfig.serviceType === "rnn-local") && "opacity-50 pointer-events-none select-none")}>
         <div className="mb-8">
           <RnnLocalModelManager
+            key={managedRuntimeRefreshKey}
             config={{ ...localModelConfig, enabled: true, serviceType: "rnn-local" }}
             onChange={(config) => onLocalModelConfigChange({ ...config, enabled: true, serviceType: "rnn-local" })}
             onModelActivated={onManagedLocalRuntimeModelActivated}

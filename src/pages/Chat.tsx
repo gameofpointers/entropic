@@ -119,6 +119,7 @@ import {
   extractJsonBlocks,
   isToolTransportPayload,
   stripExternalUntrustedSections,
+  unwrapExternalUntrustedText,
   sanitizeAuthStoreDetails,
   isBillingIssueMessage,
   isPolicyMessageRemovedError,
@@ -308,7 +309,7 @@ function normalizeToolPreviewText(value: unknown, maxChars = 320): string | unde
   if (typeof value !== "string") {
     return undefined;
   }
-  const trimmed = value.trim();
+  const trimmed = unwrapExternalUntrustedText(value).trim();
   if (!trimmed) {
     return undefined;
   }
@@ -407,6 +408,52 @@ function extractToolResultPreview(result: unknown): string | undefined {
       }
     }
     const title = normalizeToolPreviewText(details.title, 180) ?? normalizeToolPreviewText(details.name, 180);
+    const snippet = (() => {
+      const rawText = typeof details.text === "string" ? details.text : "";
+      if (!rawText.trim()) {
+        return undefined;
+      }
+      const normalizeCompare = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      const titleCompare = title ? normalizeCompare(title) : "";
+      const lines = rawText
+        .split(/\r?\n/)
+        .map((rawLine) => {
+          const cleaned = unwrapExternalUntrustedText(rawLine)
+            .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+            .replace(/^\s*[-*#]+\s*/, "")
+            .replace(/(?<=[a-z])(?=[A-Z])/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+          return { rawLine, cleaned };
+        })
+        .filter(({ cleaned }) => Boolean(cleaned))
+        .filter(({ rawLine, cleaned }) => {
+          if (cleaned.toLowerCase() === "advertisement") {
+            return false;
+          }
+          if (cleaned.toLowerCase().startsWith("search for a location")) {
+            return false;
+          }
+          if (rawLine.trimStart().startsWith("#")) {
+            const words = cleaned.split(/\s+/).filter(Boolean);
+            if (words.length <= 4 && !/\d/.test(cleaned)) {
+              return false;
+            }
+          }
+          if ((rawLine.match(/\]\(/g) ?? []).length >= 2) {
+            return false;
+          }
+          if (titleCompare && normalizeCompare(cleaned).startsWith(titleCompare)) {
+            return false;
+          }
+          return true;
+        })
+        .map(({ cleaned }) => cleaned);
+      if (lines.length === 0) {
+        return undefined;
+      }
+      return normalizeToolPreviewText(lines.slice(0, 3).join("\n"), 240);
+    })();
     const url =
       normalizeToolPreviewText(details.finalUrl, 220) ??
       normalizeToolPreviewText(details.final_url, 220) ??
@@ -415,7 +462,7 @@ function extractToolResultPreview(result: unknown): string | undefined {
       typeof details.status === "number" && Number.isFinite(details.status)
         ? `HTTP ${details.status}`
         : normalizeToolPreviewText(details.status, 80);
-    const lines = [title, url, status].filter((entry): entry is string => Boolean(entry));
+    const lines = [title, snippet, url, status].filter((entry): entry is string => Boolean(entry));
     if (lines.length > 0) {
       return lines.join("\n");
     }
@@ -778,6 +825,14 @@ function classifyNoVisibleResponseState(params: {
     };
   }
   if (!params.connected) {
+    if (!normalized) {
+      return {
+        reason: "no_visible_reply",
+        message:
+          "The assistant finished without a visible reply. Retry once; if it keeps happening, check Diagnostics for the final recovery state.",
+        detail,
+      };
+    }
     return {
       reason: "gateway_disconnected",
       message: "The response was interrupted because the sandbox gateway disconnected. Please retry.",

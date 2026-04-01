@@ -79,8 +79,26 @@ EXTERNAL_UNTRUSTED_WRAPPER_RE = re.compile(
 EXTERNAL_UNTRUSTED_END_RE = re.compile(
     r"(?is)\n?<<<END_EXTERNAL_UNTRUSTED_CONTENT[^>]*>>>\s*$"
 )
+EXTERNAL_UNTRUSTED_BLOCK_RE = re.compile(
+    r'(?is)<<<EXTERNAL_UNTRUSTED_CONTENT[^>]*>>>\s*(.*?)\s*<<<END_EXTERNAL_UNTRUSTED_CONTENT[^>]*>>>'
+)
+EXTERNAL_UNTRUSTED_MARKER_RE = re.compile(
+    r'(?is)<<<(?:END_)?EXTERNAL_UNTRUSTED_CONTENT[^>]*>>>'
+)
 LIVE_INFO_REQUEST_RE = re.compile(
     r"\b(weather|forecast|temperature|rain|snow|news|headline|stock|price|market|score|scores|schedule|current|currently|latest|today|tonight|right now)\b",
+    re.IGNORECASE,
+)
+LIVE_INFO_PHRASE_RE = re.compile(
+    r"\b(front\s+page|home\s*page|homepage|top\s+stories?|top\s+news|breaking\s+news)\b",
+    re.IGNORECASE,
+)
+WORKSPACE_REQUEST_RE = re.compile(
+    r"\b(file|files|folder|directory|path|workspace|local|locally|script|command|terminal)\b",
+    re.IGNORECASE,
+)
+WORKSPACE_ACTION_RE = re.compile(
+    r"\b(read|open|write|edit|save|create|run|execute)\b",
     re.IGNORECASE,
 )
 SIMPLE_CHAT_REQUEST_RE = re.compile(
@@ -130,8 +148,64 @@ LOCAL_SPREADSHEET_PATH_RE = re.compile(
     r"([^\s\"']+\.(?:csv|xlsx|xls))\b",
     re.IGNORECASE,
 )
+SPREADSHEET_DETAIL_HINT_RE = re.compile(
+    r"\b(columns?|headers?|rows?|data|template|budget|invoice|timesheet|attendance|inventory|expenses?|tracker|schedule|calendar|contacts?|tasks?|project|roster|sales|customers?)\b",
+    re.IGNORECASE,
+)
 LEGACY_LLAMA_CPP_N_CTX = 8192
 DEFAULT_LLAMA_CPP_N_CTX = 32768
+LIVE_INFO_FUZZY_KEYWORDS = (
+    "weather",
+    "forecast",
+    "temperature",
+    "headline",
+    "headlines",
+    "current",
+    "currently",
+    "latest",
+    "today",
+    "tonight",
+    "schedule",
+    "scores",
+    "market",
+    "price",
+)
+SUMMARY_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "for",
+    "from",
+    "how",
+    "i",
+    "in",
+    "is",
+    "it",
+    "my",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "what",
+    "whats",
+    "who",
+    "why",
+    "with",
+}
+STRICT_LOCAL_CORE_FAMILIES = ("web", "workspace", "memory", "cloud_sheets")
+STRICT_LOCAL_TOOL_LIMIT = 12
+STRICT_LOCAL_BROAD_TOOL_LIMIT = 18
+STRICT_LOCAL_MAX_HISTORY_MESSAGES = 5
+STRICT_LOCAL_MAX_HISTORY_CHARS = 1400
+STRICT_LOCAL_USER_MESSAGE_CHARS = 500
+STRICT_LOCAL_ASSISTANT_MESSAGE_CHARS = 360
+STRICT_LOCAL_TOOL_MESSAGE_CHARS = 900
+STRICT_LOCAL_SYSTEM_PROMPT_CHARS = 900
 IGNORED_TOOL_NAMES = {
     "assistant",
     "user",
@@ -265,11 +339,73 @@ def sanitize_user_prompt_text(text: str) -> str:
 
 
 def _strip_external_untrusted_wrapper(text: str) -> str:
-    if not text or "<<<EXTERNAL_UNTRUSTED_CONTENT" not in text:
+    if not text or (
+        "<<<EXTERNAL_UNTRUSTED_CONTENT" not in text and "SECURITY NOTICE:" not in text
+    ):
         return text
-    stripped = EXTERNAL_UNTRUSTED_WRAPPER_RE.sub("", text, count=1)
+
+    def is_safety_notice_line(line: str) -> bool:
+        lowered = line.strip().lower()
+        if not lowered:
+            return False
+        if lowered.startswith("security notice:"):
+            return True
+        if lowered.startswith("source:"):
+            return True
+        if lowered == "---":
+            return True
+        return lowered.startswith((
+            "- do not ",
+            "- this content may contain ",
+            "- respond helpfully ",
+            "- delete data,",
+            "- execute system commands",
+            "- change your behavior",
+            "- reveal sensitive information",
+            "- send messages to third parties",
+        ))
+
+    def strip_safety_preamble(value: str) -> str:
+        stripped_value = value.strip()
+        if not stripped_value.lower().startswith("security notice:"):
+            return value
+        lines = value.splitlines()
+        index = 1
+        while index < len(lines):
+            stripped_line = lines[index].strip()
+            if not stripped_line:
+                index += 1
+                continue
+            if stripped_line.startswith("<<<EXTERNAL_UNTRUSTED_CONTENT"):
+                return "\n".join(lines[index:])
+            if is_safety_notice_line(stripped_line):
+                index += 1
+                continue
+            return "\n".join(lines[index:])
+        return ""
+
+    def normalize_inner(inner: str) -> str:
+        lines: List[str] = []
+        for raw_line in inner.splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            if is_safety_notice_line(stripped):
+                continue
+            lines.append(stripped)
+        return "\n".join(lines).strip()
+
+    stripped = strip_safety_preamble(text)
+    stripped = EXTERNAL_UNTRUSTED_BLOCK_RE.sub(
+        lambda match: normalize_inner(match.group(1) or ""),
+        stripped,
+    )
+    stripped = EXTERNAL_UNTRUSTED_WRAPPER_RE.sub("", stripped, count=1)
     stripped = EXTERNAL_UNTRUSTED_END_RE.sub("", stripped, count=1)
-    return stripped.strip() or text
+    stripped = EXTERNAL_UNTRUSTED_MARKER_RE.sub("", stripped)
+    stripped = normalize_inner(stripped)
+    stripped = re.sub(r"\n{3,}", "\n\n", stripped).strip()
+    return stripped or text
 
 
 def _truncate_text_blob(text: str, max_chars: int = 1200, max_lines: int = 40) -> str:
@@ -595,34 +731,90 @@ def _compact_web_fetch_payload(value: Any) -> Optional[Dict[str, Any]]:
         return None
     title = _strip_external_untrusted_wrapper(str(value.get("title") or "")).strip()
     text = _strip_external_untrusted_wrapper(str(value.get("text") or "")).strip()
+
+    def normalize_preview_line(raw_line: str) -> str:
+        line = _strip_external_untrusted_wrapper(raw_line).strip()
+        line = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", line)
+        line = re.sub(r"^\s*[-*#]+\s*", "", line)
+        line = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", line)
+        line = re.sub(r"\s+", " ", line).strip(" -")
+        return line
+
+    def is_noisy_preview_line(raw_line: str, line: str) -> bool:
+        lowered = line.lower()
+        if not line:
+            return True
+        if lowered == "advertisement":
+            return True
+        if lowered.startswith("search for a location"):
+            return True
+        if raw_line.lstrip().startswith("#"):
+            words = [part for part in re.split(r"\s+", line) if part]
+            if len(words) <= 4 and not re.search(r"\d", line):
+                return True
+        return raw_line.count("](") >= 2
+
+    def normalize_compare_text(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
     if "<<<EXTERNAL_UNTRUSTED_CONTENT" in title or "Source:" in title:
         title_lines = [
-            line.strip()
+            normalize_preview_line(line)
             for line in title.splitlines()
-            if line.strip()
-            and not line.strip().startswith("<<<")
-            and not line.strip().startswith("Source:")
-            and line.strip() != "---"
+            if normalize_preview_line(line)
         ]
         title = title_lines[0] if title_lines else ""
     if title.startswith("{") or title.startswith("["):
         title = ""
+    title_compare = normalize_compare_text(title)
     lines = []
     for raw_line in text.splitlines():
-        line = raw_line.strip()
+        line = normalize_preview_line(raw_line)
         if not line:
             continue
-        if line.startswith("{") or line.startswith("}") or line.startswith("[") or line.startswith("]"):
+        if raw_line.strip().startswith(("{", "}", "[", "]")):
             continue
-        if line.upper().startswith("SECURITY NOTICE"):
+        if is_noisy_preview_line(raw_line, line):
             continue
-        if line.startswith("Source:") or line.startswith("---"):
+        if title_compare and normalize_compare_text(line).startswith(title_compare):
             continue
         lines.append(line)
-    snippet = " ".join(lines[:3]).strip()
+
+    def detail_score(line: str) -> int:
+        lowered = line.lower()
+        score = 0
+        if re.search(r"\b\d+(?:\.\d+)?\s*(?:%|f|c|mph|km/?h|kph|°|usd|eur|gbp)\b", lowered):
+            score += 4
+        if re.search(
+            r"\b(temperature|temp|feels like|humidity|wind|pressure|score|price|updated|as of)\b",
+            lowered,
+        ):
+            score += 2
+        return score
+
+    selected_lines: List[str] = []
+    selected_indices: set[int] = set()
+    if lines:
+        selected_lines.append(lines[0])
+        selected_indices.add(0)
+    ranked_indices = sorted(
+        range(len(lines)),
+        key=lambda index: (-detail_score(lines[index]), index),
+    )
+    for index in ranked_indices:
+        if index in selected_indices:
+            continue
+        if detail_score(lines[index]) <= 0 and len(selected_lines) >= 4:
+            continue
+        selected_lines.append(lines[index])
+        selected_indices.add(index)
+        if len(selected_lines) >= 4:
+            break
+    selected_lines = [lines[index] for index in sorted(selected_indices)]
+    snippet = " ".join(selected_lines).strip()
     if not title and lines:
         title = lines[0]
-        snippet = " ".join(lines[1:4]).strip()
+        snippet = " ".join(selected_lines[1:]).strip()
     if not title and not snippet:
         return None
     return {
@@ -648,15 +840,181 @@ def _format_web_fetch_summary(summary: Dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
+def _significant_query_tokens(text: str) -> List[str]:
+    return [
+        token
+        for token in _tokenize_request_words(text)
+        if len(token) >= 3 and token not in SUMMARY_STOPWORDS
+    ]
+
+
+def _score_summary_fields(summary: Dict[str, str], query: str = "") -> int:
+    title = str(summary.get("title") or "").strip()
+    snippet = str(summary.get("snippet") or "").strip()
+    url = str(summary.get("url") or "").strip().lower()
+    normalized_query = (query or "").lower()
+    title_tokens = set(_tokenize_request_words(title))
+    snippet_tokens = set(_tokenize_request_words(snippet))
+    query_tokens = set(_significant_query_tokens(query))
+    informative_tokens = {
+        token
+        for token in _tokenize_request_words(f"{title} {snippet}")
+        if len(token) >= 3 and token not in SUMMARY_STOPWORDS
+    }
+    score = min(len(informative_tokens), 12)
+    for token in query_tokens:
+        if token in url:
+            score += 5
+        if token in title_tokens:
+            score += 4
+        elif token in snippet_tokens:
+            score += 3
+    if title:
+        score += 1
+    if len(snippet) >= 60:
+        score += 2
+    if len(snippet) >= 140:
+        score += 2
+    if re.search(r"\d", snippet):
+        score += 1
+    joined = f"{title} {snippet}".lower()
+    if re.search(r"\b\d+(?:\.\d+)?\s*(?:%|f|c|mph|km/?h|kph|°|usd|eur|gbp)\b", joined):
+        score += 6
+    if "weather" in query_tokens and "forecast" not in query_tokens:
+        if re.search(r"\b(current|temperature|feels like|humidity|wind)\b", joined):
+            score += 6
+        if re.search(r"\bforecast\b", joined):
+            score -= 4
+    if LIVE_INFO_PHRASE_RE.search(query):
+        if re.match(r"^https?://[^/]+/?(?:[?#].*)?$", url):
+            score += 6
+        if re.search(r"\b(top stories|breaking|latest|live updates?)\b", joined):
+            score += 4
+    return score
+
+
+def _search_result_summary_for_item(item: Any) -> Optional[Dict[str, str]]:
+    if not isinstance(item, dict):
+        return None
+    title = ""
+    for key in ("title", "name", "headline"):
+        title = _strip_external_untrusted_wrapper(str(item.get(key) or "")).strip()
+        if title:
+            break
+    snippet = ""
+    for key in ("snippet", "description", "summary", "excerpt", "text", "content", "preview"):
+        snippet = _strip_external_untrusted_wrapper(str(item.get(key) or "")).strip()
+        if snippet:
+            break
+    url = ""
+    for key in ("url", "link", "href", "sourceUrl", "source_url"):
+        url = str(item.get(key) or "").strip()
+        if url:
+            break
+    if not (title or snippet or url):
+        return None
+    return {
+        "title": _truncate_text_blob(title, max_chars=240, max_lines=4),
+        "snippet": _truncate_text_blob(snippet, max_chars=600, max_lines=8),
+        "url": url,
+    }
+
+
+def _best_search_result_summary(value: Any, query: str = "") -> Optional[Dict[str, str]]:
+    if not isinstance(value, list):
+        return None
+    best_summary: Optional[Dict[str, str]] = None
+    best_score = -1
+    for item in value:
+        summary = _search_result_summary_for_item(item)
+        if summary is None:
+            continue
+        score = _score_summary_fields(summary, query=query)
+        if score > best_score:
+            best_summary = summary
+            best_score = score
+    return best_summary
+
+
+def _compact_web_search_payload(
+    value: Any, depth: int = 0, query: str = ""
+) -> Optional[Dict[str, str]]:
+    if depth >= 5:
+        return None
+    if isinstance(value, dict):
+        nested_query = str(value.get("query") or value.get("q") or "").strip() or query
+        for key in ("results", "items", "documents", "data"):
+            summary = _best_search_result_summary(value.get(key), query=nested_query)
+            if summary is not None:
+                return summary
+        for nested in value.values():
+            summary = _compact_web_search_payload(nested, depth + 1, nested_query)
+            if summary is not None:
+                return summary
+        return None
+    if isinstance(value, list):
+        summary = _best_search_result_summary(value, query=query)
+        if summary is not None:
+            return summary
+        for item in value:
+            summary = _compact_web_search_payload(item, depth + 1, query)
+            if summary is not None:
+                return summary
+        return None
+    if isinstance(value, str):
+        stripped = _strip_external_untrusted_wrapper(value.strip())
+        if not stripped or stripped[0] not in "{[":
+            return None
+        try:
+            parsed = json.loads(stripped)
+        except Exception:
+            return None
+        return _compact_web_search_payload(parsed, depth + 1, query)
+    return None
+
+
+def _format_web_search_summary(summary: Dict[str, str]) -> str:
+    lines: List[str] = []
+    title = str(summary.get("title") or "").strip()
+    snippet = str(summary.get("snippet") or "").strip()
+    url = str(summary.get("url") or "").strip()
+    if title:
+        lines.append(f"Title: {title}")
+    if snippet:
+        lines.append(f"Snippet: {snippet}")
+    if url:
+        lines.append(f"URL: {url}")
+    return "\n".join(lines).strip()
+
+
+def _summary_fields_from_text(summary_text: str) -> Dict[str, str]:
+    fields = {
+        "summary": summary_text.strip(),
+        "title": "",
+        "snippet": "",
+        "url": "",
+    }
+    for line in summary_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Title:"):
+            fields["title"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("Snippet:"):
+            fields["snippet"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("URL:"):
+            fields["url"] = stripped.split(":", 1)[1].strip()
+    return fields
+
+
 def sanitize_tool_result_text(text: str, max_chars: int = 4000) -> str:
     raw = (text or "").strip()
     if not raw:
         return raw
+    stripped = _strip_external_untrusted_wrapper(raw)
 
     candidates = [raw]
-    stripped = _strip_external_untrusted_wrapper(raw)
-    if stripped != raw:
-        candidates.insert(0, stripped)
+    if raw[0] not in "{[":
+        if stripped != raw:
+            candidates.insert(0, stripped)
 
     for candidate in candidates:
         if not candidate or candidate[0] not in "{[":
@@ -684,6 +1042,12 @@ def sanitize_tool_result_text(text: str, max_chars: int = 4000) -> str:
                 if len(rendered) > max_chars:
                     rendered = rendered[: max_chars - 1] + "…"
                 return rendered
+            web_search_summary = _compact_web_search_payload(parsed)
+            if web_search_summary is not None:
+                rendered = _format_web_search_summary(web_search_summary)
+                if len(rendered) > max_chars:
+                    rendered = rendered[: max_chars - 1] + "…"
+                return rendered
         compacted = _compact_tool_json_value(parsed)
         serialized = json.dumps(compacted, ensure_ascii=False, indent=2)
         if len(serialized) > max_chars:
@@ -694,6 +1058,40 @@ def sanitize_tool_result_text(text: str, max_chars: int = 4000) -> str:
     if len(compacted_text) > max_chars:
         compacted_text = compacted_text[: max_chars - 1] + "…"
     return compacted_text
+
+
+def _parse_tool_result_json(text: str) -> Optional[Any]:
+    stripped = (text or "").strip()
+    if not stripped or stripped[0] not in "{[":
+        return None
+    try:
+        return json.loads(stripped)
+    except Exception:
+        return None
+
+
+def _extract_first_web_result_url_from_tool_text(text: str) -> str:
+    parsed = _parse_tool_result_json(text)
+    if not isinstance(parsed, dict):
+        return ""
+    candidates = parsed.get("results")
+    summary = _best_search_result_summary(candidates, query=str(parsed.get("query") or ""))
+    if summary is None:
+        return ""
+    value = str(summary.get("url") or "").strip()
+    if re.match(r"^https?://", value, re.IGNORECASE):
+        return value
+    return ""
+
+
+def _tool_text_matches_web_search_result(text: str) -> bool:
+    parsed = _parse_tool_result_json(text)
+    if not isinstance(parsed, dict):
+        return False
+    results = parsed.get("results")
+    provider = str(parsed.get("provider") or "").strip().lower()
+    query = str(parsed.get("query") or "").strip()
+    return isinstance(results, list) and len(results) > 0 and bool(provider or query)
 
 
 def _coerce_tool_argument_value(raw: str) -> Any:
@@ -775,6 +1173,390 @@ def _extract_available_tool_names(tools: Optional[List[Dict[str, Any]]]) -> set[
     return names
 
 
+def _tokenize_request_words(text: str) -> List[str]:
+    return re.findall(r"[a-z0-9]+", (text or "").lower())
+
+
+def _is_edit_distance_at_most_one(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    if abs(len(left) - len(right)) > 1:
+        return False
+    i = 0
+    j = 0
+    edits = 0
+    while i < len(left) and j < len(right):
+        if left[i] == right[j]:
+            i += 1
+            j += 1
+            continue
+        edits += 1
+        if edits > 1:
+            return False
+        if len(left) == len(right):
+            i += 1
+            j += 1
+        elif len(left) > len(right):
+            i += 1
+        else:
+            j += 1
+    if i < len(left) or j < len(right):
+        edits += 1
+    return edits <= 1
+
+
+def _looks_like_live_info_request(text: str) -> bool:
+    if not text:
+        return False
+    if LIVE_INFO_REQUEST_RE.search(text):
+        return True
+    if LIVE_INFO_PHRASE_RE.search(text):
+        return True
+    normalized = (text or "").lower()
+    if "right now" in normalized:
+        return True
+    tokens = _tokenize_request_words(text)
+    for token in tokens:
+        if len(token) < 4:
+            continue
+        for keyword in LIVE_INFO_FUZZY_KEYWORDS:
+            if abs(len(token) - len(keyword)) > 1:
+                continue
+            if _is_edit_distance_at_most_one(token, keyword):
+                return True
+    return False
+
+
+def _compact_tool_schema_for_strict_local(value: Any, depth: int = 0) -> Any:
+    if depth >= 4:
+        schema_type = value.get("type") if isinstance(value, dict) else None
+        if isinstance(schema_type, str) and schema_type.strip():
+            return {"type": schema_type.strip()}
+        return {"type": "object"}
+    if not isinstance(value, dict):
+        return value
+
+    compacted: Dict[str, Any] = {}
+    schema_type = value.get("type")
+    if isinstance(schema_type, str) and schema_type.strip():
+        compacted["type"] = schema_type.strip()
+
+    enum_values = value.get("enum")
+    if isinstance(enum_values, list):
+        compact_enum = [
+            item
+            for item in enum_values[:12]
+            if isinstance(item, (str, int, float, bool)) or item is None
+        ]
+        if compact_enum:
+            compacted["enum"] = compact_enum
+
+    required = value.get("required")
+    if isinstance(required, list):
+        compact_required = [item for item in required if isinstance(item, str)]
+        if compact_required:
+            compacted["required"] = compact_required
+
+    properties = value.get("properties")
+    if isinstance(properties, dict):
+        compact_properties: Dict[str, Any] = {}
+        for key, nested in properties.items():
+            if not isinstance(key, str):
+                continue
+            compact_properties[key] = _compact_tool_schema_for_strict_local(nested, depth + 1)
+        if compact_properties:
+            compacted["properties"] = compact_properties
+            compacted.setdefault("type", "object")
+
+    items = value.get("items")
+    if isinstance(items, dict):
+        compacted["items"] = _compact_tool_schema_for_strict_local(items, depth + 1)
+    elif isinstance(items, list):
+        compact_items = [
+            _compact_tool_schema_for_strict_local(item, depth + 1)
+            for item in items[:4]
+            if isinstance(item, dict)
+        ]
+        if compact_items:
+            compacted["items"] = compact_items
+
+    for branch_key in ("anyOf", "oneOf"):
+        branch = value.get(branch_key)
+        if isinstance(branch, list):
+            compact_branch = [
+                _compact_tool_schema_for_strict_local(item, depth + 1)
+                for item in branch[:4]
+                if isinstance(item, dict)
+            ]
+            if compact_branch:
+                compacted[branch_key] = compact_branch
+
+    additional = value.get("additionalProperties")
+    if isinstance(additional, bool):
+        compacted["additionalProperties"] = additional
+    elif isinstance(additional, dict):
+        compacted["additionalProperties"] = _compact_tool_schema_for_strict_local(
+            additional, depth + 1
+        )
+
+    return compacted or {"type": "object"}
+
+
+def _compact_tools_for_strict_local(
+    tools: Optional[List[Dict[str, Any]]],
+) -> Optional[List[Dict[str, Any]]]:
+    if not tools:
+        return tools
+    compacted_tools: List[Dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function_block = tool.get("function")
+        if not isinstance(function_block, dict):
+            continue
+        name = _normalize_tool_name(function_block.get("name"))
+        if not name:
+            continue
+        description = _summarize_tool_description(str(function_block.get("description") or ""))
+        compacted_tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": _compact_tool_schema_for_strict_local(
+                        function_block.get("parameters") if isinstance(function_block, dict) else {}
+                    ),
+                },
+            }
+        )
+    return compacted_tools
+
+
+def _truncate_strict_local_message(role: str, text: str) -> str:
+    normalized_role = (role or "").strip().lower()
+    max_chars = STRICT_LOCAL_ASSISTANT_MESSAGE_CHARS
+    max_lines = 12
+    if normalized_role == "user":
+        max_chars = STRICT_LOCAL_USER_MESSAGE_CHARS
+        max_lines = 8
+    elif normalized_role == "tool":
+        max_chars = STRICT_LOCAL_TOOL_MESSAGE_CHARS
+        max_lines = 24
+    elif normalized_role == "system":
+        max_chars = STRICT_LOCAL_SYSTEM_PROMPT_CHARS
+        max_lines = 24
+    return _truncate_text_blob(text, max_chars=max_chars, max_lines=max_lines)
+
+
+def _trim_messages_for_strict_local_model(
+    messages: List[Dict[str, str]],
+) -> List[Dict[str, str]]:
+    if not messages:
+        return messages
+
+    system_messages: List[Dict[str, str]] = []
+    conversation: List[Dict[str, str]] = []
+    for message in messages:
+        role = str(message.get("role") or "").strip().lower()
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+        trimmed = _truncate_strict_local_message(role, content)
+        target = {"role": role, "content": trimmed}
+        if role == "system":
+            system_messages.append(target)
+        else:
+            conversation.append(target)
+
+    kept_reversed: List[Dict[str, str]] = []
+    total_chars = 0
+    user_messages_kept = 0
+    for message in reversed(conversation):
+        role = str(message.get("role") or "").strip().lower()
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+        must_keep = role == "user" and user_messages_kept == 0
+        would_exceed_chars = total_chars + len(content) > STRICT_LOCAL_MAX_HISTORY_CHARS
+        would_exceed_count = len(kept_reversed) >= STRICT_LOCAL_MAX_HISTORY_MESSAGES
+        if kept_reversed and (would_exceed_chars or would_exceed_count) and not must_keep:
+            continue
+        kept_reversed.append({"role": role, "content": content})
+        total_chars += len(content)
+        if role == "user":
+            user_messages_kept += 1
+
+    if not kept_reversed and conversation:
+        last = conversation[-1]
+        kept_reversed.append(last)
+
+    return system_messages + list(reversed(kept_reversed))
+
+
+def _tool_family_for_tool(tool: Dict[str, Any], normalized_name: Optional[str] = None) -> str:
+    function_block = tool.get("function") if isinstance(tool, dict) else None
+    description = ""
+    if isinstance(function_block, dict):
+        description = str(function_block.get("description") or "").strip().lower()
+    name = (normalized_name or _normalize_tool_name(function_block.get("name") if isinstance(function_block, dict) else None) or "").lower()
+    if not name:
+        return "other"
+    if name in {"web_search", "web_fetch", "browser"} or name.startswith(("web_", "browser_")):
+        return "web"
+    if name.startswith("memory_"):
+        return "memory"
+    if name in {"read", "write", "edit", "exec", "process"}:
+        return "workspace"
+    if name.startswith(("sheets_", "drive_")):
+        return "cloud_sheets"
+    if "spreadsheet" in description or "google sheets" in description or "google drive" in description:
+        return "cloud_sheets"
+    if "workspace" in description or "local file" in description or "file in the workspace" in description:
+        return "workspace"
+    if "memory" in description:
+        return "memory"
+    if "browser" in description or "web page" in description or "http" in description:
+        return "web"
+    if "_" in name:
+        return name.split("_", 1)[0]
+    return "other"
+
+
+def _build_tool_catalog(tools: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    ordered: List[Dict[str, Any]] = []
+    by_name: Dict[str, Dict[str, Any]] = {}
+    by_family: Dict[str, List[Dict[str, Any]]] = {}
+    if not tools:
+        return {"ordered": ordered, "by_name": by_name, "by_family": by_family}
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function_block = tool.get("function")
+        if not isinstance(function_block, dict):
+            continue
+        name = _normalize_tool_name(function_block.get("name"))
+        if not name:
+            continue
+        ordered.append(tool)
+        by_name[name] = tool
+        family = _tool_family_for_tool(tool, name)
+        by_family.setdefault(family, []).append(tool)
+    return {"ordered": ordered, "by_name": by_name, "by_family": by_family}
+
+
+def _dedupe_tool_list(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function_block = tool.get("function")
+        if not isinstance(function_block, dict):
+            continue
+        name = _normalize_tool_name(function_block.get("name"))
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        deduped.append(tool)
+    return deduped
+
+
+def _tools_for_families(catalog: Dict[str, Any], families: List[str]) -> List[Dict[str, Any]]:
+    selected: List[Dict[str, Any]] = []
+    by_family = catalog.get("by_family") or {}
+    for family in families:
+        selected.extend(by_family.get(family, []))
+    return _dedupe_tool_list(selected)
+
+
+def _build_strict_local_core_tools(
+    catalog: Dict[str, Any],
+    base_tools: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    selected: List[Dict[str, Any]] = []
+    if base_tools:
+        selected.extend(base_tools)
+    for family in STRICT_LOCAL_CORE_FAMILIES:
+        selected.extend(catalog.get("by_family", {}).get(family, []))
+    if not selected:
+        selected.extend(catalog.get("ordered", []))
+    return _dedupe_tool_list(selected)[:STRICT_LOCAL_BROAD_TOOL_LIMIT]
+
+
+def _looks_like_workspace_request(text: str) -> bool:
+    if not text:
+        return False
+    if LOCAL_FILE_HINT_RE.search(text) or WORKSPACE_REQUEST_RE.search(text):
+        return True
+    return bool(
+        WORKSPACE_ACTION_RE.search(text)
+        and re.search(r"\b(file|folder|directory|path|script|command|terminal|workspace)\b", text, re.IGNORECASE)
+    )
+
+
+def _infer_requested_tool_families(
+    messages: List[Dict[str, Any]],
+    catalog: Dict[str, Any],
+) -> List[str]:
+    latest_user_text = _latest_user_message_text(messages)
+    if not latest_user_text:
+        return []
+    lowered = latest_user_text.lower()
+    families: List[str] = []
+
+    if MEMORY_REQUEST_RE.search(latest_user_text):
+        families.append("memory")
+    if _is_explicit_browser_request(latest_user_text) or _is_explicit_web_fetch_request(latest_user_text):
+        families.append("web")
+    elif _looks_like_live_info_request(latest_user_text):
+        families.append("web")
+
+    if SPREADSHEET_REQUEST_RE.search(latest_user_text) or FILE_LOCATION_FOLLOWUP_RE.search(latest_user_text):
+        if _conversation_prefers_local_spreadsheet(messages):
+            families.append("workspace")
+        elif _conversation_requests_cloud_spreadsheet(messages):
+            families.append("cloud_sheets")
+
+    if _looks_like_workspace_request(latest_user_text):
+        families.append("workspace")
+
+    for family in catalog.get("by_family", {}).keys():
+        if family in {"web", "memory", "workspace", "cloud_sheets", "other"}:
+            continue
+        probes = {family, family.replace("_", " "), family.split("_", 1)[0]}
+        if any(probe and len(probe) >= 4 and probe in lowered for probe in probes):
+            families.append(family)
+
+    deduped: List[str] = []
+    seen: set[str] = set()
+    for family in families:
+        if family in seen:
+            continue
+        seen.add(family)
+        deduped.append(family)
+    return deduped
+
+
+def _finalize_tool_selection(
+    selected_tools: Optional[List[Dict[str, Any]]],
+    route: str,
+    *,
+    strict_mode: bool = False,
+    catalog: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    retry_tools: Optional[List[Dict[str, Any]]] = None
+    if strict_mode and selected_tools and catalog:
+        broader = _build_strict_local_core_tools(catalog, selected_tools)
+        if _extract_available_tool_names(broader) != _extract_available_tool_names(selected_tools):
+            retry_tools = broader
+    return {
+        "selected": selected_tools,
+        "retry": retry_tools,
+        "route": route,
+    }
+
+
 def _latest_user_message_text(messages: List[Dict[str, Any]]) -> str:
     for message in reversed(messages):
         if not isinstance(message, dict):
@@ -794,9 +1576,9 @@ def _latest_user_message_text(messages: List[Dict[str, Any]]) -> str:
                         text_parts.append(text)
                 elif isinstance(block, str) and block:
                     text_parts.append(block)
-            return "\n".join(text_parts).strip()
+            return sanitize_user_prompt_text("\n".join(text_parts).strip())
         if content is not None:
-            return str(content).strip()
+            return sanitize_user_prompt_text(str(content).strip())
         return ""
     return ""
 
@@ -809,7 +1591,7 @@ def _is_simple_chat_request(
     latest_user_text = _latest_user_message_text(messages)
     if not latest_user_text or len(latest_user_text) > 80:
         return False
-    if LIVE_INFO_REQUEST_RE.search(latest_user_text):
+    if _looks_like_live_info_request(latest_user_text):
         return False
     if MEMORY_REQUEST_RE.search(latest_user_text):
         return False
@@ -854,6 +1636,37 @@ def _latest_tool_message_text(messages: List[Dict[str, Any]]) -> str:
             return str(content).strip()
         return ""
     return ""
+
+
+def _recent_tool_message_texts(messages: List[Dict[str, Any]], limit: int = 3) -> List[str]:
+    results: List[str] = []
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").strip().lower()
+        if role != "tool":
+            continue
+        content = message.get("content")
+        text = ""
+        if isinstance(content, str):
+            text = content.strip()
+        elif isinstance(content, list):
+            text_parts: List[str] = []
+            for block in content:
+                if isinstance(block, dict):
+                    candidate = block.get("text")
+                    if isinstance(candidate, str) and candidate:
+                        text_parts.append(candidate)
+                elif isinstance(block, str) and block:
+                    text_parts.append(block)
+            text = "\n".join(text_parts).strip()
+        elif content is not None:
+            text = str(content).strip()
+        if text:
+            results.append(text)
+        if len(results) >= limit:
+            break
+    return results
 
 
 def _tool_message_indicates_error(text: str) -> bool:
@@ -964,7 +1777,26 @@ def _extract_workspace_persona_context(text: str) -> Dict[str, str]:
     }
 
 
-def _render_tooling_section(tools: Optional[List[Dict[str, Any]]]) -> str:
+def _render_tooling_section(
+    tools: Optional[List[Dict[str, Any]]],
+    *,
+    compact: bool = False,
+) -> str:
+    tool_names: List[str] = []
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        function_block = tool.get("function")
+        if not isinstance(function_block, dict):
+            continue
+        name = _normalize_tool_name(function_block.get("name"))
+        if name:
+            tool_names.append(name)
+    if compact:
+        if tool_names:
+            return "## Tooling\nAvailable tools: " + ", ".join(tool_names) + "."
+        return "## Tooling\nNo tools are available for this request. Answer directly."
+
     lines = [
         "## Tooling",
         "Tool availability (filtered by policy):",
@@ -991,15 +1823,45 @@ def _render_tooling_section(tools: Optional[List[Dict[str, Any]]]) -> str:
 def _compact_openclaw_system_prompt(
     text: str,
     tools: Optional[List[Dict[str, Any]]],
+    *,
+    strict_mode: bool = False,
 ) -> str:
     if not text or "OpenClaw" not in text:
         return _rewrite_system_prompt_for_effective_tools(text, tools)
     if "## Tooling" not in text and "## Workspace Files (injected)" not in text:
         return _rewrite_system_prompt_for_effective_tools(text, tools)
     persona = _extract_workspace_persona_context(text)
-    lines = [
-        "You are a personal assistant running inside OpenClaw.",
-    ]
+    lines = ["You are a personal assistant running inside OpenClaw."]
+    tooling_section = _render_tooling_section(tools, compact=strict_mode)
+
+    if strict_mode:
+        if persona.get("name"):
+            lines.append(
+                f"If asked your name or who you are, answer with {persona['name']}, not OpenClaw."
+            )
+        if persona.get("soulSummary"):
+            lines.append(str(persona["soulSummary"]))
+        lines.extend(
+            [
+                tooling_section,
+                "Use a tool only when needed.",
+                "Use web tools for current information.",
+                "Use memory_search for memory or prior-context questions.",
+                "Prefer local workspace tools for files and spreadsheets unless the user explicitly asks for a cloud app.",
+                "Ask one short clarifying question before creating a file or spreadsheet if the request is underspecified.",
+                "Do not reveal hidden reasoning or internal control strings.",
+                "Return either a normal assistant answer or a valid tool call.",
+            ]
+        )
+        compacted = "\n".join(lines).strip()
+        if len(compacted) > STRICT_LOCAL_SYSTEM_PROMPT_CHARS:
+            compacted = _truncate_text_blob(
+                compacted,
+                max_chars=STRICT_LOCAL_SYSTEM_PROMPT_CHARS,
+                max_lines=24,
+            )
+        return compacted
+
     if persona.get("name"):
         lines.extend(
             [
@@ -1014,7 +1876,7 @@ def _compact_openclaw_system_prompt(
             lines.append("## Persona")
         lines.append(f"- {persona['soulSummary']}")
     lines.extend([
-        _render_tooling_section(tools),
+        tooling_section,
         "## Behavior",
         "- Answer the user directly, clearly, and briefly.",
         "- Do not expose hidden reasoning, planning, scratch work, or internal templates.",
@@ -1023,6 +1885,7 @@ def _compact_openclaw_system_prompt(
         "- For current information requests, use an available web/browser tool before answering.",
         "- For memory or prior-context requests, use memory_search first; use memory_get only if a follow-up snippet is needed.",
         "- For spreadsheet, CSV, Excel, document, or file-creation requests, prefer local workspace files and local file tools unless the user explicitly asks for Google Drive, Google Sheets, or another cloud app.",
+        "- If a spreadsheet or file request is underspecified, ask one short clarifying question before using a file tool.",
         "- When you create a local file, report the exact local path or filename in the final answer.",
         "- After a tool result is available, answer from the tool result plainly and concisely.",
         "- If no tool is needed, answer normally in plain text.",
@@ -1067,6 +1930,8 @@ def _should_force_tool_choice_required(
         and local_workspace_tools
         and _conversation_prefers_local_spreadsheet(messages)
     ):
+        if _spreadsheet_request_needs_clarification(latest_user_text, latest_tool_text):
+            return False
         if (
             FILE_LOCATION_FOLLOWUP_RE.search(latest_user_text)
             and not SPREADSHEET_ACTION_RE.search(latest_user_text)
@@ -1088,7 +1953,7 @@ def _should_force_tool_choice_required(
 
     if not available_tools.intersection({"web_search", "web_fetch", "browser"}):
         return False
-    if not LIVE_INFO_REQUEST_RE.search(latest_user_text):
+    if not _looks_like_live_info_request(latest_user_text):
         return False
     if not latest_tool_text:
         return True
@@ -1149,6 +2014,27 @@ def _conversation_requests_cloud_spreadsheet(messages: List[Dict[str, Any]]) -> 
     if CLOUD_SPREADSHEET_NEGATION_RE.search(conversation_text):
         return False
     return bool(CLOUD_SPREADSHEET_HINT_RE.search(conversation_text))
+
+
+def _spreadsheet_request_needs_clarification(
+    latest_user_text: str,
+    latest_tool_text: str = "",
+) -> bool:
+    if not latest_user_text or not SPREADSHEET_REQUEST_RE.search(latest_user_text):
+        return False
+    if latest_tool_text and not _tool_message_indicates_error(latest_tool_text):
+        if _tool_text_matches_local_spreadsheet_result(latest_tool_text):
+            return False
+    lowered = latest_user_text.lower()
+    if FILE_LOCATION_FOLLOWUP_RE.search(latest_user_text):
+        return False
+    if SPREADSHEET_DETAIL_HINT_RE.search(latest_user_text):
+        return False
+    if re.search(r"\bfor\s+(?!me\b|us\b|you\b)[a-z0-9][a-z0-9 _-]{2,}", lowered):
+        return False
+    if re.search(r"[:,\n]", latest_user_text):
+        return False
+    return True
 
 
 def _extract_local_file_path_from_tool_text(text: str) -> str:
@@ -1272,43 +2158,65 @@ def _build_local_file_followup_answer(messages: List[Dict[str, Any]]) -> Optiona
     return f"I saved it as `{path}` in the local workspace."
 
 
+def _build_spreadsheet_clarification_answer(messages: List[Dict[str, Any]]) -> Optional[str]:
+    latest_user_text = _latest_user_message_text(messages)
+    latest_tool_text = _latest_tool_message_text(messages)
+    if not _spreadsheet_request_needs_clarification(latest_user_text, latest_tool_text):
+        return None
+    if _conversation_requests_cloud_spreadsheet(messages):
+        return "Yes. What should go in the Google Sheet? Tell me the columns or the kind of template you want."
+    return "Yes. What should go in the spreadsheet? Tell me the columns or the kind of template you want, and I can make it."
+
+
 def _build_web_followup_answer(messages: List[Dict[str, Any]]) -> Optional[str]:
     latest_user_text = _latest_user_message_text(messages)
     latest_tool_text = _latest_tool_message_text(messages)
     if not latest_user_text or not latest_tool_text or _tool_message_indicates_error(latest_tool_text):
         return None
     if not (
-        LIVE_INFO_REQUEST_RE.search(latest_user_text)
+        _looks_like_live_info_request(latest_user_text)
         or _is_explicit_browser_request(latest_user_text)
         or _is_explicit_web_fetch_request(latest_user_text)
     ):
         return None
-    summary_text = sanitize_tool_result_text(latest_tool_text, max_chars=1200)
-    if not summary_text:
+    best_fields: Optional[Dict[str, str]] = None
+    best_score = -1
+    for index, tool_text in enumerate(_recent_tool_message_texts(messages, limit=3)):
+        if _tool_message_indicates_error(tool_text):
+            continue
+        summary_text = sanitize_tool_result_text(tool_text, max_chars=1200)
+        if not summary_text:
+            continue
+        fields = _summary_fields_from_text(summary_text)
+        score = _score_summary_fields(fields, query=latest_user_text)
+        if index == 0:
+            score += 1
+        if _tool_text_matches_web_search_result(tool_text):
+            score += 1
+        if score > best_score:
+            best_fields = fields
+            best_score = score
+
+    if best_fields is None:
         return None
 
-    title = ""
-    snippet = ""
-    url = ""
-    for line in summary_text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("Title:"):
-            title = stripped.split(":", 1)[1].strip()
-        elif stripped.startswith("Snippet:"):
-            snippet = stripped.split(":", 1)[1].strip()
-        elif stripped.startswith("URL:"):
-            url = stripped.split(":", 1)[1].strip()
+    title = best_fields.get("title", "").strip()
+    snippet = best_fields.get("snippet", "").strip()
+    url = best_fields.get("url", "").strip()
+    summary_text = best_fields.get("summary", "").strip()
 
     pieces: List[str] = []
-    if title:
-        if _is_explicit_browser_request(latest_user_text):
-            pieces.append(f'The page title is "{title}".')
-        else:
-            pieces.append(f"Title: {title}")
     if snippet:
         if snippet[-1] not in ".!?":
             snippet += "."
+        if _is_explicit_browser_request(latest_user_text) and title:
+            pieces.append(f'The page title is "{title}".')
         pieces.append(snippet)
+    elif title:
+        if _is_explicit_browser_request(latest_user_text):
+            pieces.append(f'The page title is "{title}".')
+        else:
+            pieces.append(title)
     if url and not pieces:
         pieces.append(f"URL: {url}")
     answer = " ".join(piece.strip() for piece in pieces if piece.strip()).strip()
@@ -1351,7 +2259,25 @@ def _build_synthetic_tool_calls(
             ]
 
     if latest_tool_text:
+        if (
+            _looks_like_live_info_request(latest_user_text)
+            and not _tool_message_indicates_error(latest_tool_text)
+            and _tool_text_matches_web_search_result(latest_tool_text)
+            and "web_fetch" in available
+        ):
+            result_url = _extract_first_web_result_url_from_tool_text(latest_tool_text)
+            if result_url:
+                return [
+                    _build_tool_call(
+                        "web_fetch",
+                        {"url": result_url, "extractMode": "markdown", "maxChars": 2400},
+                        "synthetic",
+                    )
+                ]
         return []
+
+    if _looks_like_live_info_request(latest_user_text) and "web_search" in available:
+        return [_build_tool_call("web_search", {"query": latest_user_text.strip()}, "synthetic")]
 
     if MEMORY_REQUEST_RE.search(latest_user_text) and "memory_search" in available:
         query = _extract_memory_topic_from_text(latest_user_text)
@@ -1364,32 +2290,27 @@ def _build_synthetic_tool_calls(
 def _select_llama_cpp_tools(
     messages: List[Dict[str, Any]],
     tools: Optional[List[Dict[str, Any]]],
-) -> Optional[List[Dict[str, Any]]]:
+    *,
+    strict_mode: bool = False,
+) -> Dict[str, Any]:
     if not tools:
-        return tools
+        return {"selected": tools, "retry": None, "route": "none"}
     latest_user_text = _latest_user_message_text(messages)
+    catalog = _build_tool_catalog(tools)
     if latest_user_text and (
         NAME_REQUEST_RE.search(latest_user_text)
         or _is_simple_chat_request(messages, None)
     ):
-        return None
-    by_name: Dict[str, Dict[str, Any]] = {}
-    for tool in tools:
-        if not isinstance(tool, dict):
-            continue
-        function_block = tool.get("function")
-        if not isinstance(function_block, dict):
-            continue
-        name = _normalize_tool_name(function_block.get("name"))
-        if not name:
-            continue
-        by_name[name] = tool
+        return {"selected": None, "retry": None, "route": "simple-chat"}
+    by_name: Dict[str, Dict[str, Any]] = catalog["by_name"]
 
     latest_tool_text = _latest_tool_message_text(messages)
     if latest_user_text and (
         SPREADSHEET_REQUEST_RE.search(latest_user_text)
         or FILE_LOCATION_FOLLOWUP_RE.search(latest_user_text)
     ):
+        if _spreadsheet_request_needs_clarification(latest_user_text, latest_tool_text):
+            return {"selected": None, "retry": None, "route": "spreadsheet-clarify"}
         if (
             FILE_LOCATION_FOLLOWUP_RE.search(latest_user_text)
             and not SPREADSHEET_ACTION_RE.search(latest_user_text)
@@ -1397,18 +2318,23 @@ def _select_llama_cpp_tools(
             and not _tool_message_indicates_error(latest_tool_text)
             and _tool_text_matches_local_spreadsheet_result(latest_tool_text)
         ):
-            return None
+            return {"selected": None, "retry": None, "route": "spreadsheet-followup"}
         if (
             latest_tool_text
             and not _tool_message_indicates_error(latest_tool_text)
             and _tool_text_matches_local_spreadsheet_result(latest_tool_text)
             and not SPREADSHEET_ACTION_RE.search(latest_user_text)
         ):
-            return None
+            return {"selected": None, "retry": None, "route": "spreadsheet-followup"}
         if _conversation_prefers_local_spreadsheet(messages):
             preferred_names = ["write", "edit", "read", "exec", "process"]
             selected = [by_name[name] for name in preferred_names if name in by_name]
-            return selected or tools
+            return _finalize_tool_selection(
+                selected or tools,
+                "spreadsheet-local",
+                strict_mode=strict_mode,
+                catalog=catalog,
+            )
         if _conversation_requests_cloud_spreadsheet(messages):
             preferred_names = [
                 "sheets_create",
@@ -1419,7 +2345,12 @@ def _select_llama_cpp_tools(
                 "drive_search",
             ]
             selected = [by_name[name] for name in preferred_names if name in by_name]
-            return selected or tools
+            return _finalize_tool_selection(
+                selected or tools,
+                "spreadsheet-cloud",
+                strict_mode=strict_mode,
+                catalog=catalog,
+            )
 
     if latest_user_text and MEMORY_REQUEST_RE.search(latest_user_text):
         has_memory_tools = "memory_search" in by_name or "memory_get" in by_name
@@ -1429,40 +2360,92 @@ def _select_llama_cpp_tools(
                 if _memory_request_requires_fetch(latest_user_text) and "memory_get" in by_name:
                     preferred_names.append("memory_get")
                 selected = [by_name[name] for name in preferred_names if name in by_name]
-                return selected or tools
+                return _finalize_tool_selection(
+                    selected or tools,
+                    "memory",
+                    strict_mode=strict_mode,
+                    catalog=catalog,
+                )
             if _memory_request_requires_fetch(latest_user_text) and "memory_get" in by_name:
                 lowered_tool = latest_tool_text.lower()
                 if any(marker in lowered_tool for marker in ("path", ".md", "memory/", "\"id\"", "\"path\"")):
-                    return [by_name["memory_get"]]
-            return None
+                    return _finalize_tool_selection(
+                        [by_name["memory_get"]],
+                        "memory-fetch",
+                        strict_mode=strict_mode,
+                        catalog=catalog,
+                    )
+            return {"selected": None, "retry": None, "route": "memory-followup"}
 
     if latest_user_text and _is_explicit_browser_request(latest_user_text):
         if latest_tool_text and not _tool_message_indicates_error(latest_tool_text):
-            return None
+            return {"selected": None, "retry": None, "route": "browser-followup"}
         preferred_names = ["browser", "web_fetch"]
         if _tool_message_indicates_error(latest_tool_text):
             preferred_names = ["web_fetch", "browser"]
         selected = [by_name[name] for name in preferred_names if name in by_name]
-        return selected or tools
+        return _finalize_tool_selection(
+            selected or tools,
+            "browser",
+            strict_mode=strict_mode,
+            catalog=catalog,
+        )
 
     if latest_user_text and _is_explicit_web_fetch_request(latest_user_text):
         if latest_tool_text and not _tool_message_indicates_error(latest_tool_text):
-            return None
+            return {"selected": None, "retry": None, "route": "web-followup"}
         preferred_names = ["web_fetch", "browser"]
         selected = [by_name[name] for name in preferred_names if name in by_name]
-        return selected or tools
+        return _finalize_tool_selection(
+            selected or tools,
+            "web-fetch",
+            strict_mode=strict_mode,
+            catalog=catalog,
+        )
 
-    if not latest_user_text or not LIVE_INFO_REQUEST_RE.search(latest_user_text):
-        return tools
+    if latest_user_text and _looks_like_live_info_request(latest_user_text):
+        if latest_tool_text and not _tool_message_indicates_error(latest_tool_text):
+            if _tool_text_matches_web_search_result(latest_tool_text) and "web_fetch" in by_name:
+                return _finalize_tool_selection(
+                    [by_name["web_fetch"]],
+                    "live-info-fetch",
+                    strict_mode=strict_mode,
+                    catalog=catalog,
+                )
+            return {"selected": None, "retry": None, "route": "web-followup"}
+        preferred_names: List[str]
+        if _tool_message_indicates_error(latest_tool_text):
+            preferred_names = ["web_fetch", "browser"]
+        else:
+            preferred_names = ["web_search", "web_fetch", "browser"]
+        selected = [by_name[name] for name in preferred_names if name in by_name]
+        return _finalize_tool_selection(
+            selected or tools,
+            "live-info",
+            strict_mode=strict_mode,
+            catalog=catalog,
+        )
 
-    preferred_names: List[str]
-    if _tool_message_indicates_error(latest_tool_text):
-        preferred_names = ["web_fetch", "browser"]
-    else:
-        preferred_names = ["web_search", "web_fetch", "browser"]
+    inferred_families = _infer_requested_tool_families(messages, catalog)
+    if inferred_families:
+        selected = _tools_for_families(catalog, inferred_families)
+        return _finalize_tool_selection(
+            selected or tools,
+            f"families:{','.join(inferred_families)}",
+            strict_mode=strict_mode,
+            catalog=catalog,
+        )
 
-    selected = [by_name[name] for name in preferred_names if name in by_name]
-    return selected or tools
+    if strict_mode and len(catalog["ordered"]) > STRICT_LOCAL_TOOL_LIMIT:
+        selected = _build_strict_local_core_tools(catalog)
+        return _finalize_tool_selection(
+            selected or tools,
+            "strict-core",
+            strict_mode=strict_mode,
+            catalog=catalog,
+        )
+
+    return {"selected": tools, "retry": None, "route": "all"}
 
 
 def _build_tool_call(function_name: str, arguments: Any, suffix: str) -> Dict[str, Any]:
@@ -2211,6 +3194,57 @@ def sanitize_generated_chat_answer(text: str) -> str:
     return cleaned
 
 
+def _analyze_tool_bridge_response(
+    response: Dict[str, Any],
+    effective_tools: Optional[List[Dict[str, Any]]],
+    synthetic_tool_calls: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    choices = response.get("choices") if isinstance(response, dict) else None
+    first_choice = choices[0] if isinstance(choices, list) and choices else {}
+    message = first_choice.get("message") if isinstance(first_choice, dict) else {}
+    raw_content = message.get("content") if isinstance(message, dict) else ""
+    if not isinstance(raw_content, str):
+        raw_content = str(raw_content or "")
+    available_tool_names = _extract_available_tool_names(effective_tools)
+    parsed_tool_calls = parse_llama_cpp_tool_calls(raw_content, available_tool_names)
+    if synthetic_tool_calls:
+        parsed_tool_calls = synthetic_tool_calls
+    cleaned_content = strip_llama_cpp_tool_markup(raw_content)
+    if effective_tools:
+        cleaned_content = sanitize_llama_cpp_tool_answer(raw_content)
+    finish_reason = "tool_calls" if parsed_tool_calls else "stop"
+    tool_call_names = [
+        tool_call.get("function", {}).get("name", "")
+        for tool_call in parsed_tool_calls
+        if isinstance(tool_call, dict)
+    ]
+    return {
+        "rawContent": raw_content,
+        "cleanedContent": cleaned_content,
+        "parsedToolCalls": parsed_tool_calls,
+        "finishReason": finish_reason,
+        "toolCallNames": tool_call_names,
+    }
+
+
+def _should_retry_with_broader_tools(
+    parsed_tool_calls: List[Dict[str, Any]],
+    cleaned_content: str,
+    effective_tool_choice: Any,
+    effective_tools: Optional[List[Dict[str, Any]]],
+    retry_tools: Optional[List[Dict[str, Any]]],
+) -> bool:
+    if not effective_tools or not retry_tools:
+        return False
+    if _extract_available_tool_names(effective_tools) == _extract_available_tool_names(retry_tools):
+        return False
+    if parsed_tool_calls:
+        return False
+    if effective_tool_choice == "required":
+        return True
+    return not (cleaned_content or "").strip()
+
+
 def _as_bool(value: Any, default: bool) -> bool:
     if isinstance(value, bool):
         return value
@@ -2426,6 +3460,18 @@ class RuntimeManager:
             )
             llama_cpp_config["nCtx"] = min(configured_n_ctx, model_context)
             return LlamaCppEngine(llama_cpp_config)
+        if backend == "prism-llama":
+            from prism_llama_engine import PrismLlamaServerEngine
+
+            prism_config = dict(self.runtime_config.get("llamaCpp") or {})
+            configured_n_ctx = _as_int(
+                prism_config.get("nCtx"), DEFAULT_LLAMA_CPP_N_CTX, 512
+            )
+            model_context = _as_int(
+                local_entry.get("context"), DEFAULT_LLAMA_CPP_N_CTX, 512
+            )
+            prism_config["nCtx"] = min(configured_n_ctx, model_context)
+            return PrismLlamaServerEngine(prism_config, str(self.state_dir))
         if backend == "rwkv":
             self.manager.ensure_rwkv_tokenizer()
             from rwkv_engine import RWKVEngine
@@ -2461,6 +3507,16 @@ class RuntimeManager:
             payload["downloadState"] = self.download_state
             return payload
 
+    def describe_model(self, model_name: str) -> Dict[str, Optional[str]]:
+        with self.lock:
+            local_entry = self.manager.get_local_entry(model_name)
+            if not local_entry:
+                return {"backend": None, "architecture": None}
+            return {
+                "backend": str(local_entry.get("backend") or "").strip().lower() or None,
+                "architecture": str(local_entry.get("architecture") or "").strip().lower() or None,
+            }
+
     def describe_chat_request(
         self,
         model_name: str,
@@ -2472,10 +3528,17 @@ class RuntimeManager:
             backend = str(local_entry.get("backend") or "").strip().lower() if local_entry else None
             normalized_messages = self._normalize_messages(messages, tools=tools, model_name=model_name)
             prompt = self._build_prompt(messages, model_name, tools=tools)
+            tool_payload_chars = 0
+            if tools:
+                try:
+                    tool_payload_chars = len(json.dumps(tools, ensure_ascii=False))
+                except Exception:
+                    tool_payload_chars = 0
             return {
                 "promptChars": (
                     sum(len(str(message.get("content") or "")) for message in normalized_messages)
-                    if backend == "llama-cpp"
+                    + tool_payload_chars
+                    if backend in {"llama-cpp", "prism-llama"}
                     else len(prompt)
                 ),
                 "backend": backend,
@@ -2679,9 +3742,7 @@ class RuntimeManager:
             if self.active_engine is None:
                 return {"status": "error", "error": "No model loaded"}
             started_at = time.time()
-            local_entry = self.manager.get_local_entry(self.loaded_model) if self.loaded_model else None
-            backend = str(local_entry.get("backend") or "").strip().lower() if local_entry else ""
-            if backend == "llama-cpp" and hasattr(self.active_engine, "generate_messages_stream"):
+            if hasattr(self.active_engine, "generate_messages_stream"):
                 for _ in self.active_engine.generate_messages_stream(
                     [{"role": "user", "content": "Hi"}],
                     max_tokens=1,
@@ -2700,7 +3761,7 @@ class RuntimeManager:
             self._write_runtime_config(self.runtime_config)
             restart_required = self.active_engine is not None and getattr(
                 self.active_engine, "name", None
-            ) in {"vllm", "llama-cpp"}
+            ) in {"vllm", "llama-cpp", "prism-llama"}
             return {
                 "status": "updated",
                 "runtimeConfig": self.runtime_config,
@@ -2734,6 +3795,12 @@ class RuntimeManager:
         tools: Optional[List[Dict[str, Any]]] = None,
         model_name: Optional[str] = None,
     ) -> List[Dict[str, str]]:
+        local_entry = self.manager.get_local_entry(model_name) if model_name else None
+        strict_local = bool(
+            local_entry
+            and str(local_entry.get("backend") or "").strip().lower() in {"llama-cpp", "prism-llama"}
+            and str(local_entry.get("architecture") or "").strip().lower() == "gguf"
+        )
         normalized_messages: List[Dict[str, str]] = []
         for message in messages:
             role = str(message.get("role") or "").strip().lower() or "user"
@@ -2745,12 +3812,17 @@ class RuntimeManager:
                 if not text:
                     continue
             elif role == "system":
-                text = _compact_openclaw_system_prompt(text, tools)
+                text = _compact_openclaw_system_prompt(text, tools, strict_mode=strict_local)
             elif role == "tool":
-                text = sanitize_tool_result_text(text)
+                text = sanitize_tool_result_text(
+                    text,
+                    max_chars=STRICT_LOCAL_TOOL_MESSAGE_CHARS if strict_local else 4000,
+                )
                 if not text:
                     continue
             normalized_messages.append({"role": role, "content": text.strip()})
+        if strict_local:
+            return _trim_messages_for_strict_local_model(normalized_messages)
         return normalized_messages
 
     def _build_prompt(
@@ -2802,7 +3874,7 @@ class RuntimeManager:
             prompt = self._build_prompt(messages, model_name, tools=tools)
             if hasattr(engine, "reset"):
                 engine.reset()
-        if getattr(engine, "name", None) == "llama-cpp" and hasattr(engine, "generate_messages_stream"):
+        if hasattr(engine, "generate_messages_stream"):
             for piece in engine.generate_messages_stream(
                 normalized_messages,
                 temperature=temperature,
@@ -2837,7 +3909,7 @@ class RuntimeManager:
             )
             if hasattr(engine, "reset"):
                 engine.reset()
-        if getattr(engine, "name", None) == "llama-cpp" and hasattr(engine, "complete_messages"):
+        if hasattr(engine, "complete_messages"):
             return engine.complete_messages(
                 normalized_messages,
                 temperature=temperature,
@@ -2954,13 +4026,38 @@ def make_handler(runtime: RuntimeManager):
             normalized_messages = runtime._normalize_messages(
                 messages, tools=tools, model_name=model_name
             )
-            effective_tools = _select_llama_cpp_tools(normalized_messages, tools)
-            prompt_info = runtime.describe_chat_request(model_name, messages, tools=effective_tools)
+            model_info = runtime.describe_model(model_name)
+            strict_local_tools = (
+                (model_info.get("backend") in {"llama-cpp", "prism-llama"})
+                and model_info.get("architecture") == "gguf"
+            )
+            tool_selection = _select_llama_cpp_tools(
+                messages,
+                tools,
+                strict_mode=strict_local_tools,
+            )
+            effective_tools = tool_selection.get("selected")
+            retry_tools = tool_selection.get("retry")
+            tool_route = str(tool_selection.get("route") or "all")
+            model_tools = (
+                _compact_tools_for_strict_local(effective_tools)
+                if strict_local_tools
+                else effective_tools
+            )
+            model_retry_tools = (
+                _compact_tools_for_strict_local(retry_tools)
+                if strict_local_tools
+                else retry_tools
+            )
+            prompt_info = runtime.describe_chat_request(model_name, messages, tools=model_tools)
             request_id = uuid4().hex[:8]
             input_chars = sum(
                 len(runtime._extract_content_text(message.get("content")))
                 for message in messages
                 if isinstance(message, dict)
+            )
+            normalized_messages = runtime._normalize_messages(
+                messages, tools=model_tools, model_name=model_name
             )
             effective_tool_choice = tool_choice
             if _should_force_tool_choice_required(
@@ -2987,6 +4084,7 @@ def make_handler(runtime: RuntimeManager):
                 f"architecture={prompt_info['architecture'] or '-'} thinking={int(bool(prompt_info['thinking']))} "
                 f"temperature={temperature:.2f} top_p={top_p:.2f} maxTokens={max_tokens} "
                 f"tools={len(tools) if tools else 0} adaptedTools={len(effective_tools) if effective_tools else 0} "
+                f"toolRoute={json.dumps(tool_route)} retryTools={len(retry_tools) if retry_tools else 0} "
                 f"toolChoice={json.dumps(effective_tool_choice) if effective_tool_choice is not None else 'null'}"
             )
 
@@ -3007,7 +4105,7 @@ def make_handler(runtime: RuntimeManager):
                     }
                 elif effective_tools:
                     synthetic_tool_calls = _build_synthetic_tool_calls(
-                        normalized_messages, effective_tools
+                        messages, effective_tools
                     )
                     if synthetic_tool_calls:
                         response = {
@@ -3029,7 +4127,7 @@ def make_handler(runtime: RuntimeManager):
                                 temperature,
                                 top_p,
                                 max_tokens,
-                                tools=effective_tools,
+                                tools=model_tools,
                                 tool_choice=effective_tool_choice,
                             )
                         except Exception as error:
@@ -3052,22 +4150,100 @@ def make_handler(runtime: RuntimeManager):
                         ]
                     }
 
-                choices = response.get("choices") if isinstance(response, dict) else None
-                first_choice = choices[0] if isinstance(choices, list) and choices else {}
-                message = first_choice.get("message") if isinstance(first_choice, dict) else {}
-                raw_content = message.get("content") if isinstance(message, dict) else ""
-                if not isinstance(raw_content, str):
-                    raw_content = str(raw_content or "")
-                available_tool_names = _extract_available_tool_names(effective_tools)
-                parsed_tool_calls = parse_llama_cpp_tool_calls(
-                    raw_content, available_tool_names
+                analysis = _analyze_tool_bridge_response(
+                    response,
+                    effective_tools,
+                    synthetic_tool_calls=synthetic_tool_calls,
                 )
-                if synthetic_tool_calls:
-                    parsed_tool_calls = synthetic_tool_calls
-                cleaned_content = strip_llama_cpp_tool_markup(raw_content)
-                if effective_tools:
-                    cleaned_content = sanitize_llama_cpp_tool_answer(raw_content)
-                finish_reason = "tool_calls" if parsed_tool_calls else "stop"
+                raw_content = analysis["rawContent"]
+                cleaned_content = analysis["cleanedContent"]
+                parsed_tool_calls = analysis["parsedToolCalls"]
+                finish_reason = analysis["finishReason"]
+                tool_call_names = analysis["toolCallNames"]
+
+                if (
+                    direct_followup_answer is None
+                    and not synthetic_tool_calls
+                    and _should_retry_with_broader_tools(
+                        parsed_tool_calls,
+                        cleaned_content,
+                        effective_tool_choice,
+                        effective_tools,
+                        retry_tools,
+                    )
+                ):
+                    try:
+                        log_runtime(
+                            f"chat retry request={request_id} model={model_name} "
+                            f"fromRoute={json.dumps(tool_route)} "
+                            f"retryTools={len(retry_tools) if retry_tools else 0}"
+                        )
+                        response = runtime.complete(
+                            model_name,
+                            messages,
+                            temperature,
+                            top_p,
+                            max_tokens,
+                            tools=model_retry_tools,
+                            tool_choice=effective_tool_choice,
+                        )
+                        effective_tools = retry_tools
+                        model_tools = model_retry_tools
+                        tool_route = f"{tool_route}:retry"
+                        analysis = _analyze_tool_bridge_response(
+                            response,
+                            effective_tools,
+                            synthetic_tool_calls=None,
+                        )
+                        raw_content = analysis["rawContent"]
+                        cleaned_content = analysis["cleanedContent"]
+                        parsed_tool_calls = analysis["parsedToolCalls"]
+                        finish_reason = analysis["finishReason"]
+                        tool_call_names = analysis["toolCallNames"]
+                    except Exception as retry_error:
+                        log_runtime(
+                            f"chat retry_error request={request_id} model={model_name} error={retry_error!r}"
+                        )
+
+                if not parsed_tool_calls and not (cleaned_content or "").strip():
+                    late_synthetic_tool_calls = (
+                        _build_synthetic_tool_calls(messages, effective_tools)
+                        if effective_tools and not direct_followup_answer
+                        else []
+                    )
+                    if late_synthetic_tool_calls:
+                        synthetic_tool_calls = late_synthetic_tool_calls
+                        parsed_tool_calls = late_synthetic_tool_calls
+                        finish_reason = "tool_calls"
+                        tool_call_names = [
+                            str(
+                                ((tool_call or {}).get("function") or {}).get("name")
+                                or ((tool_call or {}).get("name") or "")
+                            ).strip()
+                            for tool_call in late_synthetic_tool_calls
+                            if isinstance(tool_call, dict)
+                        ]
+                if not parsed_tool_calls and not (cleaned_content or "").strip():
+                    clarification_answer = _build_spreadsheet_clarification_answer(normalized_messages)
+                    if clarification_answer:
+                        cleaned_content = clarification_answer
+                        finish_reason = "stop"
+                        tool_call_names = []
+                    elif effective_tool_choice == "required":
+                        cleaned_content = (
+                            "I couldn't produce the required tool call for that request. "
+                            "Please retry or make the request more specific."
+                        )
+                        finish_reason = "stop"
+                        tool_call_names = []
+                    elif strict_local_tools:
+                        cleaned_content = (
+                            "I couldn't produce a visible answer for that request. "
+                            "Please retry or ask it a bit more directly."
+                        )
+                        finish_reason = "stop"
+                        tool_call_names = []
+
                 completion_id = f"chatcmpl-{uuid4().hex}"
                 created = int(time.time())
                 elapsed_ms = round((time.perf_counter() - started_at) * 1000)
@@ -3079,11 +4255,6 @@ def make_handler(runtime: RuntimeManager):
                     stats_summary += f" generatedTokens={generated_tokens}"
                 if isinstance(tokens_per_second, (int, float)) and tokens_per_second > 0:
                     stats_summary += f" tokensPerSecond={tokens_per_second:.2f}"
-                tool_call_names = [
-                    tool_call.get("function", {}).get("name", "")
-                    for tool_call in parsed_tool_calls
-                    if isinstance(tool_call, dict)
-                ]
                 if runtime.should_capture_tool_bridge(body):
                     try:
                         runtime.append_tool_bridge_capture(
@@ -3104,8 +4275,9 @@ def make_handler(runtime: RuntimeManager):
                                 "messages": messages,
                                 "normalizedMessages": normalized_messages,
                                 "tools": tools or [],
-                                "effectiveTools": effective_tools or [],
+                                "effectiveTools": model_tools or [],
                                 "toolNamesAvailable": sorted(_extract_available_tool_names(effective_tools)),
+                                "toolRoute": tool_route,
                                 "rawContent": raw_content,
                                 "cleanedContent": cleaned_content,
                                 "finishReason": finish_reason,

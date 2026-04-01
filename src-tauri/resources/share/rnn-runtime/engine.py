@@ -13,6 +13,8 @@ except ImportError:
 
 RUNTIME_DIR = Path(__file__).resolve().parent
 ALBATROSS_REFERENCE_DIR = RUNTIME_DIR / "albatross_reference"
+PRISM_LLAMA_STATE_DIR_ENV = "ENTROPIC_RNN_RUNTIME_STATE_DIR"
+PRISM_LLAMA_SERVER_BIN_ENV = "ENTROPIC_RNN_PRISM_LLAMA_SERVER"
 
 
 def _bundled_albatross_source_available() -> bool:
@@ -38,6 +40,22 @@ def _resolve_nvcc_path() -> Optional[str]:
     if fallback.exists():
         return str(fallback)
     return None
+
+
+def _prism_llama_server_available() -> bool:
+    configured = (os.environ.get(PRISM_LLAMA_SERVER_BIN_ENV) or "").strip()
+    if configured and Path(configured).exists():
+        return True
+    state_dir = (os.environ.get(PRISM_LLAMA_STATE_DIR_ENV) or "").strip()
+    if not state_dir:
+        return False
+    base_dir = Path(state_dir)
+    binary_name = "llama-server.exe" if os.name == "nt" else "llama-server"
+    candidates = [
+        base_dir / "prism-llama.cpp" / "build" / "bin" / binary_name,
+        base_dir / "prism-llama.cpp" / "build" / "bin" / "Release" / binary_name,
+    ]
+    return any(candidate.exists() for candidate in candidates)
 
 
 def _detect_host_memory() -> Dict[str, Any]:
@@ -121,6 +139,7 @@ def detect_runtime_capabilities() -> Dict[str, Any]:
     transformers_available = find_spec("transformers") is not None
     vllm_available = find_spec("vllm") is not None
     llama_cpp_available = find_spec("llama_cpp") is not None
+    prism_llama_available = _prism_llama_server_available()
     nvcc_path = _resolve_nvcc_path()
     bundled_albatross = _bundled_albatross_source_available()
     payload: Dict[str, Any] = {
@@ -144,6 +163,7 @@ def detect_runtime_capabilities() -> Dict[str, Any]:
             "huggingface": False,
             "vllm": vllm_available,
             "llama-cpp": llama_cpp_available,
+            "prism-llama": prism_llama_available,
             "albatross": False,
         }
         payload["supportedBackends"] = [
@@ -200,6 +220,7 @@ def detect_runtime_capabilities() -> Dict[str, Any]:
         "huggingface": transformers_available,
         "vllm": vllm_available,
         "llama-cpp": llama_cpp_available,
+        "prism-llama": prism_llama_available,
         "albatross": bool(payload["cudaAvailable"] and bundled_albatross and nvcc_path),
     }
     payload["backendAvailability"] = backend_availability

@@ -179,6 +179,20 @@ MODEL_CATALOG: List[Dict[str, Any]] = [
         "thinking": False,
     },
     {
+        "id": "bonsai-8b-q1-0-g128",
+        "name": "Bonsai 8B Q1_0_g128",
+        "display_name": "Bonsai 8B",
+        "hf_repo": "prism-ml/Bonsai-8B-gguf",
+        "hf_file": "Bonsai-8B.gguf",
+        "architecture": "gguf",
+        "backend": "prism-llama",
+        "params": "8B",
+        "size_gb": 1.16,
+        "context": 65536,
+        "description": "Ultra-compressed Prism Bonsai GGUF model that requires the managed Prism llama.cpp backend.",
+        "thinking": False,
+    },
+    {
         "id": "phi4-mini-instruct-q4-k-m",
         "name": "Phi-4 Mini Instruct Q4_K_M",
         "display_name": "Phi-4 Mini",
@@ -295,6 +309,8 @@ def backend_for_architecture(architecture: str) -> str:
 def backend_for_model(architecture: str, filename: str) -> str:
     normalized_arch = (architecture or "").strip().lower()
     lowered_name = (filename or "").strip().lower()
+    if normalized_arch == "gguf" and "bonsai" in lowered_name:
+        return "prism-llama"
     if normalized_arch == "gguf" or lowered_name.endswith(".gguf"):
         return "llama-cpp"
     if normalized_arch == "rwkv":
@@ -418,6 +434,8 @@ class ModelManager:
 
     def list_local(self) -> List[Dict[str, Any]]:
         entries: List[Dict[str, Any]] = []
+        if not self.models_dir.exists():
+            return entries
         for path in sorted(self.models_dir.iterdir(), key=lambda item: item.name.lower()):
             if path.name.startswith(".") or path.name == TOKENIZER_FILENAME:
                 continue

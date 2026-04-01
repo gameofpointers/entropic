@@ -446,6 +446,11 @@ function trimApiKey(value: string): string | null {
   return trimmed;
 }
 
+function isGgufBackend(value?: string | null): boolean {
+  const normalized = (value || "").trim().toLowerCase();
+  return normalized === "llama-cpp" || normalized === "prism-llama";
+}
+
 function formatBackend(value?: string | null): string | null {
   const normalized = (value || "").trim().toLowerCase();
   if (!normalized) return null;
@@ -454,6 +459,7 @@ function formatBackend(value?: string | null): string | null {
   if (normalized === "huggingface") return "Hugging Face";
   if (normalized === "albatross") return "Albatross";
   if (normalized === "llama-cpp") return "llama.cpp";
+  if (normalized === "prism-llama") return "Prism llama.cpp";
   return normalized.toUpperCase();
 }
 
@@ -463,7 +469,7 @@ function backendInstallActionLabel(value?: string | null): string {
 }
 
 function backendAutoInstallsOnFirstUse(value?: string | null): boolean {
-  return (value || "").trim().toLowerCase() === "llama-cpp";
+  return isGgufBackend(value);
 }
 
 function backendLoadRequirementLabel(value?: string | null): string | null {
@@ -477,6 +483,16 @@ function backendLoadRequirementLabel(value?: string | null): string | null {
 
 function backendMissingBadgeLabel(value?: string | null): string {
   return backendAutoInstallsOnFirstUse(value) ? "Auto-installs on first use" : "Install backend first";
+}
+
+function pendingDownloadLabel(
+  backend?: string | null,
+  backendReady?: boolean,
+): string {
+  if (!backendReady && backendAutoInstallsOnFirstUse(backend)) {
+    return `Installing ${formatBackend(backend) || "backend"}`;
+  }
+  return "Preparing download";
 }
 
 function formatArchitecture(value?: string | null): string | null {
@@ -508,6 +524,7 @@ function formatProvider(value?: string | null): string | null {
   if (normalized === "deepseek-ai") return "DeepSeek";
   if (normalized === "state-spaces") return "state-spaces";
   if (normalized === "shoumenchougou") return "shoumenchougou";
+  if (normalized === "prism-ml") return "Prism ML";
   return owner;
 }
 
@@ -515,6 +532,7 @@ function catalogFamily(entry: Pick<RnnCatalogEntry, "name" | "display_name" | "a
   const haystack = `${entry.display_name || ""} ${entry.name || ""}`.trim().toLowerCase();
   const architecture = (entry.architecture || "").trim().toLowerCase();
   if (haystack.includes("goose")) return "Goose";
+  if (haystack.includes("bonsai")) return "Bonsai";
   if (haystack.includes("nemotron")) return "Nemotron";
   if (haystack.includes("qwen")) return "Qwen";
   if (haystack.includes("phi")) return "Phi";
@@ -534,6 +552,7 @@ function catalogSeries(entry: Pick<RnnCatalogEntry, "name" | "display_name" | "a
   const architecture = (entry.architecture || "").trim().toLowerCase();
   if (haystack.includes("gooseone")) return "GooseOne";
   if (haystack.includes("goose world")) return "Goose World";
+  if (haystack.includes("bonsai")) return "Bonsai";
   if (haystack.includes("nemotron 3")) return "Nemotron 3";
   if (haystack.includes("qwen3")) return "Qwen3";
   if (haystack.includes("phi-4")) return "Phi-4";
@@ -579,10 +598,10 @@ function resolvedContextWindow(
   const modelContext =
     typeof entry.context === "number" && Number.isFinite(entry.context) && entry.context > 0
       ? entry.context
-      : backend === "llama-cpp"
+      : isGgufBackend(backend)
         ? 32768
         : 8192;
-  if (backend !== "llama-cpp") {
+  if (!isGgufBackend(backend)) {
     return modelContext;
   }
   const configuredContext = runtimeConfig?.llamaCpp?.nCtx;
@@ -609,7 +628,7 @@ function estimateRuntimeFootprintGb(
   const backend = (entry.backend || "").trim().toLowerCase();
   const context = resolvedContextWindow(entry, runtimeConfig);
   const contextMemoryGb = contextOverheadGb(context);
-  if (backend === "llama-cpp") return Number((sizeGb * 1.22 + contextMemoryGb).toFixed(2));
+  if (isGgufBackend(backend)) return Number((sizeGb * 1.22 + contextMemoryGb).toFixed(2));
   if (backend === "albatross") return Number((sizeGb * 1.08 + 0.35).toFixed(2));
   if (backend === "vllm") return Number((sizeGb * 1.55 + 1.75).toFixed(2));
   if (backend === "huggingface") return Number((sizeGb * 1.45 + 1.5).toFixed(2));
@@ -643,7 +662,7 @@ function defaultRecommendationProfile(entry: RnnCatalogEntry): RecommendationPro
   const strengths = [catalogCategory(entry)];
   let caution: string | undefined;
 
-  if (backend === "llama-cpp") {
+  if (isGgufBackend(backend)) {
     toolScore += 1.2;
     speedScore += 0.8;
     lowVramScore += 1.4;
@@ -713,7 +732,9 @@ function hardwareFitForEntry(
       ? hostMemoryTotalBytes / 1024 ** 3
       : null;
   const backend = (entry.backend || "").trim().toLowerCase();
-  const contextLabel = backend === "llama-cpp" ? formatContext(resolvedContextWindow(entry, runtimeConfig)) : null;
+  const contextLabel = isGgufBackend(backend)
+    ? formatContext(resolvedContextWindow(entry, runtimeConfig))
+    : null;
   const gpuHeadroomGb =
     estimatedVramGb !== null && availableVramGb !== null ? availableVramGb - estimatedVramGb : null;
   const hostHeadroomGb =
@@ -746,7 +767,7 @@ function hardwareFitForEntry(
   if (
     availableHostMemoryGb !== null &&
     estimatedHostMemoryGb !== null &&
-    (estimatedHostMemoryGb > availableHostMemoryGb * 0.85 || (hostHeadroomGb !== null && hostHeadroomGb < 1.25))
+    (estimatedHostMemoryGb > availableHostMemoryGb * 0.96 || (hostHeadroomGb !== null && hostHeadroomGb < 0.4))
   ) {
     return {
       label: "Unsafe on this RAM",
@@ -794,6 +815,18 @@ function hardwareFitForEntry(
       return {
         label: "Fits system RAM",
         tone: "good",
+        estimatedVramGb,
+        availableVramGb,
+        estimatedHostMemoryGb,
+        availableHostMemoryGb,
+        loadBlocked: false,
+        loadBlockReason: null,
+      };
+    }
+    if (estimatedHostMemoryGb > availableHostMemoryGb * 0.85 || (hostHeadroomGb ?? Infinity) < 1.25) {
+      return {
+        label: "Tight on system RAM",
+        tone: "warn",
         estimatedVramGb,
         availableVramGb,
         estimatedHostMemoryGb,
@@ -1404,6 +1437,10 @@ export function RnnLocalModelManager({
   const llamaCppInstalled = runtimeStatus?.capabilities?.backendAvailability?.["llama-cpp"] === true;
   const llamaCppStatusKnown =
     runtimeStatus?.capabilities?.backendAvailability?.["llama-cpp"] !== undefined;
+  const prismLlamaInstalled =
+    runtimeStatus?.capabilities?.backendAvailability?.["prism-llama"] === true;
+  const prismLlamaStatusKnown =
+    runtimeStatus?.capabilities?.backendAvailability?.["prism-llama"] !== undefined;
   const albatrossReady =
     runtimeStatus?.capabilities?.backendAvailability?.albatross === true;
   const albatrossStatusKnown =
@@ -1460,7 +1497,9 @@ export function RnnLocalModelManager({
     config.modelName ||
     "";
   const activeMemoryBackendKey =
-    runtimeStatus?.activeBackend || loadedLocalEntry?.backend || loadedCatalogEntry?.backend || null;
+    isGgufBackend(runtimeStatus?.activeBackend || loadedLocalEntry?.backend || loadedCatalogEntry?.backend)
+      ? "llama-cpp"
+      : runtimeStatus?.activeBackend || loadedLocalEntry?.backend || loadedCatalogEntry?.backend || null;
   const persistedVllmConfig = normalizeVllmRuntimeConfig(runtimeStatus?.runtimeConfig?.vllm);
   const vllmConfigDirty =
     JSON.stringify(vllmDraft) !== JSON.stringify(persistedVllmConfig);
@@ -1656,6 +1695,8 @@ export function RnnLocalModelManager({
     const activeDownload =
       snapshot?.downloadState?.catalogId === entry.id ? snapshot.downloadState : null;
     const isDownloading = activeDownload?.status === "downloading";
+    const isPreparingDownload =
+      busyAction?.kind === "download" && busyAction.target === entry.id && !isDownloading;
     const progressSummary = downloadProgressSummary(activeDownload);
     const progressDetail = downloadProgressDetail(activeDownload);
     const fit = hardwareFitForEntry(
@@ -1700,6 +1741,11 @@ export function RnnLocalModelManager({
                 {progressDetail ? (
                   <span className="text-[var(--text-tertiary)]">{progressDetail}</span>
                 ) : null}
+              </span>
+            ) : isPreparingDownload ? (
+              <span className="flex items-center gap-1.5 text-[11px] text-[var(--system-blue)]">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {pendingDownloadLabel(entry.backend, backendReady)}
               </span>
             ) : (
               <button
@@ -1793,6 +1839,11 @@ export function RnnLocalModelManager({
                   style={{ width: downloadProgressBarWidth(activeDownload) }}
                 />
               </div>
+            </div>
+          ) : isPreparingDownload ? (
+            <div className="mt-2 flex items-center gap-2 text-[11px] text-[var(--system-blue)]">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              <span>{pendingDownloadLabel(entry.backend, backendReady)}.</span>
             </div>
           ) : null}
         </div>
@@ -1956,6 +2007,8 @@ export function RnnLocalModelManager({
               const activeDownload =
                 snapshot?.downloadState?.catalogId === item.entry.id ? snapshot.downloadState : null;
               const isDownloading = activeDownload?.status === "downloading";
+              const isPreparingDownload =
+                busyAction?.kind === "download" && busyAction.target === item.entry.id && !isDownloading;
               const progressSummary = downloadProgressSummary(activeDownload);
               const progressDetail = downloadProgressDetail(activeDownload);
               const backendRequirement = backendLoadRequirementLabel(item.entry.backend);
@@ -2045,6 +2098,11 @@ export function RnnLocalModelManager({
                             style={{ width: downloadProgressBarWidth(activeDownload) }}
                           />
                         </div>
+                      </div>
+                    ) : isPreparingDownload ? (
+                      <div className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--system-blue)]">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        {pendingDownloadLabel(item.entry.backend, item.backendReady)}
                       </div>
                     ) : (
                       <button
@@ -2353,6 +2411,34 @@ export function RnnLocalModelManager({
               <Download className="h-3.5 w-3.5" />
             )}
             Install llama.cpp Backend
+          </button>
+        </div>
+      ) : null}
+
+      {prismLlamaStatusKnown && !prismLlamaInstalled ? (
+        <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)]/40 p-3 text-xs text-[var(--text-secondary)]">
+          <div className="font-medium text-[var(--text-primary)]">Prism GGUF Backend</div>
+          <div className="mt-1">
+            Prism-compressed GGUF models like Bonsai need Prism&apos;s llama.cpp server backend. It will auto-install on first use, or you can install it now.
+          </div>
+          <button
+            type="button"
+            onClick={() =>
+              void runAction(
+                { kind: "install-backend", target: "prism-llama" },
+                () => invoke("install_rnn_runtime_backend", { backend: "prism-llama" }),
+                "Installed the Prism llama.cpp backend.",
+              )
+            }
+            disabled={busyAction !== null}
+            className={clsx(buttonClassName, "mt-3")}
+          >
+            {busyAction?.kind === "install-backend" && busyAction.target === "prism-llama" ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Download className="h-3.5 w-3.5" />
+            )}
+            Install Prism llama.cpp Backend
           </button>
         </div>
       ) : null}

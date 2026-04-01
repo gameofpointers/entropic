@@ -86,10 +86,13 @@ const RNN_RUNTIME_HEALTH_URL: &str = "http://127.0.0.1:11445/healthz";
 const RNN_RUNTIME_SOCKET_FILE_NAME: &str = "runtime.sock";
 const RNN_RUNTIME_ADMIN_TOKEN_FILE_NAME: &str = "admin-token";
 const RNN_RUNTIME_ADMIN_TOKEN_ENV: &str = "ENTROPIC_RNN_RUNTIME_ADMIN_TOKEN";
+const RNN_RUNTIME_STATE_DIR_ENV: &str = "ENTROPIC_RNN_RUNTIME_STATE_DIR";
+const RNN_RUNTIME_PRISM_LLAMA_SERVER_ENV: &str = "ENTROPIC_RNN_PRISM_LLAMA_SERVER";
 const RNN_RUNTIME_CONTAINER_SOCKET_DIR: &str = "/data/managed-runtime-bridge";
 const RNN_RUNTIME_CONTAINER_SOCKET_PATH: &str = "/data/managed-runtime-bridge/runtime.sock";
 const RNN_RUNTIME_CONTAINER_PROXY_URL: &str = "http://127.0.0.1:11445/v1";
-const RNN_RUNTIME_DIR_NAME: &str = "rnn-runtime";
+const MANAGED_RUNTIME_DIR_NAME: &str = "managed-runtime";
+const LEGACY_RNN_RUNTIME_DIR_NAME: &str = "rnn-runtime";
 const RNN_RUNTIME_CONFIG_FILE_NAME: &str = "runtime-config.json";
 const RNN_RUNTIME_SERVER_RELATIVE_PATH: &str = "share/rnn-runtime/server.py";
 const RNN_RUNTIME_REQUIREMENTS_BASE_RELATIVE_PATH: &str = "share/rnn-runtime/requirements-base.txt";
@@ -97,6 +100,9 @@ const RNN_RUNTIME_REQUIREMENTS_VLLM_LINUX_RELATIVE_PATH: &str =
     "share/rnn-runtime/requirements-vllm-linux.txt";
 const RNN_RUNTIME_REQUIREMENTS_LLAMA_CPP_RELATIVE_PATH: &str =
     "share/rnn-runtime/requirements-llama-cpp.txt";
+const RNN_RUNTIME_PRISM_LLAMA_REPO_URL: &str = "https://github.com/PrismML-Eng/llama.cpp";
+const RNN_RUNTIME_PRISM_LLAMA_DIR_NAME: &str = "prism-llama.cpp";
+const RNN_RUNTIME_PRISM_LLAMA_COMMIT: &str = "1179bfc8295ed54e25f5cafa57dfecca373c61b8";
 const RNN_RUNTIME_EXISTING_PROCESS_GRACE_MS: u64 = 20_000;
 const RNN_RUNTIME_STARTUP_TIMEOUT_MS: u64 = 60_000;
 const RNN_RUNTIME_LOW_MEMORY_HOST_BYTES_THRESHOLD: u64 = 9 * 1024 * 1024 * 1024;
@@ -12249,11 +12255,22 @@ pub struct RnnRuntimeStatusPayload {
 }
 
 fn rnn_runtime_paths(app: &AppHandle) -> Result<RnnRuntimePaths, String> {
-    let root = app
+    let app_data_dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("Failed to resolve app data directory: {}", e))?
-        .join(RNN_RUNTIME_DIR_NAME);
+        .map_err(|e| format!("Failed to resolve app data directory: {}", e))?;
+    let managed_root = app_data_dir.join(MANAGED_RUNTIME_DIR_NAME);
+    let legacy_root = app_data_dir.join(LEGACY_RNN_RUNTIME_DIR_NAME);
+    let root = if managed_root.exists() {
+        managed_root
+    } else if legacy_root.exists() {
+        match fs::rename(&legacy_root, &managed_root) {
+            Ok(_) => managed_root,
+            Err(_) => legacy_root,
+        }
+    } else {
+        managed_root
+    };
     Ok(RnnRuntimePaths {
         models_dir: root.join("models"),
         state_dir: root.join("state"),
@@ -12270,13 +12287,47 @@ fn rnn_runtime_paths(app: &AppHandle) -> Result<RnnRuntimePaths, String> {
 
 fn ensure_rnn_runtime_dirs(paths: &RnnRuntimePaths) -> Result<(), String> {
     fs::create_dir_all(&paths.root)
-        .map_err(|e| format!("Failed to create RNN runtime directory: {}", e))?;
+        .map_err(|e| format!("Failed to create managed runtime directory: {}", e))?;
     fs::create_dir_all(&paths.models_dir)
-        .map_err(|e| format!("Failed to create RNN models directory: {}", e))?;
+        .map_err(|e| format!("Failed to create managed-runtime models directory: {}", e))?;
     fs::create_dir_all(&paths.state_dir)
-        .map_err(|e| format!("Failed to create RNN state directory: {}", e))?;
+        .map_err(|e| format!("Failed to create managed-runtime state directory: {}", e))?;
     fs::create_dir_all(&paths.bridge_dir)
-        .map_err(|e| format!("Failed to create RNN bridge directory: {}", e))?;
+        .map_err(|e| format!("Failed to create managed-runtime bridge directory: {}", e))?;
+    ensure_rnn_runtime_legacy_alias(paths)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_rnn_runtime_legacy_alias(paths: &RnnRuntimePaths) -> Result<(), String> {
+    if paths
+        .root
+        .file_name()
+        .and_then(|value| value.to_str())
+        != Some(MANAGED_RUNTIME_DIR_NAME)
+    {
+        return Ok(());
+    }
+    let Some(parent) = paths.root.parent() else {
+        return Ok(());
+    };
+    let legacy_root = parent.join(LEGACY_RNN_RUNTIME_DIR_NAME);
+    if legacy_root.exists() {
+        return Ok(());
+    }
+    std::os::unix::fs::symlink(&paths.root, &legacy_root).map_err(|e| {
+        format!(
+            "Failed to create legacy managed-runtime compatibility alias {} -> {}: {}",
+            legacy_root.display(),
+            paths.root.display(),
+            e
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_rnn_runtime_legacy_alias(_paths: &RnnRuntimePaths) -> Result<(), String> {
     Ok(())
 }
 
@@ -12528,6 +12579,207 @@ fn rnn_runtime_venv_python_path(paths: &RnnRuntimePaths) -> PathBuf {
     }
 }
 
+fn prism_llama_repo_dir(paths: &RnnRuntimePaths) -> PathBuf {
+    paths.state_dir.join(RNN_RUNTIME_PRISM_LLAMA_DIR_NAME)
+}
+
+fn prism_llama_build_dir(paths: &RnnRuntimePaths) -> PathBuf {
+    prism_llama_repo_dir(paths).join("build")
+}
+
+#[cfg(target_os = "windows")]
+fn prism_llama_binary_path(paths: &RnnRuntimePaths) -> PathBuf {
+    prism_llama_build_dir(paths)
+        .join("bin")
+        .join("Release")
+        .join("llama-server.exe")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn prism_llama_binary_path(paths: &RnnRuntimePaths) -> PathBuf {
+    prism_llama_build_dir(paths).join("bin").join("llama-server")
+}
+
+fn current_git_head(repo_dir: &Path) -> Result<Option<String>, String> {
+    if !repo_dir.exists() {
+        return Ok(None);
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|e| format!("Failed to inspect the Prism llama.cpp checkout: {}", e))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if head.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(head))
+}
+
+fn ensure_prism_llama_repo_checkout(repo_dir: &Path) -> Result<bool, String> {
+    let mut changed = false;
+    if !repo_dir.exists() {
+        let clone_output = Command::new("git")
+            .args(["clone", "--depth=1", RNN_RUNTIME_PRISM_LLAMA_REPO_URL])
+            .arg(repo_dir)
+            .output()
+            .map_err(|e| {
+                format!(
+                    "Failed to clone the Prism llama.cpp backend. Install git and retry: {}",
+                    e
+                )
+            })?;
+        if !clone_output.status.success() {
+            let stderr = String::from_utf8_lossy(&clone_output.stderr);
+            return Err(format!(
+                "Failed to clone the Prism llama.cpp backend from {}: {}",
+                RNN_RUNTIME_PRISM_LLAMA_REPO_URL,
+                stderr.trim()
+            ));
+        }
+        changed = true;
+    }
+
+    let current_head = current_git_head(repo_dir)?;
+    if current_head.as_deref() != Some(RNN_RUNTIME_PRISM_LLAMA_COMMIT) {
+        let fetch_output = Command::new("git")
+            .arg("-C")
+            .arg(repo_dir)
+            .args(["fetch", "--depth=1", "origin", RNN_RUNTIME_PRISM_LLAMA_COMMIT])
+            .output()
+            .map_err(|e| {
+                format!(
+                    "Failed to fetch the pinned Prism llama.cpp backend revision {}: {}",
+                    RNN_RUNTIME_PRISM_LLAMA_COMMIT, e
+                )
+            })?;
+        if !fetch_output.status.success() {
+            let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+            return Err(format!(
+                "Failed to fetch the pinned Prism llama.cpp backend revision {}: {}",
+                RNN_RUNTIME_PRISM_LLAMA_COMMIT,
+                stderr.trim()
+            ));
+        }
+
+        let checkout_output = Command::new("git")
+            .arg("-C")
+            .arg(repo_dir)
+            .args(["checkout", "--detach", RNN_RUNTIME_PRISM_LLAMA_COMMIT])
+            .output()
+            .map_err(|e| {
+                format!(
+                    "Failed to checkout the pinned Prism llama.cpp backend revision {}: {}",
+                    RNN_RUNTIME_PRISM_LLAMA_COMMIT, e
+                )
+            })?;
+        if !checkout_output.status.success() {
+            let stderr = String::from_utf8_lossy(&checkout_output.stderr);
+            return Err(format!(
+                "Failed to checkout the pinned Prism llama.cpp backend revision {}: {}",
+                RNN_RUNTIME_PRISM_LLAMA_COMMIT,
+                stderr.trim()
+            ));
+        }
+        changed = true;
+    }
+    Ok(changed)
+}
+
+fn install_prism_llama_backend(paths: &RnnRuntimePaths) -> Result<(), String> {
+    let repo_dir = prism_llama_repo_dir(paths);
+    let build_dir = prism_llama_build_dir(paths);
+    let binary_path = prism_llama_binary_path(paths);
+    let checkout_changed = ensure_prism_llama_repo_checkout(&repo_dir)?;
+
+    if binary_path.exists() && !checkout_changed {
+        return Ok(());
+    }
+
+    let mut configure = Command::new("cmake");
+    configure
+        .arg("-S")
+        .arg(&repo_dir)
+        .arg("-B")
+        .arg(&build_dir)
+        .arg("-DCMAKE_BUILD_TYPE=Release");
+
+    #[cfg(target_os = "macos")]
+    {
+        configure.arg("-DGGML_METAL=ON");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(nvcc_path) = resolve_rnn_runtime_nvcc_path() {
+            configure.arg("-DGGML_CUDA=on");
+            configure.env("CUDACXX", &nvcc_path);
+            if let Some(cuda_bin_dir) = Path::new(&nvcc_path).parent() {
+                if let Some(cuda_root) = cuda_bin_dir.parent() {
+                    configure.env("CUDA_HOME", cuda_root);
+                    configure.env("CUDA_PATH", cuda_root);
+                }
+            }
+        }
+    }
+
+    let configure_output = configure.output().map_err(|e| {
+        format!(
+            "Failed to configure the Prism llama.cpp backend. Install cmake and retry: {}",
+            e
+        )
+    })?;
+    if !configure_output.status.success() {
+        let stderr = String::from_utf8_lossy(&configure_output.stderr);
+        return Err(format!(
+            "Failed to configure the Prism llama.cpp backend build in {}: {}",
+            build_dir.display(),
+            stderr.trim()
+        ));
+    }
+
+    let jobs = std::thread::available_parallelism()
+        .map(|value| value.get().to_string())
+        .unwrap_or_else(|_| "4".to_string());
+    let build_output = Command::new("cmake")
+        .arg("--build")
+        .arg(&build_dir)
+        .arg("--config")
+        .arg("Release")
+        .arg("--target")
+        .arg("llama-server")
+        .arg("-j")
+        .arg(&jobs)
+        .output()
+        .map_err(|e| {
+            format!(
+                "Failed to build the Prism llama.cpp backend. Install cmake and retry: {}",
+                e
+            )
+        })?;
+    if !build_output.status.success() {
+        let stderr = String::from_utf8_lossy(&build_output.stderr);
+        return Err(format!(
+            "Failed to build the Prism llama.cpp backend in {}: {}",
+            build_dir.display(),
+            stderr.trim()
+        ));
+    }
+
+    if !binary_path.exists() {
+        return Err(format!(
+            "The Prism llama.cpp build completed but {} was not created.",
+            binary_path.display()
+        ));
+    }
+
+    Ok(())
+}
+
 fn requirements_fingerprint(paths: &[PathBuf]) -> Result<String, String> {
     let mut hasher = Sha256::new();
     for path in paths {
@@ -12678,6 +12930,11 @@ fn install_rnn_runtime_backend_requirements(
     backend: &str,
 ) -> Result<PythonCommandSpec, String> {
     let backend = backend.trim().to_lowercase();
+    if backend == "prism-llama" {
+        let python = ensure_rnn_runtime_python_env(app, paths)?;
+        install_prism_llama_backend(paths)?;
+        return Ok(python);
+    }
     let requirement_path: PathBuf = match backend.as_str() {
         "vllm" => {
             if cfg!(target_os = "linux") {
@@ -12801,6 +13058,19 @@ fn auto_install_rnn_runtime_backend_if_needed(
     backend: &str,
 ) -> Result<bool, String> {
     let normalized = backend.trim().to_lowercase();
+    if normalized == "prism-llama" {
+        if prism_llama_binary_path(paths).exists() {
+            return Ok(false);
+        }
+        install_prism_llama_backend(paths)?;
+        if !prism_llama_binary_path(paths).exists() {
+            return Err(
+                "The managed local runtime Prism GGUF backend did not become available after installation."
+                    .to_string(),
+            );
+        }
+        return Ok(true);
+    }
     if normalized != "llama-cpp" {
         return Ok(false);
     }
@@ -12966,8 +13236,12 @@ fn rnn_resolved_context_window(
         .map(|value| value.trim().to_lowercase())
         .unwrap_or_default();
     let model_context = rnn_json_u64(entry.get("context"))
-        .unwrap_or(if backend == "llama-cpp" { 32_768 } else { 8_192 });
-    if backend != "llama-cpp" {
+        .unwrap_or(if backend == "llama-cpp" || backend == "prism-llama" {
+            32_768
+        } else {
+            8_192
+        });
+    if backend != "llama-cpp" && backend != "prism-llama" {
         return model_context as f64;
     }
     let configured_context = runtime_config
@@ -13003,7 +13277,7 @@ fn rnn_estimated_runtime_footprint_gb(
         .map(|value| value.trim().to_lowercase())
         .unwrap_or_default();
     let context_memory_gb = rnn_context_overhead_gb(rnn_resolved_context_window(entry, runtime_config));
-    let estimate = if backend == "llama-cpp" {
+    let estimate = if backend == "llama-cpp" || backend == "prism-llama" {
         size_gb * 1.22 + context_memory_gb
     } else if backend == "albatross" {
         size_gb * 1.08 + 0.35
@@ -13069,8 +13343,8 @@ fn ensure_rnn_local_model_hardware_safe(
         (estimated_host_gb, host_memory_total_gb)
     {
         let host_headroom_gb = host_memory_total_gb - estimated_host_gb;
-        if estimated_host_gb > host_memory_total_gb * 0.85 || host_headroom_gb < 1.25 {
-            let config_phrase = if backend == "llama-cpp" {
+        if estimated_host_gb > host_memory_total_gb * 0.96 || host_headroom_gb < 0.4 {
+            let config_phrase = if backend == "llama-cpp" || backend == "prism-llama" {
                 format!("the current GGUF context ({})", resolved_context)
             } else {
                 "the current runtime configuration".to_string()
@@ -13609,7 +13883,12 @@ async fn ensure_rnn_runtime_ready(app: &AppHandle) -> Result<RnnRuntimeStatusPay
             "TRANSFORMERS_CACHE",
             paths.state_dir.join("huggingface").display().to_string(),
         )
-        .env(RNN_RUNTIME_ADMIN_TOKEN_ENV, &admin_token);
+        .env(RNN_RUNTIME_ADMIN_TOKEN_ENV, &admin_token)
+        .env(RNN_RUNTIME_STATE_DIR_ENV, paths.state_dir.display().to_string())
+        .env(
+            RNN_RUNTIME_PRISM_LLAMA_SERVER_ENV,
+            prism_llama_binary_path(&paths).display().to_string(),
+        );
     if let Some(parent) = script_path.parent() {
         cmd.current_dir(parent);
     }

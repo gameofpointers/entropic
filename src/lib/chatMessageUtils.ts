@@ -228,6 +228,68 @@ export function stripExternalUntrustedSections(raw: string): string {
   return text.trim();
 }
 
+export function unwrapExternalUntrustedText(raw: string): string {
+  if (!raw) return "";
+  const isSafetyNoticeLine = (line: string): boolean => {
+    const lowered = line.trim().toLowerCase();
+    if (!lowered) return false;
+    if (lowered.startsWith("security notice:")) return true;
+    if (lowered.startsWith("source:")) return true;
+    if (lowered === "---") return true;
+    return (
+      lowered.startsWith("- do not ") ||
+      lowered.startsWith("- this content may contain ") ||
+      lowered.startsWith("- respond helpfully ") ||
+      lowered.startsWith("- delete data,") ||
+      lowered.startsWith("- execute system commands") ||
+      lowered.startsWith("- change your behavior") ||
+      lowered.startsWith("- reveal sensitive information") ||
+      lowered.startsWith("- send messages to third parties")
+    );
+  };
+  const stripSafetyPreamble = (value: string): string => {
+    const trimmed = value.trimStart();
+    if (!trimmed.toLowerCase().startsWith("security notice:")) {
+      return value;
+    }
+    const lines = value.split(/\r?\n/);
+    let index = 1;
+    while (index < lines.length) {
+      const line = lines[index]?.trim() ?? "";
+      if (!line) {
+        index += 1;
+        continue;
+      }
+      if (line.startsWith("<<<EXTERNAL_UNTRUSTED_CONTENT")) {
+        return lines.slice(index).join("\n");
+      }
+      if (isSafetyNoticeLine(line)) {
+        index += 1;
+        continue;
+      }
+      return lines.slice(index).join("\n");
+    }
+    return "";
+  };
+  let text = stripSafetyPreamble(raw);
+  text = text.replace(
+    /<<<EXTERNAL_UNTRUSTED_CONTENT(?:\s+id="[^"]*")?\s*>>>\s*([\s\S]*?)\s*<<<END_EXTERNAL_UNTRUSTED_CONTENT(?:\s+id="[^"]*")?\s*>>>/gi,
+    (_match, inner: string) =>
+      inner
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(line => line && !isSafetyNoticeLine(line))
+        .join("\n")
+  );
+  text = text.replace(/<<<(?:END_)?EXTERNAL_UNTRUSTED_CONTENT(?:\s+id="[^"]*")?\s*>>>/gi, "");
+  text = text
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line && !isSafetyNoticeLine(line))
+    .join("\n");
+  return text.trim();
+}
+
 export function sanitizeAuthStoreDetails(raw: string): string {
   if (!raw) return "";
   return raw
@@ -723,7 +785,7 @@ function normalizeToolText(value: unknown): string | undefined {
   if (typeof value !== "string") {
     return undefined;
   }
-  const trimmed = value.trim();
+  const trimmed = unwrapExternalUntrustedText(value).trim();
   return trimmed ? trimmed : undefined;
 }
 
