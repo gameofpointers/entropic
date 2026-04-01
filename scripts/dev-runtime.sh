@@ -57,6 +57,57 @@ Commands:
 USAGE
 }
 
+resolve_build_profile() {
+  if [ -n "${ENTROPIC_BUILD_PROFILE:-}" ]; then
+    printf '%s\n' "$ENTROPIC_BUILD_PROFILE"
+    return 0
+  fi
+
+  if [ -n "${VITE_ENTROPIC_BUILD_PROFILE:-}" ]; then
+    printf '%s\n' "$VITE_ENTROPIC_BUILD_PROFILE"
+    return 0
+  fi
+
+  local env_file="$PROJECT_ROOT/.env"
+  if [ -f "$env_file" ]; then
+    local configured
+    configured="$(sed -n 's/^VITE_ENTROPIC_BUILD_PROFILE[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1 | tr -d '"' | tr -d "'" | xargs)"
+    if [ -n "$configured" ]; then
+      printf '%s\n' "$configured"
+      return 0
+    fi
+  fi
+
+  printf '%s\n' "local"
+}
+
+resolve_web_base_url() {
+  if [ -n "${ENTROPIC_WEB_BASE_URL:-}" ]; then
+    printf '%s\n' "$ENTROPIC_WEB_BASE_URL"
+    return 0
+  fi
+
+  if [ -n "${VITE_API_URL:-}" ]; then
+    printf '%s\n' "$VITE_API_URL"
+    return 0
+  fi
+
+  local env_file
+  for env_file in "$PROJECT_ROOT/.env.development" "$PROJECT_ROOT/.env"; do
+    if [ ! -f "$env_file" ]; then
+      continue
+    fi
+    local configured
+    configured="$(sed -n 's/^VITE_API_URL[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1 | tr -d '"' | tr -d "'" | xargs)"
+    if [ -n "$configured" ]; then
+      printf '%s\n' "$configured"
+      return 0
+    fi
+  done
+
+  printf '%s\n' "/api"
+}
+
 refresh_binaries() {
   DOCKER_BIN="$(entropic_find_docker_binary "$PROJECT_ROOT" || true)"
   COLIMA_BIN="$(entropic_find_colima_binary "$PROJECT_ROOT" || true)"
@@ -157,11 +208,17 @@ resolve_or_start_docker_host() {
 
 ensure_runtime_images() {
   if ! run_docker image inspect openclaw-runtime:latest >/dev/null 2>&1; then
-    echo "[dev] openclaw-runtime:latest missing in dev daemon. Building..."
-    ENTROPIC_RUNTIME_MODE=dev \
-    ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
-    DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
-      "$PROJECT_ROOT/scripts/build-openclaw-runtime.sh"
+    local runtime_tar="$PROJECT_ROOT/src-tauri/resources/openclaw-runtime.tar.gz"
+    if [ -f "$runtime_tar" ] && [ -s "$runtime_tar" ]; then
+      echo "[dev] openclaw-runtime:latest missing in dev daemon. Loading bundled runtime tar..."
+      run_docker load -i "$runtime_tar"
+    else
+      echo "[dev] openclaw-runtime:latest missing in dev daemon. Building..."
+      ENTROPIC_RUNTIME_MODE=dev \
+      ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
+      DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
+        "$PROJECT_ROOT/scripts/build-openclaw-runtime.sh"
+    fi
   fi
 }
 
@@ -326,7 +383,10 @@ up_stack() {
   start_stack
   ensure_runtime_images
   ensure_runtime_tars
-  local build_profile="${ENTROPIC_BUILD_PROFILE:-local}"
+  local build_profile
+  build_profile="$(resolve_build_profile)"
+  local web_base_url
+  web_base_url="$(resolve_web_base_url)"
 
   for container in entropic-openclaw nova-openclaw; do
     local stopped_ids
@@ -338,19 +398,23 @@ up_stack() {
 
   if vite_dev_server_running; then
     echo "[dev] Reusing existing Vite dev server on http://127.0.0.1:5174"
-    echo "[dev] Launching Rust backend directly (ENTROPIC_BUILD_PROFILE=$build_profile)"
+    echo "[dev] Launching Rust backend directly (ENTROPIC_BUILD_PROFILE=$build_profile, VITE_ENTROPIC_BUILD_PROFILE=$build_profile)"
     (
       cd "$PROJECT_ROOT/src-tauri"
       ENTROPIC_RUNTIME_MODE=dev \
       ENTROPIC_BUILD_PROFILE="$build_profile" \
+      VITE_ENTROPIC_BUILD_PROFILE="$build_profile" \
+      ENTROPIC_WEB_BASE_URL="$web_base_url" \
       ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
       DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
         cargo run --no-default-features --color always --
     )
   else
-    echo "[dev] Launching pnpm tauri:dev (ENTROPIC_BUILD_PROFILE=$build_profile)"
+    echo "[dev] Launching pnpm tauri:dev (ENTROPIC_BUILD_PROFILE=$build_profile, VITE_ENTROPIC_BUILD_PROFILE=$build_profile)"
     ENTROPIC_RUNTIME_MODE=dev \
     ENTROPIC_BUILD_PROFILE="$build_profile" \
+    VITE_ENTROPIC_BUILD_PROFILE="$build_profile" \
+    ENTROPIC_WEB_BASE_URL="$web_base_url" \
     ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
     DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
       pnpm tauri:dev

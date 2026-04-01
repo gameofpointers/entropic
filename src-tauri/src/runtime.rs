@@ -632,6 +632,16 @@ impl Runtime {
                 }
                 None
             }
+            Platform::MacOS if cfg!(debug_assertions) => {
+                if let Ok(system) = which::which("docker") {
+                    return Some(system);
+                }
+                let bundled = self.bundled_docker_path();
+                if bundled.exists() {
+                    return Some(bundled);
+                }
+                None
+            }
             _ => {
                 let bundled = self.bundled_docker_path();
                 if bundled.exists() {

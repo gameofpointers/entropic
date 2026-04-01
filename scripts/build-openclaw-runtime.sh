@@ -203,6 +203,12 @@ rsync -a --delete "$OPENCLAW_SOURCE/dist/" "$STAGING_DIR/dist/"
 # Copy package.json
 rsync -a "$OPENCLAW_SOURCE/package.json" "$STAGING_DIR/package.json"
 
+# Copy the runtime install helpers referenced by the upstream package.json
+# postinstall hook so staged installs can complete successfully.
+mkdir -p "$STAGING_DIR/scripts"
+rsync -a "$OPENCLAW_SOURCE/scripts/postinstall-bundled-plugins.mjs" "$STAGING_DIR/scripts/postinstall-bundled-plugins.mjs"
+rsync -a "$OPENCLAW_SOURCE/scripts/npm-runner.mjs" "$STAGING_DIR/scripts/npm-runner.mjs"
+
 # Build a compatibility dependency list from all upstream extension manifests.
 # OpenClaw's compiled root dist can statically import channel SDKs even when we
 # choose not to bundle those extensions into Nova's runtime image, so the image

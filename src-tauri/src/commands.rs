@@ -1476,8 +1476,72 @@ fn windows_managed_wsl_host_ip() -> Option<String> {
         .map(|ip| ip.to_string())
 }
 
+fn parse_colima_host_gateway_ip(networks_config: &Path) -> Option<String> {
+    let content = fs::read_to_string(networks_config).ok()?;
+    content
+        .lines()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            trimmed
+                .strip_prefix("gateway:")
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .and_then(|value| value.parse::<std::net::Ipv4Addr>().ok())
+                .map(|ip| ip.to_string())
+        })
+}
+
+fn colima_host_gateway_ip() -> Option<String> {
+    let mut candidates = vec![entropic_colima_home_path()];
+    if let Some(home) = dirs::home_dir() {
+        for candidate in [
+            home.join(".entropic").join("colima-dev"),
+            home.join(".entropic").join("colima"),
+            home.join(".nova").join("colima-dev"),
+            home.join(".nova").join("colima"),
+        ] {
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+    }
+
+    candidates.into_iter().find_map(|home| {
+        parse_colima_host_gateway_ip(&home.join("_lima").join("_config").join("networks.yaml"))
+    })
+}
+
+fn docker_network_gateway_ip(network_name: &str) -> Option<String> {
+    let output = docker_command()
+        .args([
+            "network",
+            "inspect",
+            network_name,
+            "--format",
+            "{{range .IPAM.Config}}{{if .Gateway}}{{.Gateway}}{{end}}{{end}}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let gateway = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if gateway.is_empty() {
+        None
+    } else {
+        Some(gateway)
+    }
+}
+
 fn docker_host_alias_arg() -> String {
     if let Some(ip) = windows_managed_wsl_host_ip() {
+        return format!("host.docker.internal:{}", ip);
+    }
+    if let Some(ip) = colima_host_gateway_ip() {
+        return format!("host.docker.internal:{}", ip);
+    }
+    if let Some(ip) = docker_network_gateway_ip(OPENCLAW_NETWORK) {
         return format!("host.docker.internal:{}", ip);
     }
     "host.docker.internal:host-gateway".to_string()
@@ -1657,6 +1721,18 @@ fn resolve_host_proxy_base(proxy_base: &str) -> Result<String, String> {
 fn find_docker_binary() -> String {
     // 1. macOS bundled docker candidates (release + dev)
     if matches!(Platform::detect(), Platform::MacOS) {
+        if cfg!(debug_assertions) {
+            for candidate in &[
+                "/usr/local/bin/docker",
+                "/opt/homebrew/bin/docker",
+                "/usr/bin/docker",
+            ] {
+                if std::path::Path::new(candidate).exists() && docker_binary_usable(candidate) {
+                    return candidate.to_string();
+                }
+            }
+        }
+
         if let Ok(exe) = std::env::current_exe() {
             if let Some(exe_dir) = exe.parent() {
                 let bundled_release = exe_dir.parent().map(|c| {
@@ -8392,11 +8468,24 @@ Use it for durable decisions, preferences, and facts that should persist across 
                         "name": model_name,
                         "input": ["text"],
                         "reasoning": show_reasoning,
-                        "contextWindow": context_window,
+                        "contextWindow": advertised_local_model_context_window(context_window),
                         "maxTokens": 8192,
                         "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
                     }]
                 }),
+            );
+        }
+
+        if let Some(web_base_url) = &web_base_url {
+            set_openclaw_config_value(
+                &mut cfg,
+                &["tools", "web", "search", "provider"],
+                serde_json::json!("perplexity"),
+            );
+            set_openclaw_config_value(
+                &mut cfg,
+                &["tools", "web", "search", "perplexity", "baseUrl"],
+                serde_json::json!(resolve_container_openai_base(web_base_url)),
             );
         }
     }
@@ -11166,9 +11255,9 @@ async fn start_gateway_inner(
             (Some(current), Some(latest)) => current == latest,
             _ => true,
         };
-        let expected_local_context_window = local_model_context_window
-            .map(advertised_local_model_context_window)
-            .map(|value| value.to_string());
+        let expected_local_context_window = expected_local_model_config.as_ref().map(|config| {
+            configured_local_model_context_window(config, local_model_context_window).to_string()
+        });
         let local_config_matches = if let Some(expected_local_model_config) =
             &expected_local_model_config
         {
@@ -11337,7 +11426,10 @@ async fn start_gateway_inner(
     let mut web_base_url = None;
     if let Ok(base) = std::env::var("ENTROPIC_WEB_BASE_URL") {
         if !base.trim().is_empty() {
-            web_base_url = Some(base);
+            let resolved = resolve_container_proxy_base(&base).map_err(|err| {
+                format!("Invalid ENTROPIC_WEB_BASE_URL for local web tools: {}", err)
+            })?;
+            web_base_url = Some(resolved);
         }
     }
     if let Some(base) = web_base_url.as_deref() {
@@ -11366,10 +11458,9 @@ async fn start_gateway_inner(
         local_model_name_str = local_model_config.model_name.clone();
         local_service_type_str = local_model_config.service_type_name().to_string();
         local_api_mode_str = local_model_config.api_mode_name().to_string();
-        local_context_window_str = advertised_local_model_context_window(
-            local_model_context_window.unwrap_or(LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK),
-        )
-        .to_string();
+        local_context_window_str =
+            configured_local_model_context_window(local_model_config, local_model_context_window)
+                .to_string();
         env_entries.push(("ENTROPIC_LOCAL_MODEL_BASE_URL", &local_base_url_docker));
         env_entries.push(("ENTROPIC_LOCAL_MODEL_API_KEY", &local_api_key));
         env_entries.push(("ENTROPIC_LOCAL_MODEL_NAME", &local_model_name_str));
@@ -12057,7 +12148,7 @@ pub fn update_gateway_model(app: AppHandle, model: String) -> Result<(), String>
                         "name": model_name,
                         "input": ["text"],
                         "reasoning": show_reasoning,
-                        "contextWindow": context_window,
+                        "contextWindow": advertised_local_model_context_window(context_window),
                         "maxTokens": 8192,
                         "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
                     }]
@@ -14349,14 +14440,23 @@ fn normalize_local_model_api_mode(
     }
 }
 
-// External local providers still default to a 16k effective context window,
-// while the managed runtime can use model-specific contexts from its catalog.
+// External local providers still default to a generous context window, while the
+// managed runtime can use model-specific contexts from its catalog. Ollama is
+// intentionally capped lower because some models become unstable on Metal when
+// Nova/OpenClaw pushes them to their advertised maximum context.
 const LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK: usize = 16384;
+const OLLAMA_LOCAL_MODEL_CONTEXT_WINDOW_CAP: usize = 4096;
+const OLLAMA_LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK: usize = 4096;
 const EXTERNAL_LOCAL_MODEL_CONTEXT_WINDOW_CAP: usize = 16384;
+const EXTERNAL_LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK: usize = 8192;
 const OPENCLAW_LOCAL_MODEL_CONTEXT_WINDOW_MIN: usize = 16000;
 
 fn normalize_local_model_context_window(value: usize) -> usize {
     value.max(1)
+}
+
+fn cap_ollama_local_model_context_window(value: usize) -> usize {
+    normalize_local_model_context_window(value).min(OLLAMA_LOCAL_MODEL_CONTEXT_WINDOW_CAP)
 }
 
 fn cap_external_local_model_context_window(value: usize) -> usize {
@@ -14372,8 +14472,29 @@ fn local_model_context_window_from_container_env() -> usize {
         .as_deref()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
-        .map(advertised_local_model_context_window)
-        .unwrap_or_else(|| advertised_local_model_context_window(LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK))
+        .map(normalize_local_model_context_window)
+        .unwrap_or(EXTERNAL_LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK)
+}
+
+fn configured_local_model_context_window(
+    local_model_config: &LocalModelRuntimeConfig,
+    resolved_context_window: Option<usize>,
+) -> usize {
+    if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+        return advertised_local_model_context_window(
+            resolved_context_window.unwrap_or(LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK),
+        );
+    }
+
+    if local_model_config.service_type == LocalModelServiceType::Ollama {
+        return cap_ollama_local_model_context_window(
+            resolved_context_window.unwrap_or(OLLAMA_LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK),
+        );
+    }
+
+    cap_external_local_model_context_window(
+        resolved_context_window.unwrap_or(EXTERNAL_LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK),
+    )
 }
 
 fn local_model_prefers_light_defaults(
@@ -14557,7 +14678,9 @@ async fn resolve_local_model_context_window(
         )
         .await
         {
-            Ok(Some(context_window)) => return context_window,
+            Ok(Some(context_window)) => {
+                return cap_ollama_local_model_context_window(context_window);
+            }
             Ok(None) => {}
             Err(err) => {
                 println!(
@@ -14582,7 +14705,13 @@ async fn resolve_local_model_context_window(
             return context_window;
         }
     }
-    LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK
+    if local_model_config.service_type == LocalModelServiceType::RnnLocal {
+        LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK
+    } else if local_model_config.service_type == LocalModelServiceType::Ollama {
+        OLLAMA_LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK
+    } else {
+        EXTERNAL_LOCAL_MODEL_CONTEXT_WINDOW_FALLBACK
+    }
 }
 
 fn build_openai_models_url(base_url: &str) -> String {

@@ -436,6 +436,10 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
         LOCAL_MODEL_ID="${ENTROPIC_LOCAL_MODEL_NAME%%:*}"
         LOCAL_MODEL_ID_ESC="$(json_escape "${LOCAL_MODEL_ID}")"
         LOCAL_CONTEXT_WINDOW="${ENTROPIC_LOCAL_MODEL_CONTEXT_WINDOW:-16384}"
+        ADVERTISED_LOCAL_CONTEXT_WINDOW="$LOCAL_CONTEXT_WINDOW"
+        if [ "$ADVERTISED_LOCAL_CONTEXT_WINDOW" -lt 16000 ]; then
+            ADVERTISED_LOCAL_CONTEXT_WINDOW=16000
+        fi
         LOCAL_SERVICE_TYPE="${ENTROPIC_LOCAL_MODEL_SERVICE_TYPE:-openai-compatible}"
         # Use 'openrouter' as the provider name — OpenClaw only recognizes built-in providers.
         # This is safe because local model mode and proxy mode are mutually exclusive in the if/elif chain.
@@ -446,7 +450,7 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
         \"baseUrl\": \"${LOCAL_BASE_URL_ESC}\",
         \"api\": \"openai-completions\",
         \"models\": [
-          { \"id\": \"${LOCAL_MODEL_ID_ESC}\", \"name\": \"${LOCAL_MODEL_ID_ESC}\", \"input\": [\"text\"], \"reasoning\": false, \"contextWindow\": ${LOCAL_CONTEXT_WINDOW}, \"maxTokens\": 4096, \"cost\": { \"input\": 0, \"output\": 0, \"cacheRead\": 0, \"cacheWrite\": 0 } }
+          { \"id\": \"${LOCAL_MODEL_ID_ESC}\", \"name\": \"${LOCAL_MODEL_ID_ESC}\", \"input\": [\"text\"], \"reasoning\": false, \"contextWindow\": ${ADVERTISED_LOCAL_CONTEXT_WINDOW}, \"maxTokens\": 4096, \"cost\": { \"input\": 0, \"output\": 0, \"cacheRead\": 0, \"cacheWrite\": 0 } }
         ]
       }"
         if [ "$LOCAL_SERVICE_TYPE" = "rnn-local" ]; then
@@ -456,7 +460,7 @@ if [ -n "${OPENCLAW_MODEL:-}" ]; then
         \"api\": \"openai-completions\",
         \"apiKey\": \"local-placeholder\",
         \"models\": [
-          { \"id\": \"${LOCAL_MODEL_ID_ESC}\", \"name\": \"${LOCAL_MODEL_ID_ESC}\", \"input\": [\"text\"], \"reasoning\": false, \"contextWindow\": ${LOCAL_CONTEXT_WINDOW}, \"maxTokens\": 8192, \"cost\": { \"input\": 0, \"output\": 0, \"cacheRead\": 0, \"cacheWrite\": 0 } }
+          { \"id\": \"${LOCAL_MODEL_ID_ESC}\", \"name\": \"${LOCAL_MODEL_ID_ESC}\", \"input\": [\"text\"], \"reasoning\": false, \"contextWindow\": ${ADVERTISED_LOCAL_CONTEXT_WINDOW}, \"maxTokens\": 8192, \"cost\": { \"input\": 0, \"output\": 0, \"cacheRead\": 0, \"cacheWrite\": 0 } }
         ]
       }"
         fi
