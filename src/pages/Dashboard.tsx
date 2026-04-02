@@ -2650,33 +2650,14 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
     }
   }
 
-  // Handle model change - restart gateway with new model
+  // Handle model change - Nova keeps this as a client-side default for future turns.
   function handleModelChange(newModel: string) {
-    // Local model — always restart gateway
-    if (isLocalModelId(newModel)) {
-      executeModelChange(newModel);
-      return;
-    }
-    // In local-keys mode, warn if switching providers (container restart interrupts running tasks)
-    if (useLocalKeys && gatewayRunning) {
-      const oldProvider = selectedModel.split("/")[0];
-      const newProvider = newModel.split("/")[0];
-      if (oldProvider !== newProvider) {
-        setProviderSwitchConfirm({ oldProvider, newProvider, newModel });
-        return;
-      }
-    }
     executeModelChange(newModel);
   }
 
-  // Handle confirmed provider switch (called from confirmation modal)
+  // Persist the preferred chat model without mutating the running gateway.
   async function executeModelChange(newModel: string) {
-    const previousModel = selectedModel;
-    const oldProvider = previousModel.split("/")[0];
-    const newProvider = newModel.split("/")[0];
-    const expectsRestart = useLocalKeys && oldProvider !== newProvider;
     const sanitized = sanitizeLocalModelId(newModel);
-    const isLocalModel = isLocalModelId(sanitized);
 
     setProviderSwitchConfirm(null);
     setSelectedModel(sanitized);
@@ -2686,67 +2667,6 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
       await updateDesktopSettings({ selectedModel: sanitized });
     } catch (error) {
       console.error("[Entropic] Failed to save model preference:", error);
-    }
-
-    if (!gatewayRunning) return;
-
-    if (isLocalModel) {
-      console.log("[Entropic] Switching to local model, restarting gateway:", sanitized);
-      setShowGatewayStartup(true);
-      setGatewayLifecycleMode("restarting");
-      setGatewayStartupStage("launch");
-      markGatewayStarting("local");
-      setIsTogglingGateway(true);
-      try {
-        await invoke("restart_gateway", { model: sanitized });
-        setGatewayStartupStage("health");
-        await new Promise((r) => setTimeout(r, 2000));
-        await checkGateway();
-      } catch (error) {
-        console.error("[Entropic] Failed to restart gateway with local model:", error);
-        resetGatewayAfterFailedStart();
-        setGatewayLifecycleMode("idle");
-      } finally {
-        setIsTogglingGateway(false);
-        setShowGatewayStartup(false);
-      }
-      return;
-    }
-
-    setIsTogglingGateway(true);
-    if (expectsRestart) {
-      setShowGatewayStartup(true);
-      setGatewayLifecycleMode("restarting");
-      setGatewayStartupStage("launch");
-      markGatewayStarting("local");
-    }
-    try {
-      const result = await invoke<GatewayMutationResult>("apply_gateway_mutation", {
-        request: {
-          model: sanitized,
-        },
-      });
-
-      setGatewayLifecycleMode(lifecycleModeFromPlan(result.plan));
-      if (result.plan === "container_restart" || result.plan === "container_recreate") {
-        setGatewayStartupStage("health");
-      }
-
-      if (result.wsReconnectExpected) {
-        await new Promise((r) =>
-          setTimeout(r, result.plan === "config_reload" ? 1200 : 2000),
-        );
-        await checkGateway();
-      }
-    } catch (error) {
-      console.error("[Entropic] Failed to apply model change:", error);
-      resetGatewayAfterFailedStart();
-      setGatewayLifecycleMode("idle");
-    } finally {
-      setIsTogglingGateway(false);
-      if (expectsRestart) {
-        setShowGatewayStartup(false);
-      }
     }
   }
 

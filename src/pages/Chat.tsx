@@ -1591,6 +1591,36 @@ function normalizeModelId(
   return `openrouter/${id}`;
 }
 
+function splitGatewayModelRef(
+  modelRef: string | null | undefined,
+): { provider: string; model: string } | null {
+  if (!modelRef) return null;
+  const slashIndex = modelRef.indexOf("/");
+  if (slashIndex <= 0 || slashIndex === modelRef.length - 1) {
+    return null;
+  }
+  return {
+    provider: modelRef.slice(0, slashIndex),
+    model: modelRef.slice(slashIndex + 1),
+  };
+}
+
+function formatRunSelectionLabel(selection?: ChatEvent["selection"]): string | null {
+  if (!selection) return null;
+  const provider = selection.activeProvider || selection.provider;
+  const model = selection.activeModel || selection.model;
+  if (!provider || !model) return null;
+  return `${provider}/${model}`;
+}
+
+function formatRunSelectionHint(selection?: ChatEvent["selection"]): string | null {
+  if (!selection) return null;
+  if (selection.pin) return "Pinned";
+  if (selection.source === "transient") return "This run";
+  if (selection.source === "session") return "Session default";
+  return null;
+}
+
 function getRoutingDecision(messageContent: string) {
   const length = messageContent.length;
   const lineCount = messageContent.split("\n").length;
@@ -1814,7 +1844,6 @@ export function Chat({
     toolUsageLogged?: boolean;
   }>>({});
   const sessionModelRef = useRef<Record<string, string | null>>({});
-  const runRevertModelRef = useRef<Record<string, string | null>>({});
   const [channelConfig, setChannelConfig] = useState<{
     telegramEnabled: boolean;
     telegramConnected: boolean;
@@ -2935,7 +2964,6 @@ export function Chat({
     assistantTraceByRunIdRef.current = {};
     runTimingsRef.current = {};
     sessionModelRef.current = {};
-    runRevertModelRef.current = {};
     lastEventByRunIdRef.current = {};
     gatewaySessionKeysRef.current = new Set();
     visibleMessagesSessionRef.current = null;
@@ -4106,6 +4134,7 @@ export function Chat({
                 toolName: normalized.toolName ?? nextMessages[existingIdx].toolName,
                 assistantPayload: normalized.assistantPayload ?? nextMessages[existingIdx].assistantPayload,
                 sentAt: nextMessages[existingIdx].sentAt ?? normalized.sentAt ?? Date.now(),
+                runSelection: nextMessages[existingIdx].runSelection,
               };
             } else {
               nextMessages = [
@@ -4118,6 +4147,7 @@ export function Chat({
                 toolName: normalized.toolName,
                 assistantPayload: normalized.assistantPayload,
                 sentAt: normalized.sentAt ?? Date.now(),
+                runSelection: undefined,
               },
               ];
             }
@@ -4334,6 +4364,7 @@ export function Chat({
               }),
               usage: nextUsage ?? nextMessages[existingIdx].usage,
               sentAt: nextMessages[existingIdx].sentAt ?? normalized?.sentAt ?? Date.now(),
+              runSelection: event.selection ?? nextMessages[existingIdx].runSelection,
             };
           } else {
             nextMessages = [
@@ -4355,6 +4386,7 @@ export function Chat({
               }),
               usage: nextUsage,
               sentAt: normalized?.sentAt ?? Date.now(),
+              runSelection: event.selection,
             },
             ];
           }
@@ -4458,17 +4490,6 @@ export function Chat({
           appendOptimizationTracePreview(optimizationTraceId, "trace assistantPreview", text);
           completeRunOptimizationTrace(eventRunId, "completed");
         }
-        const revertModel = runRevertModelRef.current[eventRunId];
-        if (revertModel && currentSessionRef.current && clientRef.current) {
-          clientRef.current
-            .patchSession(currentSessionRef.current, { model: revertModel })
-            .then(() => {
-              sessionModelRef.current[currentSessionRef.current!] = revertModel;
-              addDiag(`routing revert model=${revertModel}`);
-            })
-            .catch((err) => addDiag(`routing revert failed: ${String(err)}`));
-        }
-        delete runRevertModelRef.current[eventRunId];
         delete runSessionKeyRef.current[eventRunId];
 
         // Clear streaming persist timer — final persist below supersedes it
@@ -5080,19 +5101,14 @@ export function Chat({
       : null;
     const targetModel = routingEnabled ? chosenModel ?? defaultModel : defaultModel;
 
-    if (targetModel && sessionKey && clientRef.current) {
+    if (targetModel && sessionKey) {
       const lastModel = sessionModelRef.current[sessionKey];
       if (lastModel !== targetModel) {
         sessionModelRef.current[sessionKey] = targetModel;
-        try {
-          await clientRef.current.patchSession(sessionKey, { model: targetModel });
-          if (routingEnabled && chosenModel) {
-            addDiag(`routing model=${targetModel} reason=${decision.reason}`);
-          } else {
-            addDiag(`session model=${targetModel}`);
-          }
-        } catch (err: unknown) {
-          addDiag(`session model patch failed: ${String(err)}`);
+        if (routingEnabled && chosenModel) {
+          addDiag(`send model=${targetModel} reason=${decision.reason}`);
+        } else {
+          addDiag(`send model=${targetModel}`);
         }
       }
     }
@@ -5103,6 +5119,7 @@ export function Chat({
       fastModel,
       reasoningModel,
       targetModel,
+      targetModelRef: splitGatewayModelRef(targetModel),
       decision,
     };
   }
@@ -5164,6 +5181,7 @@ export function Chat({
       chosenModel,
       fastModel,
       reasoningModel,
+      targetModelRef,
     } = await prepareSessionModelForSend(entry.sessionKey, entry.routingContent);
     maybeSyncIntegrationsBeforeSend();
 
@@ -5201,7 +5219,11 @@ export function Chat({
       entry.outboundMessageContent,
       entry.attachments,
       entry.idempotencyKey,
-      { reasoning: reasoningRequestMode },
+      {
+        reasoning: reasoningRequestMode,
+        provider: targetModelRef?.provider,
+        model: targetModelRef?.model,
+      },
     );
     if (!runId) {
       if (optimizationTraceId) {
@@ -5229,9 +5251,6 @@ export function Chat({
       appendOptimizationTraceLine(optimizationTraceId, "trace send ok");
     }
     setThinkingStatus(null);
-    if (routingEnabled && chosenModel && fastModel && reasoningModel && chosenModel !== fastModel) {
-      runRevertModelRef.current[runId] = fastModel;
-    }
     const capturedRunId = runId;
     setTimeout(() => {
       if (!lastEventByRunIdRef.current[capturedRunId]) {
@@ -7488,6 +7507,8 @@ export function Chat({
     const copyLabel = copiedMessageId === msg.id ? "Copied" : "Copy";
     const copyIcon = copiedMessageId === msg.id ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />;
     const assistantTokensPerSecond = msg.role === "assistant" ? resolveAssistantTokensPerSecond(msg) : null;
+    const runSelectionLabel = msg.role === "assistant" ? formatRunSelectionLabel(msg.runSelection) : null;
+    const runSelectionHint = msg.role === "assistant" ? formatRunSelectionHint(msg.runSelection) : null;
     if (msg.role === "user" && !bodyContent) {
       return null;
     }
@@ -7500,6 +7521,16 @@ export function Chat({
                 {renderAssistantContent(msg)}
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-3 px-1 text-[11px] text-[var(--text-tertiary)]">
+                {runSelectionLabel ? (
+                  <span
+                    className="inline-flex items-center gap-1 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-card)] px-2 py-0.5 text-[10px] font-medium text-[var(--text-secondary)]"
+                    title={runSelectionHint ? `${runSelectionLabel} · ${runSelectionHint}` : runSelectionLabel}
+                  >
+                    <Bot className="h-3 w-3" />
+                    <span>{runSelectionLabel}</span>
+                    {runSelectionHint ? <span className="text-[var(--text-tertiary)]">{runSelectionHint}</span> : null}
+                  </span>
+                ) : null}
                 {assistantTokensPerSecond ? <span className="font-medium text-[var(--text-secondary)]">{assistantTokensPerSecond}</span> : null}
                 {messageTime ? <span>{messageTime}</span> : null}
                 {canCopy ? (

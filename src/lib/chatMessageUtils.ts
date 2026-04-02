@@ -3,7 +3,7 @@
  * Extracted from Chat.tsx to reduce file size and improve testability.
  */
 
-import type { GatewayMessage } from "./gateway";
+import type { ChatEvent, GatewayMessage } from "./gateway";
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -78,6 +78,7 @@ export type Message = {
   toolCalls?: MessageToolCall[];
   parts?: AssistantMessagePart[];
   usage?: MessageUsage;
+  runSelection?: ChatEvent["selection"];
 };
 
 export type ChatSession = {

@@ -8444,9 +8444,10 @@ Use it for durable decisions, preferences, and facts that should persist across 
             };
             set_openclaw_config_value(
                 &mut cfg,
-                &["tools", "web", "search", "perplexity", "baseUrl"],
+                &["plugins", "entries", "perplexity", "config", "webSearch", "baseUrl"],
                 serde_json::json!(web_search_base_url),
             );
+            remove_openclaw_config_value(&mut cfg, &["tools", "web", "search", "perplexity"]);
         }
     } else {
         clear_local_model_provider_configs(&mut cfg);
@@ -8485,9 +8486,10 @@ Use it for durable decisions, preferences, and facts that should persist across 
             );
             set_openclaw_config_value(
                 &mut cfg,
-                &["tools", "web", "search", "perplexity", "baseUrl"],
+                &["plugins", "entries", "perplexity", "config", "webSearch", "baseUrl"],
                 serde_json::json!(resolve_container_openai_base(web_base_url)),
             );
+            remove_openclaw_config_value(&mut cfg, &["tools", "web", "search", "perplexity"]);
         }
     }
 
@@ -9577,11 +9579,11 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
     let paths: &[&[&str]] = &[
         &["agents", "defaults"],
         &["tools", "fs"],
-        &["tools", "web", "search", "perplexity"],
         &["gateway", "controlUi"],
         &["gateway", "reload"],
         &["plugins", "slots"],
         &["plugins", "load", "paths"],
+        &["plugins", "entries", "perplexity", "config", "webSearch"],
         &["plugins", "entries", "memory-lancedb"],
         &["plugins", "entries", "telegram"],
         &["channels", "telegram", "groups", "*"],
@@ -9607,6 +9609,11 @@ fn normalize_openclaw_config(cfg: &mut serde_json::Value) {
         &["tools", "fs", "workspaceOnly"],
         serde_json::json!(true),
     );
+
+    // OpenClaw no longer accepts provider-specific search config nested under
+    // tools.web.search.<provider>. Keep provider selection there, but move
+    // provider settings into plugins.entries.<plugin>.config.webSearch.
+    remove_openclaw_config_value(cfg, &["tools", "web", "search", "perplexity"]);
 
     // Docker bridge requests can present a non-loopback source IP.
     // Allow token-authenticated Control UI access in local desktop mode.

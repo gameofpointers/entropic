@@ -176,6 +176,16 @@ export type ChatEvent = {
   errorMessage?: string;
   usage?: unknown;
   stopReason?: string;
+  selection?: {
+    provider?: string;
+    model?: string;
+    sessionDefaultProvider?: string;
+    sessionDefaultModel?: string;
+    activeProvider?: string;
+    activeModel?: string;
+    source?: "default" | "session" | "transient" | string;
+    pin?: boolean;
+  };
 };
 
 export type GatewayContentBlock = {
@@ -687,6 +697,9 @@ export class GatewayClient {
     idempotencyKey?: string,
     options?: {
       reasoning?: "on" | "off" | "stream";
+      provider?: string;
+      model?: string;
+      pinModel?: boolean;
     },
   ): Promise<string> {
     const idempotency = idempotencyKey || crypto.randomUUID();
@@ -699,6 +712,15 @@ export class GatewayClient {
     };
     if (!this.legacyReasoningUnsupported && requestedReasoning) {
       params.reasoning = requestedReasoning;
+    }
+    if (options?.provider) {
+      params.provider = options.provider;
+    }
+    if (options?.model) {
+      params.model = options.model;
+    }
+    if (options?.pinModel) {
+      params.pinModel = true;
     }
 
     try {
