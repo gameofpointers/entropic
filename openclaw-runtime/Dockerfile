@@ -94,7 +94,7 @@ RUN corepack enable && \
 # upstream extension manifests so /app/dist stays resolvable without modifying
 # upstream OpenClaw itself.
 RUN set -eu; \
-    STORE_DIR="$(sed -n 's/^storeDir: //p' /app/node_modules/.modules.yaml | head -1)"; \
+    STORE_DIR="$(node -e "const fs=require('fs'); const text=fs.readFileSync('/app/node_modules/.modules.yaml','utf8'); let store=''; try { const parsed=JSON.parse(text); store=typeof parsed.storeDir==='string' ? parsed.storeDir : ''; } catch { const match=text.match(/^storeDir:\\s*(.+)$/m); store=match ? match[1].trim() : ''; } if (store) process.stdout.write(store);")"; \
     if [ -z "$STORE_DIR" ]; then \
       echo "Could not determine pnpm storeDir from /app/node_modules/.modules.yaml" >&2; \
       exit 1; \

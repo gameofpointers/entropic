@@ -78,6 +78,7 @@ const DEFAULT_LOCAL_ANTHROPIC_GATEWAY_MODEL: &str = "anthropic/claude-opus-4-6:t
 const DEFAULT_LOCAL_OPENAI_GATEWAY_MODEL: &str = "openai-codex/gpt-5.3-codex";
 const DEFAULT_LOCAL_GOOGLE_GATEWAY_MODEL: &str = "google/gemini-2.5-pro";
 const RNN_RUNTIME_BIND_HOST: &str = "127.0.0.1";
+const OLLAMA_LOOPBACK_BRIDGE_BASE_URL: &str = "http://host.docker.internal:11534";
 
 const RNN_RUNTIME_PORT: u16 = 11445;
 const RNN_RUNTIME_BASE_URL: &str = "http://127.0.0.1:11445/v1";
@@ -14879,6 +14880,17 @@ fn rewrite_localhost_for_docker(url: &str) -> String {
         return url.to_string();
     };
     if local_model_endpoint_is_loopback_host(&parsed) {
+        if infer_local_model_service_type(url) == LocalModelServiceType::Ollama {
+            let bridge_base = std::env::var("ENTROPIC_OLLAMA_BRIDGE_BASE_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| OLLAMA_LOOPBACK_BRIDGE_BASE_URL.to_string());
+            if let Ok(mut bridge_url) = Url::parse(bridge_base.trim()) {
+                bridge_url.set_path(parsed.path());
+                bridge_url.set_query(parsed.query());
+                return bridge_url.to_string();
+            }
+        }
         let _ = parsed.set_host(Some("host.docker.internal"));
         return parsed.to_string();
     }

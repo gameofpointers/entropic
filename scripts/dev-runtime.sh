@@ -18,6 +18,10 @@ export ENTROPIC_COLIMA_HOME="${ENTROPIC_COLIMA_HOME:-$(entropic_default_colima_h
 ACTIVE_DOCKER_HOST=""
 DOCKER_BIN=""
 COLIMA_BIN=""
+OLLAMA_BRIDGE_PORT="${ENTROPIC_OLLAMA_BRIDGE_PORT:-11534}"
+OLLAMA_BRIDGE_PID_FILE="$PROJECT_ROOT/.build/ollama-loopback-bridge.pid"
+OLLAMA_BRIDGE_LOG_FILE="$PROJECT_ROOT/.build/ollama-loopback-bridge.log"
+OLLAMA_BRIDGE_SCRIPT="$PROJECT_ROOT/scripts/loopback_tcp_proxy.py"
 
 usage() {
   if entropic_linux_uses_native_docker; then
@@ -145,6 +149,85 @@ run_docker() {
   else
     "$DOCKER_BIN" "$@"
   fi
+}
+
+ollama_api_running() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS "http://127.0.0.1:11434/api/tags" >/dev/null 2>&1
+    return $?
+  fi
+  return 1
+}
+
+ollama_bridge_running() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS "http://127.0.0.1:${OLLAMA_BRIDGE_PORT}/api/tags" >/dev/null 2>&1
+    return $?
+  fi
+  return 1
+}
+
+stop_ollama_bridge() {
+  if [ -f "$OLLAMA_BRIDGE_PID_FILE" ]; then
+    local pid
+    pid="$(cat "$OLLAMA_BRIDGE_PID_FILE" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+      kill "$pid" >/dev/null 2>&1 || true
+    fi
+    rm -f "$OLLAMA_BRIDGE_PID_FILE"
+  fi
+}
+
+ensure_ollama_bridge() {
+  if ! ollama_api_running; then
+    return 0
+  fi
+
+  if ollama_bridge_running; then
+    return 0
+  fi
+
+  if [ ! -f "$OLLAMA_BRIDGE_SCRIPT" ]; then
+    echo "[dev] WARNING: Missing Ollama bridge helper: $OLLAMA_BRIDGE_SCRIPT" >&2
+    return 0
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "[dev] WARNING: python3 not found; skipping Ollama loopback bridge." >&2
+    return 0
+  fi
+
+  mkdir -p "$PROJECT_ROOT/.build"
+  stop_ollama_bridge
+
+  echo "[dev] Starting Ollama loopback bridge on port ${OLLAMA_BRIDGE_PORT}..."
+  python3 "$OLLAMA_BRIDGE_SCRIPT" \
+    --listen-host 0.0.0.0 \
+    --listen-port "$OLLAMA_BRIDGE_PORT" \
+    --target-host 127.0.0.1 \
+    --target-port 11434 \
+    >"$OLLAMA_BRIDGE_LOG_FILE" 2>&1 &
+  local bridge_pid="$!"
+  echo "$bridge_pid" >"$OLLAMA_BRIDGE_PID_FILE"
+
+  local attempt=0
+  while [ "$attempt" -lt 20 ]; do
+    if ollama_bridge_running; then
+      echo "[dev] Ollama loopback bridge ready on http://127.0.0.1:${OLLAMA_BRIDGE_PORT}"
+      return 0
+    fi
+    if ! kill -0 "$bridge_pid" >/dev/null 2>&1; then
+      echo "[dev] WARNING: Ollama loopback bridge exited early." >&2
+      tail -n 20 "$OLLAMA_BRIDGE_LOG_FILE" 2>/dev/null >&2 || true
+      rm -f "$OLLAMA_BRIDGE_PID_FILE"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.2
+  done
+
+  echo "[dev] WARNING: Ollama loopback bridge did not become ready." >&2
+  tail -n 20 "$OLLAMA_BRIDGE_LOG_FILE" 2>/dev/null >&2 || true
 }
 
 vite_dev_server_running() {
@@ -341,6 +424,7 @@ stop_stack() {
     entropic-openclaw entropic-skill-scanner \
     nova-openclaw nova-skill-scanner \
     2>/dev/null || true
+  stop_ollama_bridge
 }
 
 prune_stack() {
@@ -377,12 +461,14 @@ prune_stack() {
   done < <(entropic_colima_home_candidates)
 
   echo "[dev] Dev runtime prune complete."
+  stop_ollama_bridge
 }
 
 up_stack() {
   start_stack
   ensure_runtime_images
   ensure_runtime_tars
+  ensure_ollama_bridge
   local build_profile
   build_profile="$(resolve_build_profile)"
   local web_base_url
@@ -405,6 +491,7 @@ up_stack() {
       ENTROPIC_BUILD_PROFILE="$build_profile" \
       VITE_ENTROPIC_BUILD_PROFILE="$build_profile" \
       ENTROPIC_WEB_BASE_URL="$web_base_url" \
+      ENTROPIC_OLLAMA_BRIDGE_BASE_URL="http://host.docker.internal:${OLLAMA_BRIDGE_PORT}" \
       ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
       DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
         cargo run --no-default-features --color always --
@@ -415,6 +502,7 @@ up_stack() {
     ENTROPIC_BUILD_PROFILE="$build_profile" \
     VITE_ENTROPIC_BUILD_PROFILE="$build_profile" \
     ENTROPIC_WEB_BASE_URL="$web_base_url" \
+    ENTROPIC_OLLAMA_BRIDGE_BASE_URL="http://host.docker.internal:${OLLAMA_BRIDGE_PORT}" \
     ENTROPIC_COLIMA_HOME="$ENTROPIC_COLIMA_HOME" \
     DOCKER_HOST="$ACTIVE_DOCKER_HOST" \
       pnpm tauri:dev
