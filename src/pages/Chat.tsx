@@ -4,12 +4,17 @@ import {
   Paperclip,
   Copy,
   Check,
+  Mic,
+  Square,
   Sparkles,
   Image as ImageIcon,
   Download,
   X,
   Loader2,
   ExternalLink,
+  FileText,
+  Music2,
+  Video,
   Calendar,
   Mail,
   Globe,
@@ -176,6 +181,28 @@ type ChatImageGenerationResponse = {
     url: string;
   }>;
 };
+type ChatAudioTranscriptionResponse = {
+  text: string;
+};
+type ChatAudioGenerationResponse = {
+  text: string;
+  audio: Array<{
+    file_name: string;
+    mime_type: string;
+    url: string;
+  }>;
+};
+type UploadedAttachmentInfo = {
+  id: string;
+  file_name: string;
+  mime_type: string;
+  size_bytes: number;
+  is_image: boolean;
+  path: string;
+};
+type AudioContextLike = AudioContext & {
+  createScriptProcessor(bufferSize?: number, numberOfInputChannels?: number, numberOfOutputChannels?: number): ScriptProcessorNode;
+};
 
 const DESKTOP_HANDOFF_STORAGE_KEY = "entropic.desktop.handoff";
 const TERMINAL_DEFAULT_CWD = "/data/workspace";
@@ -188,6 +215,7 @@ const CHAT_WORKSPACE_PREFIXES = [
 const CHAT_WORKSPACE_PATH_RE = /((?:\/data\/(?:\.openclaw\/)?workspace|\/home\/node\/\.openclaw\/workspace)(?:\/[^\s`"'<>]+)?)/g;
 const FINAL_RESPONSE_RECOVERY_RETRY_MS = 1200;
 const FINAL_RESPONSE_RECOVERY_MAX_ATTEMPTS = 2;
+const MAX_TEXT_ATTACHMENT_TTS_CHARS = 20_000;
 
 function trimChatWorkspaceToken(raw: string): string {
   return raw
@@ -659,8 +687,8 @@ const TERMS_URL = entropicSitePath("/terms");
 const PRIVACY_URL = entropicSitePath("/privacy");
 const HISTORY_LIMIT = 500;
 const ACTIVE_RUN_IDLE_TIMEOUT_MS = 120_000;
-const MAX_IMAGE_ATTACHMENTS_PER_MESSAGE = 4;
-const MAX_IMAGE_ATTACHMENT_BYTES = 5_000_000;
+const MAX_ATTACHMENTS_PER_MESSAGE = 4;
+const MAX_ATTACHMENT_BYTES = 5_000_000;
 const GENERATED_IMAGES_DEST_PATH = "generated-images";
 
 const QUICK_ACTION_ICONS: Record<ChatQuickActionIcon, typeof Mail> = {
@@ -1028,6 +1056,8 @@ export function Chat({
   onModelChange: _onModelChange,
   imageModel: _imageModel,
   imageGenerationModel,
+  textToSpeechModel,
+  audioUnderstandingModel,
   integrationsSyncing,
   integrationsMissing,
   onNavigate,
@@ -1049,6 +1079,8 @@ export function Chat({
   onModelChange?: (model: string) => void;
   imageModel: string;
   imageGenerationModel: string;
+  textToSpeechModel: string;
+  audioUnderstandingModel: string;
   integrationsSyncing?: boolean;
   integrationsMissing?: boolean;
   onNavigate?: (page: Page) => void;
@@ -1071,6 +1103,9 @@ export function Chat({
   const [imageDraftsBySession, setImageDraftsBySession] = useState<Record<string, string>>({});
   const [isLoading, setIsLoading] = useState(false);
   const [thinkingStatus, setThinkingStatus] = useState<string | null>(null);
+  const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
+  const [isTranscribingAudio, setIsTranscribingAudio] = useState(false);
+  const [isSummarizingAudio, setIsSummarizingAudio] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [showConnectingScreen, setShowConnectingScreen] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -1097,6 +1132,7 @@ export function Chat({
   const [gatewayUrl, setGatewayUrl] = useState(DEFAULT_GATEWAY_URL);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [isRecordingAudio, setIsRecordingAudio] = useState(false);
   const [savingWorkspaceImageKeys, setSavingWorkspaceImageKeys] = useState<Record<string, boolean>>({});
   const [savedWorkspaceImagePaths, setSavedWorkspaceImagePaths] = useState<Record<string, string>>({});
   const [dragActive, setDragActive] = useState(false);
@@ -1127,10 +1163,25 @@ export function Chat({
   const [integrationSetupBySession, setIntegrationSetupBySession] = useState<Record<string, IntegrationSetupState>>({});
   const [quickSuggestionBySession, setQuickSuggestionBySession] = useState<Record<string, QuickSuggestionState>>({});
   const [builderChecklistBySession, setBuilderChecklistBySession] = useState<Record<string, BuilderChecklistState>>({});
+  const browserAudioContextSupported =
+    typeof window !== "undefined" &&
+    typeof (window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext) !== "undefined";
+  const browserMicSupported =
+    typeof navigator !== "undefined" &&
+    !!navigator.mediaDevices?.getUserMedia &&
+    (typeof MediaRecorder !== "undefined" || browserAudioContextSupported);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordingStreamRef = useRef<MediaStream | null>(null);
+  const recordingChunksRef = useRef<Blob[]>([]);
+  const audioContextRef = useRef<AudioContextLike | null>(null);
+  const recordingSourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const recordingProcessorNodeRef = useRef<ScriptProcessorNode | null>(null);
+  const pcmChunksRef = useRef<Float32Array[]>([]);
+  const pcmSampleRateRef = useRef<number>(44_100);
   const clientRef = useRef<GatewayClient | null>(null);
   const connectInFlightRef = useRef(false);
   const currentSessionRef = useRef<string | null>(null);
@@ -1184,6 +1235,10 @@ export function Chat({
   const activeTerminalState = currentSession
     ? terminalStateBySession[currentSession] || { cwd: TERMINAL_DEFAULT_CWD }
     : { cwd: TERMINAL_DEFAULT_CWD };
+  const pendingAudioAttachments = pendingAttachments.filter((attachment) =>
+    attachment.mimeType.startsWith("audio/"),
+  );
+  const hasPendingAudioAttachments = pendingAudioAttachments.length > 0;
   const integrationSetup = currentSession ? integrationSetupBySession[currentSession] || null : null;
   const quickSuggestion = currentSession ? quickSuggestionBySession[currentSession] || null : null;
   const builderChecklist = currentSession ? builderChecklistBySession[currentSession] || null : null;
@@ -1259,6 +1314,63 @@ export function Chat({
   function extractBase64FromDataUrl(value: string): string | null {
     const match = /^data:[^;]+;base64,(.*)$/i.exec(value);
     return match ? match[1] : null;
+  }
+
+  function attachmentLooksTextLike(attachment: Pick<PendingAttachment, "fileName" | "mimeType">): boolean {
+    const mimeType = attachment.mimeType.trim().toLowerCase();
+    if (
+      mimeType.startsWith("text/") ||
+      mimeType === "application/json" ||
+      mimeType === "application/ld+json" ||
+      mimeType === "application/xml" ||
+      mimeType === "application/x-yaml"
+    ) {
+      return true;
+    }
+
+    const fileName = attachment.fileName.trim().toLowerCase();
+    return /\.(txt|md|markdown|json|csv|tsv|yaml|yml|xml|html|htm|log)$/i.test(fileName);
+  }
+
+  function decodeBase64Utf8(base64: string): string {
+    const binary = atob(base64.trim());
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  }
+
+  function buildTextToSpeechSourceFromAttachments(attachments: PendingAttachment[]): string {
+    const textAttachments = attachments.filter((attachment) => attachmentLooksTextLike(attachment));
+    if (textAttachments.length === 0) {
+      throw new Error("Attach a text file first.");
+    }
+
+    const sections: string[] = [];
+    let totalChars = 0;
+    for (const attachment of textAttachments) {
+      const decoded = decodeBase64Utf8(attachment.content).trim();
+      if (!decoded) {
+        continue;
+      }
+      const section = textAttachments.length === 1
+        ? decoded
+        : `File: ${attachment.fileName}\n\n${decoded}`;
+      totalChars += section.length;
+      if (totalChars > MAX_TEXT_ATTACHMENT_TTS_CHARS) {
+        throw new Error(
+          `Text attachments are too large to speak at once. Keep the total under ${MAX_TEXT_ATTACHMENT_TTS_CHARS.toLocaleString()} characters.`,
+        );
+      }
+      sections.push(section);
+    }
+
+    if (sections.length === 0) {
+      throw new Error("The attached text file is empty.");
+    }
+
+    return sections.join("\n\n---\n\n");
   }
 
   function getGeneratedImageWorkspaceSaveUnsupportedReason(
@@ -1343,33 +1455,219 @@ export function Chat({
     });
   }
 
-  async function addImageAttachments(filesInput: FileList | File[] | null | undefined) {
+  async function blobToBase64(blob: Blob): Promise<string> {
+    const buffer = await blob.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    const chunkSize = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      const slice = bytes.subarray(offset, offset + chunkSize);
+      binary += String.fromCharCode(...slice);
+    }
+    return btoa(binary);
+  }
+
+  function preferredRecordingMimeType(): string {
+    if (typeof MediaRecorder === "undefined") {
+      return "audio/webm";
+    }
+    const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
+    for (const mimeType of candidates) {
+      if (MediaRecorder.isTypeSupported(mimeType)) {
+        return mimeType;
+      }
+    }
+    return "";
+  }
+
+  function recordingExtensionForMimeType(mimeType: string): string {
+    if (mimeType.includes("mp4")) return "m4a";
+    if (mimeType.includes("ogg")) return "ogg";
+    return "webm";
+  }
+
+  function stopRecordingStream() {
+    const stream = recordingStreamRef.current;
+    if (stream) {
+      for (const track of stream.getTracks()) {
+        track.stop();
+      }
+      recordingStreamRef.current = null;
+    }
+  }
+
+  function stopAudioProcessingNodes() {
+    recordingProcessorNodeRef.current?.disconnect();
+    recordingProcessorNodeRef.current = null;
+    recordingSourceNodeRef.current?.disconnect();
+    recordingSourceNodeRef.current = null;
+    const context = audioContextRef.current;
+    audioContextRef.current = null;
+    if (context) {
+      void context.close().catch(() => {});
+    }
+  }
+
+  function getAudioContextCtor(): typeof AudioContext | null {
+    if (typeof window === "undefined") {
+      return null;
+    }
+    const windowWithWebkit = window as typeof window & { webkitAudioContext?: typeof AudioContext };
+    return window.AudioContext || windowWithWebkit.webkitAudioContext || null;
+  }
+
+  function encodeWavFromPcm(chunks: Float32Array[], sampleRate: number): Blob {
+    const totalSamples = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const pcmBuffer = new ArrayBuffer(44 + totalSamples * 2);
+    const view = new DataView(pcmBuffer);
+    let offset = 0;
+
+    const writeAscii = (value: string) => {
+      for (let i = 0; i < value.length; i += 1) {
+        view.setUint8(offset, value.charCodeAt(i));
+        offset += 1;
+      }
+    };
+
+    writeAscii("RIFF");
+    view.setUint32(offset, 36 + totalSamples * 2, true);
+    offset += 4;
+    writeAscii("WAVE");
+    writeAscii("fmt ");
+    view.setUint32(offset, 16, true);
+    offset += 4;
+    view.setUint16(offset, 1, true);
+    offset += 2;
+    view.setUint16(offset, 1, true);
+    offset += 2;
+    view.setUint32(offset, sampleRate, true);
+    offset += 4;
+    view.setUint32(offset, sampleRate * 2, true);
+    offset += 4;
+    view.setUint16(offset, 2, true);
+    offset += 2;
+    view.setUint16(offset, 16, true);
+    offset += 2;
+    writeAscii("data");
+    view.setUint32(offset, totalSamples * 2, true);
+    offset += 4;
+
+    for (const chunk of chunks) {
+      for (let index = 0; index < chunk.length; index += 1) {
+        const sample = Math.max(-1, Math.min(1, chunk[index] ?? 0));
+        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+        offset += 2;
+      }
+    }
+
+    return new Blob([pcmBuffer], { type: "audio/wav" });
+  }
+
+  function revokeAttachmentPreviewUrl(attachment: Pick<PendingAttachment, "previewUrl">) {
+    if (attachment.previewUrl?.startsWith("blob:")) {
+      URL.revokeObjectURL(attachment.previewUrl);
+    }
+  }
+
+  function clearPendingAttachments() {
+    setPendingAttachments((prev) => {
+      for (const attachment of prev) {
+        revokeAttachmentPreviewUrl(attachment);
+      }
+      return [];
+    });
+  }
+
+  function attachmentKindLabel(mimeType: string): string {
+    const normalized = mimeType.trim().toLowerCase();
+    if (normalized.startsWith("image/")) return "image";
+    if (normalized.startsWith("video/")) return "video";
+    if (normalized.startsWith("audio/")) return "audio";
+    if (normalized === "application/pdf") return "pdf";
+    return "file";
+  }
+
+  function pendingAttachmentStatusLabel(attachment: PendingAttachment): string {
+    if (attachmentLooksTextLike(attachment)) {
+      return "text for tts";
+    }
+    return attachmentKindLabel(attachment.mimeType);
+  }
+
+  function renderPendingAttachmentPreview(attachment: PendingAttachment) {
+    const isImage = attachment.mimeType.startsWith("image/");
+    const isVideo = attachment.mimeType.startsWith("video/");
+    const isAudio = attachment.mimeType.startsWith("audio/");
+
+    if (isImage && attachment.previewUrl) {
+      return (
+        <img
+          src={attachment.previewUrl}
+          alt={attachment.fileName}
+          className="h-8 w-8 rounded object-cover"
+        />
+      );
+    }
+
+    if (isVideo && attachment.previewUrl) {
+      return (
+        <video
+          src={attachment.previewUrl}
+          muted
+          playsInline
+          preload="metadata"
+          className="h-8 w-8 rounded bg-black object-cover"
+        />
+      );
+    }
+
+    return (
+      <div className="flex h-8 w-8 items-center justify-center rounded bg-[var(--bg-secondary)] text-[var(--text-secondary)]">
+        {isAudio ? (
+          <Music2 className="h-4 w-4" />
+        ) : isVideo ? (
+          <Video className="h-4 w-4" />
+        ) : (
+          <FileText className="h-4 w-4" />
+        )}
+      </div>
+    );
+  }
+
+  async function addAttachments(filesInput: FileList | File[] | null | undefined) {
     const files = filesInput ? Array.from(filesInput) : [];
     if (files.length === 0) return;
 
-    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
-    if (imageFiles.length === 0) {
-      setError("Only image attachments are supported right now.");
+    const allowedFiles =
+      activeComposerMode === "image"
+        ? files.filter((file) => file.type.startsWith("image/"))
+        : files;
+    if (allowedFiles.length === 0) {
+      setError(
+        activeComposerMode === "image"
+          ? "Only image attachments are supported in Image mode."
+          : "No supported attachments were selected.",
+      );
       return;
     }
 
-    const remainingSlots = Math.max(0, MAX_IMAGE_ATTACHMENTS_PER_MESSAGE - pendingAttachments.length);
+    const remainingSlots = Math.max(0, MAX_ATTACHMENTS_PER_MESSAGE - pendingAttachments.length);
     if (remainingSlots <= 0) {
-      setError(`You can attach up to ${MAX_IMAGE_ATTACHMENTS_PER_MESSAGE} images per message.`);
+      setError(`You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`);
       return;
     }
 
-    const selectedFiles = imageFiles.slice(0, remainingSlots);
-    if (imageFiles.length > remainingSlots) {
-      setError(`You can attach up to ${MAX_IMAGE_ATTACHMENTS_PER_MESSAGE} images per message.`);
+    const selectedFiles = allowedFiles.slice(0, remainingSlots);
+    if (allowedFiles.length > remainingSlots) {
+      setError(`You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`);
     } else {
       setError(null);
     }
 
     const nextAttachments: PendingAttachment[] = [];
     for (const file of selectedFiles) {
-      if (file.size > MAX_IMAGE_ATTACHMENT_BYTES) {
-        setError(`${file.name} is too large. Max size is 5 MB per image.`);
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        setError(`${file.name} is too large. Max size is 5 MB per file.`);
         continue;
       }
       try {
@@ -1381,18 +1679,20 @@ export function Chat({
         nextAttachments.push({
           id: crypto.randomUUID(),
           fileName: file.name,
-          mimeType: file.type || "image/png",
+          mimeType: file.type || "application/octet-stream",
           content: base64,
           previewUrl: dataUrl,
         });
-        const key = normalizeAttachmentFileName(file.name);
-        if (key) {
-          avatarUploadDataUrlByFileNameRef.current.set(key, dataUrl);
-          if (avatarUploadDataUrlByFileNameRef.current.size > 128) {
-            const firstKey = avatarUploadDataUrlByFileNameRef.current.keys().next().value as
-              | string
-              | undefined;
-            if (firstKey) avatarUploadDataUrlByFileNameRef.current.delete(firstKey);
+        if (file.type.startsWith("image/")) {
+          const key = normalizeAttachmentFileName(file.name);
+          if (key) {
+            avatarUploadDataUrlByFileNameRef.current.set(key, dataUrl);
+            if (avatarUploadDataUrlByFileNameRef.current.size > 128) {
+              const firstKey = avatarUploadDataUrlByFileNameRef.current.keys().next().value as
+                | string
+                | undefined;
+              if (firstKey) avatarUploadDataUrlByFileNameRef.current.delete(firstKey);
+            }
           }
         }
       } catch (err) {
@@ -1406,7 +1706,519 @@ export function Chat({
   }
 
   function removePendingAttachment(attachmentId: string) {
-    setPendingAttachments((prev) => prev.filter((attachment) => attachment.id !== attachmentId));
+    setPendingAttachments((prev) => {
+      const next: PendingAttachment[] = [];
+      for (const attachment of prev) {
+        if (attachment.id === attachmentId) {
+          revokeAttachmentPreviewUrl(attachment);
+        } else {
+          next.push(attachment);
+        }
+      }
+      return next;
+    });
+  }
+
+  function setChatDraftFromAudioPrompt(prompt: string) {
+    const sessionKey = currentSession || ensureComposerSession();
+    if (!sessionKey) return;
+    setComposerModeForSession(sessionKey, "chat");
+    setDraftsBySession((prev) => {
+      const existing = (prev[sessionKey] || "").trim();
+      const nextValue = existing ? `${existing}\n\n${prompt}` : prompt;
+      if (prev[sessionKey] === nextValue) return prev;
+      return { ...prev, [sessionKey]: nextValue };
+    });
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.style.height = "auto";
+      const lineHeight = parseInt(getComputedStyle(textarea).lineHeight) || 20;
+      const maxHeight = lineHeight * 5;
+      textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
+      textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+    });
+  }
+
+  async function transcribePendingAudio() {
+    const audioAttachments = pendingAttachments.filter((attachment) =>
+      attachment.mimeType.startsWith("audio/"),
+    );
+    if (audioAttachments.length === 0) {
+      setError("Attach audio first.");
+      return;
+    }
+    if (!audioUnderstandingModel.trim()) {
+      setError("Choose an Audio Understanding Model in Settings first.");
+      return;
+    }
+
+    const sessionKey = currentSession || ensureComposerSession();
+    if (!sessionKey) return;
+
+    setIsTranscribingAudio(true);
+    setThinkingStatus("Transcribing audio");
+    setError(null);
+
+    try {
+      const response = await invoke<ChatAudioTranscriptionResponse>("transcribe_chat_audio", {
+        model: audioUnderstandingModel,
+        attachments: audioAttachments.map((attachment) => ({
+          file_name: attachment.fileName,
+          mime_type: attachment.mimeType,
+          content: attachment.content,
+        })),
+      });
+      appendLocalMessage(
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: response.text.trim() || "The audio transcription completed, but no text was returned.",
+          sentAt: Date.now(),
+        },
+        sessionKey,
+      );
+    } catch (error) {
+      const message = formatUnknownUiError(error, "Failed to transcribe audio.");
+      setError(message);
+      appendAssistantNotice(`I couldn't transcribe that audio: ${message}`, sessionKey);
+    } finally {
+      setIsTranscribingAudio(false);
+      setThinkingStatus(null);
+    }
+  }
+
+  async function summarizePendingAudio() {
+    const audioAttachments = pendingAttachments.filter((attachment) =>
+      attachment.mimeType.startsWith("audio/"),
+    );
+    const nonAudioAttachments = pendingAttachments.filter(
+      (attachment) => !attachment.mimeType.startsWith("audio/"),
+    );
+    if (audioAttachments.length === 0) {
+      setError("Attach audio first.");
+      return;
+    }
+    if (!audioUnderstandingModel.trim()) {
+      setError("Choose an Audio Understanding Model in Settings first.");
+      return;
+    }
+
+    setIsSummarizingAudio(true);
+    setThinkingStatus("Summarizing audio");
+    setError(null);
+
+    try {
+      const response = await invoke<ChatAudioTranscriptionResponse>("transcribe_chat_audio", {
+        model: audioUnderstandingModel,
+        attachments: audioAttachments.map((attachment) => ({
+          file_name: attachment.fileName,
+          mime_type: attachment.mimeType,
+          content: attachment.content,
+        })),
+      });
+      const transcript = response.text.trim();
+      if (!transcript) {
+        throw new Error("The audio transcription completed, but no text was returned.");
+      }
+
+      const summaryPrompt = [
+        "Summarize the following audio transcript.",
+        "Return these sections:",
+        "1. Key points",
+        "2. Speakers",
+        "3. Action items",
+        "4. Notable timestamps (only if present or reasonably inferable from the transcript)",
+        "If timestamps are not available, say so briefly.",
+        "",
+        "Transcript:",
+        transcript,
+      ].join("\n");
+
+      await handleSend(summaryPrompt, {
+        attachmentOverride: nonAudioAttachments,
+      });
+    } catch (error) {
+      const message = formatUnknownUiError(error, "Failed to summarize audio.");
+      setError(message);
+      const sessionKey = currentSession || ensureComposerSession();
+      if (sessionKey) {
+        appendAssistantNotice(`I couldn't summarize that audio: ${message}`, sessionKey);
+      }
+    } finally {
+      setIsSummarizingAudio(false);
+      setThinkingStatus(null);
+    }
+  }
+
+  async function generateAudioFromDraft() {
+    if (pendingAttachments.length > 0) {
+      setError("Remove pending attachments before generating audio from text.");
+      return;
+    }
+    if (!textToSpeechModel.trim()) {
+      setError("Choose a Text to Speech Model in Settings first.");
+      return;
+    }
+
+    const text = activeDraft.trim();
+    if (!text) {
+      setError("Enter text first.");
+      return;
+    }
+
+    const sessionKey = currentSession || ensureComposerSession();
+    if (!sessionKey) return;
+
+    setIsGeneratingAudio(true);
+    setThinkingStatus("Generating audio");
+    setError(null);
+
+    appendLocalMessage(
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: text,
+        sentAt: Date.now(),
+      },
+      sessionKey,
+    );
+
+    setDraftsBySession((prev) => ({ ...prev, [sessionKey]: "" }));
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.style.height = "auto";
+      textarea.style.overflowY = "hidden";
+    });
+
+    try {
+      const response = await invoke<ChatAudioGenerationResponse>("generate_chat_audio", {
+        model: textToSpeechModel,
+        text,
+      });
+      appendLocalMessage(
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: response.text.trim() || "Generated audio from your text.",
+          sentAt: Date.now(),
+          attachments: response.audio.map((audio, index) => ({
+            fileName: audio.file_name || `generated-speech-${index + 1}.mp3`,
+            mimeType: audio.mime_type || "audio/mpeg",
+            previewUrl: audio.url,
+          })),
+        },
+        sessionKey,
+      );
+    } catch (error) {
+      const message = formatUnknownUiError(error, "Failed to generate audio.");
+      setError(message);
+      appendAssistantNotice(`I couldn't generate audio from that text: ${message}`, sessionKey);
+    } finally {
+      setIsGeneratingAudio(false);
+      setThinkingStatus(null);
+    }
+  }
+
+  async function generateAudioFromTextAttachments() {
+    if (!textToSpeechModel.trim()) {
+      setError("Choose a Text to Speech Model in Settings first.");
+      return;
+    }
+
+    const sessionKey = currentSession || ensureComposerSession();
+    if (!sessionKey) return;
+
+    let sourceText = "";
+    try {
+      sourceText = buildTextToSpeechSourceFromAttachments(pendingAttachments);
+    } catch (error) {
+      setError(formatUnknownUiError(error, "Failed to read the attached text file."));
+      return;
+    }
+
+    setIsGeneratingAudio(true);
+    setThinkingStatus("Generating audio");
+    setError(null);
+
+    appendLocalMessage(
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: `Generate audio from the attached text file${pendingAttachments.length > 1 ? "s" : ""}.`,
+        sentAt: Date.now(),
+        attachments: pendingAttachments.map((attachment) => ({
+          fileName: attachment.fileName,
+          mimeType: attachment.mimeType,
+          previewUrl: attachment.previewUrl || `data:${attachment.mimeType};base64,${attachment.content}`,
+        })),
+      },
+      sessionKey,
+    );
+
+    try {
+      const response = await invoke<ChatAudioGenerationResponse>("generate_chat_audio", {
+        model: textToSpeechModel,
+        text: sourceText,
+      });
+      appendLocalMessage(
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: response.text.trim() || "Generated audio from the attached text file.",
+          sentAt: Date.now(),
+          attachments: response.audio.map((audio, index) => ({
+            fileName: audio.file_name || `generated-speech-${index + 1}.mp3`,
+            mimeType: audio.mime_type || "audio/mpeg",
+            previewUrl: audio.url,
+          })),
+        },
+        sessionKey,
+      );
+      clearPendingAttachments();
+    } catch (error) {
+      const message = formatUnknownUiError(error, "Failed to generate audio from the attached text file.");
+      setError(message);
+      appendAssistantNotice(`I couldn't generate audio from that text file: ${message}`, sessionKey);
+    } finally {
+      setIsGeneratingAudio(false);
+      setThinkingStatus(null);
+    }
+  }
+
+  async function startAudioRecording() {
+    if (activeComposerMode !== "chat") {
+      setError("Audio recording is available in Chat mode only.");
+      return;
+    }
+    if (pendingAttachments.length >= MAX_ATTACHMENTS_PER_MESSAGE) {
+      setError(`You can attach up to ${MAX_ATTACHMENTS_PER_MESSAGE} files per message.`);
+      return;
+    }
+    if (!browserMicSupported) {
+      setError("Microphone capture is not available in this environment. You can still attach audio files for OpenClaw to analyze.");
+      return;
+    }
+
+    try {
+      setError(null);
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordingStreamRef.current = stream;
+      if (typeof MediaRecorder !== "undefined") {
+        const mimeType = preferredRecordingMimeType();
+        const recorder = mimeType
+          ? new MediaRecorder(stream, { mimeType })
+          : new MediaRecorder(stream);
+        mediaRecorderRef.current = recorder;
+        recordingChunksRef.current = [];
+
+        recorder.ondataavailable = (event) => {
+          if (event.data && event.data.size > 0) {
+            recordingChunksRef.current.push(event.data);
+          }
+        };
+        recorder.onerror = () => {
+          setError("Microphone recording failed. Please try again.");
+          setIsRecordingAudio(false);
+          stopRecordingStream();
+          stopAudioProcessingNodes();
+          mediaRecorderRef.current = null;
+          recordingChunksRef.current = [];
+        };
+        recorder.onstop = async () => {
+          const chunks = recordingChunksRef.current;
+          const resolvedMimeType = recorder.mimeType || mimeType || "audio/webm";
+          recordingChunksRef.current = [];
+          mediaRecorderRef.current = null;
+          setIsRecordingAudio(false);
+          stopRecordingStream();
+          stopAudioProcessingNodes();
+
+          if (chunks.length === 0) {
+            return;
+          }
+
+          try {
+            const blob = new Blob(chunks, { type: resolvedMimeType });
+            if (blob.size > MAX_ATTACHMENT_BYTES) {
+              setError("Recorded audio is too large. Keep recordings under 5 MB.");
+              return;
+            }
+            const extension = recordingExtensionForMimeType(resolvedMimeType);
+            const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+            const fileName = `voice-note-${stamp}.${extension}`;
+            const base64 = await blobToBase64(blob);
+            setPendingAttachments((prev) => [
+              ...prev,
+              {
+                id: crypto.randomUUID(),
+                fileName,
+                mimeType: resolvedMimeType,
+                content: base64,
+                previewUrl: URL.createObjectURL(blob),
+              },
+            ]);
+          } catch (error) {
+            setError(formatUnknownUiError(error, "Failed to attach recorded audio."));
+          }
+        };
+
+        recorder.start();
+      } else {
+        const AudioContextCtor = getAudioContextCtor();
+        if (!AudioContextCtor) {
+          throw new Error("This desktop build does not expose a supported audio recording API.");
+        }
+        const audioContext = new AudioContextCtor() as AudioContextLike;
+        const sourceNode = audioContext.createMediaStreamSource(stream);
+        const processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+        pcmChunksRef.current = [];
+        pcmSampleRateRef.current = audioContext.sampleRate;
+        audioContextRef.current = audioContext;
+        recordingSourceNodeRef.current = sourceNode;
+        recordingProcessorNodeRef.current = processorNode;
+        processorNode.onaudioprocess = (event) => {
+          const samples = event.inputBuffer.getChannelData(0);
+          pcmChunksRef.current.push(new Float32Array(samples));
+        };
+        sourceNode.connect(processorNode);
+        processorNode.connect(audioContext.destination);
+      }
+      setIsRecordingAudio(true);
+    } catch (error) {
+      stopRecordingStream();
+      stopAudioProcessingNodes();
+      mediaRecorderRef.current = null;
+      recordingChunksRef.current = [];
+      pcmChunksRef.current = [];
+      setIsRecordingAudio(false);
+      setError(formatUnknownUiError(error, "Microphone access was denied."));
+    }
+  }
+
+  async function stopAudioRecording() {
+    const recorder = mediaRecorderRef.current;
+    if (recorder) {
+      if (recorder.state !== "inactive") {
+        recorder.stop();
+        return;
+      }
+      setIsRecordingAudio(false);
+      stopRecordingStream();
+      stopAudioProcessingNodes();
+      mediaRecorderRef.current = null;
+      return;
+    }
+
+    if (recordingStreamRef.current) {
+      const chunks = pcmChunksRef.current;
+      const sampleRate = pcmSampleRateRef.current;
+      pcmChunksRef.current = [];
+      setIsRecordingAudio(false);
+      stopAudioProcessingNodes();
+      stopRecordingStream();
+      if (chunks.length === 0) {
+        return;
+      }
+      try {
+        const blob = encodeWavFromPcm(chunks, sampleRate);
+        if (blob.size > MAX_ATTACHMENT_BYTES) {
+          setError("Recorded audio is too large. Keep recordings under 5 MB.");
+          return;
+        }
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const fileName = `voice-note-${stamp}.wav`;
+        const base64 = await blobToBase64(blob);
+        setPendingAttachments((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            fileName,
+            mimeType: "audio/wav",
+            content: base64,
+            previewUrl: URL.createObjectURL(blob),
+          },
+        ]);
+      } catch (error) {
+        setError(formatUnknownUiError(error, "Failed to attach recorded audio."));
+      }
+      return;
+    }
+
+    setIsRecordingAudio(false);
+    stopAudioProcessingNodes();
+    stopRecordingStream();
+  }
+
+  useEffect(() => {
+    return () => {
+      void stopAudioRecording();
+    };
+  }, []);
+
+  async function stageAttachmentForAgent(attachment: PersistedPendingSendAttachment) {
+    const fileName = attachment.fileName?.trim() || "attachment";
+    const mimeType = attachment.mimeType?.trim() || "application/octet-stream";
+    const base64 = attachment.content?.trim();
+    if (!base64) {
+      throw new Error(`Attachment ${fileName} is missing content.`);
+    }
+    const uploaded = await invoke<UploadedAttachmentInfo>("upload_attachment", {
+      fileName,
+      mimeType,
+      base64,
+    });
+    const path = uploaded.path?.trim();
+    if (!path) {
+      throw new Error(`Failed to stage ${fileName} for analysis.`);
+    }
+    return {
+      fileName: uploaded.file_name?.trim() || fileName,
+      mimeType: uploaded.mime_type?.trim() || mimeType,
+      path,
+    };
+  }
+
+  async function prepareGatewaySendPayload(
+    outboundMessageContent: string,
+    attachments: PersistedPendingSendAttachment[],
+  ) {
+    const imageAttachments = attachments.filter(
+      (attachment) =>
+        typeof attachment.content === "string" &&
+        attachment.content.trim().length > 0 &&
+        typeof attachment.mimeType === "string" &&
+        attachment.mimeType.startsWith("image/"),
+    );
+    const fileAttachments = attachments.filter(
+      (attachment) =>
+        typeof attachment.content === "string" &&
+        attachment.content.trim().length > 0 &&
+        !(typeof attachment.mimeType === "string" && attachment.mimeType.startsWith("image/")),
+    );
+
+    if (fileAttachments.length === 0) {
+      return {
+        message: outboundMessageContent,
+        attachments: imageAttachments,
+      };
+    }
+
+    const stagedFiles = await Promise.all(fileAttachments.map((attachment) => stageAttachmentForAgent(attachment)));
+    const fileContext = [
+      "Attached local file paths:",
+      ...stagedFiles.map((attachment) => `- ${attachment.fileName} (${attachment.mimeType}): ${attachment.path}`),
+      "Use these local paths directly when you need to inspect, transcribe, or analyze the uploaded files.",
+    ].join("\n");
+
+    return {
+      message: outboundMessageContent.trim()
+        ? `${outboundMessageContent}\n\n${fileContext}`
+        : fileContext,
+      attachments: imageAttachments,
+    };
   }
 
   async function handleQuickAddCredits() {
@@ -2910,6 +3722,7 @@ export function Chat({
                 kind: normalized.kind ?? updated[existingIdx].kind,
                 toolName: normalized.toolName ?? updated[existingIdx].toolName,
                 assistantPayload: normalized.assistantPayload ?? updated[existingIdx].assistantPayload,
+                attachments: normalized.attachments ?? updated[existingIdx].attachments,
                 sentAt: updated[existingIdx].sentAt ?? normalized.sentAt ?? Date.now(),
               };
               return updated;
@@ -2923,6 +3736,7 @@ export function Chat({
                 kind: normalized.kind,
                 toolName: normalized.toolName,
                 assistantPayload: normalized.assistantPayload,
+                attachments: normalized.attachments,
                 sentAt: normalized.sentAt ?? Date.now(),
               },
             ];
@@ -3049,21 +3863,23 @@ export function Chat({
               kind: normalized?.kind ?? updated[existingIdx].kind,
               toolName: normalized?.toolName ?? updated[existingIdx].toolName,
               assistantPayload: normalized?.assistantPayload ?? updated[existingIdx].assistantPayload,
+              attachments: normalized?.attachments ?? updated[existingIdx].attachments,
               sentAt: updated[existingIdx].sentAt ?? normalized?.sentAt ?? Date.now(),
             };
             return updated;
           }
           return [
             ...prev,
-            {
-              id: eventRunId || crypto.randomUUID(),
-              role: "assistant",
-              content: text,
-              kind: normalized?.kind,
-              toolName: normalized?.toolName,
-              assistantPayload: normalized?.assistantPayload,
-              sentAt: normalized?.sentAt ?? Date.now(),
-            },
+              {
+                id: eventRunId || crypto.randomUUID(),
+                role: "assistant",
+                content: text,
+                kind: normalized?.kind,
+                toolName: normalized?.toolName,
+                assistantPayload: normalized?.assistantPayload,
+                attachments: normalized?.attachments,
+                sentAt: normalized?.sentAt ?? Date.now(),
+              },
           ];
         });
         if (keepComposerFocus) {
@@ -3777,13 +4593,14 @@ export function Chat({
       throw new Error("Message content is empty. Please type a message before sending.");
     }
 
+    const preparedSend = await prepareGatewaySendPayload(entry.outboundMessageContent, entry.attachments);
     addDiag(
-      `send -> session=${entry.sessionKey} len=${entry.outboundMessageContent.length} attachments=${entry.attachments.length}`,
+      `send -> session=${entry.sessionKey} len=${preparedSend.message.length} attachments=${entry.attachments.length} image_attachments=${preparedSend.attachments.length}`,
     );
     const runId = await liveClient.sendMessage(
       entry.sessionKey,
-      entry.outboundMessageContent,
-      entry.attachments,
+      preparedSend.message,
+      preparedSend.attachments,
       entry.idempotencyKey,
     );
     if (!runId) {
@@ -3855,7 +4672,10 @@ export function Chat({
     }
   }
 
-  async function handleSend(content?: string, options?: { mode?: ComposerMode }) {
+  async function handleSend(
+    content?: string,
+    options?: { mode?: ComposerMode; attachmentOverride?: PendingAttachment[] },
+  ) {
     let sendSession = currentSessionRef.current;
     if (!sendSession) {
       createNewSession({ force: true });
@@ -3887,22 +4707,26 @@ export function Chat({
     const userMessageContent =
       composerMode === "shell" ? rawMessageContent : messageContent;
     const failedDraftRestore = content ? null : currentDraft;
-    if (!sendSession || isLoading || (!rawMessageContent && pendingAttachments.length === 0)) return;
-    const attachmentsPayload = pendingAttachments.map((attachment) => ({
+    const attachmentsForSend = options?.attachmentOverride ?? pendingAttachments;
+    if (!sendSession || isLoading || (!rawMessageContent && attachmentsForSend.length === 0)) return;
+    const attachmentsPayload = attachmentsForSend.map((attachment) => ({
       fileName: attachment.fileName,
       mimeType: attachment.mimeType,
       content: attachment.content,
     }));
-    const imageGenerationAttachmentsPayload = pendingAttachments.map((attachment) => ({
+    const imageGenerationAttachmentsPayload = attachmentsForSend.map((attachment) => ({
       file_name: attachment.fileName,
       mime_type: attachment.mimeType,
       content: attachment.content,
     }));
     const hasAttachments = attachmentsPayload.length > 0;
+    const attachmentLabels = attachmentsForSend.map(
+      (attachment) => attachment.fileName || attachmentKindLabel(attachment.mimeType),
+    );
     const attachmentLine =
-      pendingAttachments.length === 1
-        ? `[Attached image: ${pendingAttachments[0]?.fileName || "image"}]`
-        : `[Attached ${pendingAttachments.length} images]`;
+      attachmentsForSend.length === 1
+        ? `[Attached ${attachmentKindLabel(attachmentsForSend[0]?.mimeType || "")}: ${attachmentsForSend[0]?.fileName || "attachment"}]`
+        : `[Attached ${attachmentsForSend.length} files]`;
     const userVisibleContent = hasAttachments
       ? userMessageContent
         ? `${userMessageContent}\n\n${attachmentLine}`
@@ -3910,13 +4734,13 @@ export function Chat({
       : userMessageContent;
     let outboundMessageContent = hasAttachments
       ? userMessageContent
-        ? `${userMessageContent}\n\nAttached image context: ${pendingAttachments.map((attachment) => attachment.fileName || "image").join(", ")}`
-        : `Attached image context: ${pendingAttachments.map((attachment) => attachment.fileName || "image").join(", ")}`
+        ? `${userMessageContent}\n\nAttached file context: ${attachmentLabels.join(", ")}`
+        : `Attached file context: ${attachmentLabels.join(", ")}`
       : messageContent;
     const runCommand = parseRunSlashCommand(messageContent);
     if (runCommand !== null) {
       if (hasAttachments) {
-        const message = "Image attachments are not supported with `/run`.";
+        const message = "Attachments are not supported with `/run`.";
         setError(message);
         appendAssistantNotice(message, sendSession);
         return;
@@ -4034,7 +4858,7 @@ export function Chat({
         content: userVisibleContent,
         sentAt: Date.now(),
         attachments: hasAttachments
-          ? pendingAttachments.map((a) => ({
+          ? attachmentsForSend.map((a) => ({
               fileName: a.fileName,
               mimeType: a.mimeType,
               previewUrl: a.previewUrl || `data:${a.mimeType};base64,${a.content}`,
@@ -4085,7 +4909,7 @@ export function Chat({
         setError(message);
         appendAssistantNotice(`I couldn't generate that image: ${message}`, sendSession);
       } finally {
-        setPendingAttachments([]);
+        clearPendingAttachments();
         setIsLoading(false);
         setThinkingStatus(null);
       }
@@ -4113,7 +4937,7 @@ export function Chat({
       content: userVisibleContent,
       sentAt: Date.now(),
       attachments: hasAttachments
-        ? pendingAttachments.map((a) => ({
+        ? attachmentsForSend.map((a) => ({
             fileName: a.fileName,
             mimeType: a.mimeType,
             previewUrl: a.previewUrl || `data:${a.mimeType};base64,${a.content}`,
@@ -4164,7 +4988,7 @@ export function Chat({
     if (taskBoardIntent && sendSession) {
       const handled = await handleTaskBoardChatIntent(taskBoardIntent, sendSession);
       if (handled) {
-        setPendingAttachments([]);
+        clearPendingAttachments();
         return;
       }
     }
@@ -4245,7 +5069,7 @@ export function Chat({
       nextAttemptAt: Date.now(),
     };
     upsertOutboxEntry(pendingSend);
-    setPendingAttachments([]);
+    clearPendingAttachments();
 
     if (!liveClient || !liveClient.isConnected()) {
       if (!connectInFlightRef.current) {
@@ -5102,50 +5926,112 @@ export function Chat({
         {attachments.map((attachment, index) => {
           const actionKey = imageAttachmentActionKey(message.id, index);
           const savedPath = savedWorkspaceImagePaths[actionKey];
-          const saveUnsupportedReason = getGeneratedImageWorkspaceSaveUnsupportedReason(attachment);
-          const canSaveToWorkspace = !saveUnsupportedReason;
+          const isImage = attachment.mimeType.startsWith("image/");
+          const isVideo = attachment.mimeType.startsWith("video/");
+          const isAudio = attachment.mimeType.startsWith("audio/");
+          const canOpenAttachment =
+            attachment.previewUrl.trim().length > 0 && !attachment.previewUrl.startsWith("data:");
+          const saveUnsupportedReason = isImage
+            ? getGeneratedImageWorkspaceSaveUnsupportedReason(attachment)
+            : "Only generated images can be saved to the workspace right now.";
+          const canSaveToWorkspace = isImage && !saveUnsupportedReason;
           return (
             <div
               key={actionKey}
               className="overflow-hidden rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-tertiary)]"
             >
-              <img
-                src={attachment.previewUrl}
-                alt={attachment.fileName}
-                className="block h-auto max-h-[360px] w-full object-contain"
-              />
+              {isImage ? (
+                <img
+                  src={attachment.previewUrl}
+                  alt={attachment.fileName}
+                  className="block h-auto max-h-[360px] w-full object-contain"
+                />
+              ) : isVideo ? (
+                <video
+                  src={attachment.previewUrl}
+                  controls
+                  preload="metadata"
+                  className="block h-auto max-h-[360px] w-full bg-black object-contain"
+                />
+              ) : isAudio ? (
+                <div className="px-4 py-4">
+                  <div className="mb-3 flex items-center gap-2 text-sm font-medium text-[var(--text-primary)]">
+                    <Music2 className="h-4 w-4" />
+                    <span className="truncate">{attachment.fileName}</span>
+                  </div>
+                  <audio
+                    src={attachment.previewUrl}
+                    controls
+                    preload="metadata"
+                    className="w-full"
+                  />
+                </div>
+              ) : (
+                <div className="flex items-center gap-3 px-4 py-4">
+                  <div className="rounded-lg bg-[var(--bg-secondary)] p-2 text-[var(--text-secondary)]">
+                    {attachment.mimeType === "application/pdf" ? (
+                      <FileText className="h-5 w-5" />
+                    ) : (
+                      <Video className="h-5 w-5" />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium text-[var(--text-primary)]">
+                      {attachment.fileName}
+                    </div>
+                    <div className="truncate text-xs text-[var(--text-secondary)]">
+                      {attachment.mimeType}
+                    </div>
+                  </div>
+                </div>
+              )}
               <div className="flex items-center justify-between gap-3 px-3 py-2 text-xs text-[var(--text-secondary)]">
                 <span className="min-w-0 truncate">{attachment.fileName}</span>
-                {message.role === "assistant" && attachment.mimeType.startsWith("image/") ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void saveGeneratedImageToWorkspace(message, attachment, index);
-                    }}
-                    disabled={Boolean(savingWorkspaceImageKeys[actionKey]) || !canSaveToWorkspace}
-                    className="inline-flex shrink-0 items-center gap-1 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-2 py-1 text-[11px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--system-gray-6)] disabled:cursor-not-allowed disabled:opacity-60"
-                    title={
-                      savedPath
-                        ? `/data/workspace/${savedPath}`
-                        : canSaveToWorkspace
-                          ? "Save image to /data/workspace/generated-images"
-                          : saveUnsupportedReason ?? undefined
-                    }
-                  >
-                    {savingWorkspaceImageKeys[actionKey] ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Download className="h-3.5 w-3.5" />
-                    )}
-                    <span>
-                      {savedPath
-                        ? "Open in Workspace"
-                        : canSaveToWorkspace
-                          ? "Save to Workspace"
-                          : "Save unavailable"}
-                    </span>
-                  </button>
-                ) : null}
+                <div className="flex items-center gap-2">
+                  {message.role === "assistant" && isImage ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void saveGeneratedImageToWorkspace(message, attachment, index);
+                      }}
+                      disabled={Boolean(savingWorkspaceImageKeys[actionKey]) || !canSaveToWorkspace}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-2 py-1 text-[11px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--system-gray-6)] disabled:cursor-not-allowed disabled:opacity-60"
+                      title={
+                        savedPath
+                          ? `/data/workspace/${savedPath}`
+                          : canSaveToWorkspace
+                            ? "Save image to /data/workspace/generated-images"
+                            : saveUnsupportedReason ?? undefined
+                      }
+                    >
+                      {savingWorkspaceImageKeys[actionKey] ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Download className="h-3.5 w-3.5" />
+                      )}
+                      <span>
+                        {savedPath
+                          ? "Open in Workspace"
+                          : canSaveToWorkspace
+                            ? "Save to Workspace"
+                            : "Save unavailable"}
+                      </span>
+                    </button>
+                  ) : null}
+                  {canOpenAttachment && !savedPath ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void open(attachment.previewUrl);
+                      }}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-2 py-1 text-[11px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--system-gray-6)]"
+                      title="Open attachment"
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                      <span>Open</span>
+                    </button>
+                  ) : null}
+                </div>
               </div>
             </div>
           );
@@ -5778,6 +6664,9 @@ export function Chat({
         ? imageDraftsBySession[currentSession] || ""
         : draftsBySession[currentSession] || ""
     : "";
+  const hasPendingTextLikeAttachments = pendingAttachments.some((attachment) =>
+    attachmentLooksTextLike(attachment),
+  );
 
   useEffect(() => {
     if (!textareaRef.current) return;
@@ -5826,7 +6715,7 @@ export function Chat({
         if (activeComposerMode === "shell") return;
         event.preventDefault();
         setDragActive(false);
-        void addImageAttachments(event.dataTransfer?.files);
+        void addAttachments(event.dataTransfer?.files);
       }}
     >
 
@@ -5910,18 +6799,15 @@ export function Chat({
                   key={attachment.id}
                   className="flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] px-2 py-1.5"
                 >
-                  {attachment.previewUrl ? (
-                    <img
-                      src={attachment.previewUrl}
-                      alt={attachment.fileName}
-                      className="w-8 h-8 rounded object-cover"
-                    />
-                  ) : (
-                    <div className="w-8 h-8 rounded bg-[var(--border-subtle)]" />
-                  )}
-                  <span className="text-xs text-[var(--text-secondary)] max-w-[180px] truncate">
-                    {attachment.fileName}
-                  </span>
+                  {renderPendingAttachmentPreview(attachment)}
+                  <div className="min-w-0">
+                    <div className="max-w-[180px] truncate text-xs text-[var(--text-secondary)]">
+                      {attachment.fileName}
+                    </div>
+                    <div className="text-[10px] uppercase tracking-wide text-[var(--text-tertiary)]">
+                      {pendingAttachmentStatusLabel(attachment)}
+                    </div>
+                  </div>
                   <button
                     onClick={() => removePendingAttachment(attachment.id)}
                     className="p-0.5 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
@@ -5933,14 +6819,87 @@ export function Chat({
               ))}
             </div>
           )}
+          {activeComposerMode === "chat" && hasPendingAudioAttachments ? (
+            <div className="flex flex-wrap items-center gap-2 px-1">
+              <span className="text-[11px] text-[var(--text-tertiary)]">
+                Audio uploads work with OpenClaw&apos;s built-in audio understanding.
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  void transcribePendingAudio();
+                }}
+                disabled={isLoading || isRecordingAudio || isTranscribingAudio}
+                className="rounded-full border border-[var(--border-default)] bg-[var(--bg-card)] px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isTranscribingAudio ? "Transcribing..." : "Transcribe audio"}
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setChatDraftFromAudioPrompt(
+                    "Transcribe the attached audio verbatim. Preserve speaker turns when possible, and mark unclear portions as [unclear].",
+                  )
+                }
+                disabled={isLoading || isRecordingAudio || isTranscribingAudio}
+                className="rounded-full border border-[var(--border-default)] bg-[var(--bg-card)] px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Draft transcript request
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void summarizePendingAudio();
+                }}
+                disabled={isLoading || isRecordingAudio || isTranscribingAudio || isSummarizingAudio}
+                className="rounded-full border border-[var(--border-default)] bg-[var(--bg-card)] px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isSummarizingAudio ? "Summarizing..." : "Summarize audio"}
+              </button>
+            </div>
+          ) : null}
+          {activeComposerMode === "chat" && activeDraft.trim() && pendingAttachments.length === 0 ? (
+            <div className="flex flex-wrap items-center gap-2 px-1">
+              <span className="text-[11px] text-[var(--text-tertiary)]">
+                Turn the current draft into generated speech.
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  void generateAudioFromDraft();
+                }}
+                disabled={isLoading || isRecordingAudio || isGeneratingAudio || isTranscribingAudio}
+                className="rounded-full border border-[var(--border-default)] bg-[var(--bg-card)] px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isGeneratingAudio ? "Generating audio..." : "Generate audio"}
+              </button>
+            </div>
+          ) : null}
+          {activeComposerMode === "chat" && hasPendingTextLikeAttachments ? (
+            <div className="flex flex-wrap items-center gap-2 px-1">
+              <span className="text-[11px] text-[var(--text-tertiary)]">
+                Attached file recognized as text for TTS.
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  void generateAudioFromTextAttachments();
+                }}
+                disabled={isLoading || isRecordingAudio || isGeneratingAudio || isTranscribingAudio}
+                className="rounded-full border border-[var(--border-default)] bg-[var(--bg-card)] px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-tertiary)] hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isGeneratingAudio ? "Generating audio..." : "Generate audio from file"}
+              </button>
+            </div>
+          ) : null}
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
+            accept={activeComposerMode === "image" ? "image/*" : "image/*,video/*,audio/*,.pdf,.txt,.md,.json,.csv"}
             multiple
             className="hidden"
             onChange={(event) => {
-              void addImageAttachments(event.target.files);
+              void addAttachments(event.target.files);
               event.currentTarget.value = "";
             }}
           />
@@ -6007,15 +6966,52 @@ export function Chat({
           </div>
           <div className="flex items-end gap-2">
             {activeComposerMode !== "shell" ? (
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isLoading}
-                className="btn-secondary !p-2.5"
-                title={activeComposerMode === "image" ? "Attach reference image" : "Attach image"}
-                aria-label={activeComposerMode === "image" ? "Attach reference image" : "Attach image"}
-              >
-                <Paperclip className="w-4 h-4" />
-              </button>
+              <>
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isLoading || isRecordingAudio || isGeneratingAudio || isTranscribingAudio}
+                  className="btn-secondary !p-2.5"
+                  title={activeComposerMode === "image" ? "Attach reference image" : "Attach file"}
+                  aria-label={activeComposerMode === "image" ? "Attach reference image" : "Attach file"}
+                >
+                  <Paperclip className="w-4 h-4" />
+                </button>
+                {activeComposerMode === "chat" ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (isRecordingAudio) {
+                        void stopAudioRecording();
+                      } else {
+                        void startAudioRecording();
+                      }
+                    }}
+                    disabled={isLoading || isGeneratingAudio || isTranscribingAudio || !browserMicSupported}
+                    className={clsx(
+                      "btn-secondary !p-2.5",
+                      !browserMicSupported && "opacity-50 cursor-not-allowed",
+                      isRecordingAudio && "!border-red-500/40 !bg-red-500/10 !text-red-400",
+                    )}
+                    title={
+                      !browserMicSupported
+                        ? "Mic recording is not available in this environment"
+                        : isRecordingAudio
+                          ? "Stop recording"
+                          : "Record audio"
+                    }
+                    aria-label={
+                      !browserMicSupported
+                        ? "Mic recording unavailable in this environment"
+                        : isRecordingAudio
+                          ? "Stop recording"
+                          : "Record audio"
+                    }
+                    aria-pressed={isRecordingAudio}
+                  >
+                    {isRecordingAudio ? <Square className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                  </button>
+                ) : null}
+              </>
             ) : null}
             <textarea
               ref={textareaRef}
@@ -6064,12 +7060,21 @@ export function Chat({
             />
             <button
               onClick={() => handleSend()}
-              disabled={(!activeDraft.trim() && pendingAttachments.length === 0) || isLoading}
+              disabled={(!activeDraft.trim() && pendingAttachments.length === 0) || isLoading || isRecordingAudio || isGeneratingAudio || isTranscribingAudio}
               className="btn-primary !p-2.5 !bg-[var(--purple-accent)] hover:!bg-[var(--purple-accent-hover)] !text-white"
             >
               <Send className="w-5 h-5" />
             </button>
           </div>
+          {isGeneratingAudio ? (
+            <div className="px-1 text-[11px] text-[var(--text-secondary)]">Generating audio…</div>
+          ) : null}
+          {isTranscribingAudio ? (
+            <div className="px-1 text-[11px] text-[var(--text-secondary)]">Transcribing audio…</div>
+          ) : null}
+          {isRecordingAudio ? (
+            <div className="px-1 text-[11px] text-red-400">Recording audio… press stop to attach it.</div>
+          ) : null}
         </div>
         {dragActive && activeComposerMode !== "shell" && (
           <div className="absolute inset-0 bg-[var(--border-default)] border-2 border-dashed border-white/50 flex items-center justify-center font-medium text-white">

@@ -13,6 +13,125 @@ export type MessageAttachment = {
   previewUrl: string;
 };
 
+function firstString(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed) return trimmed;
+    }
+  }
+  return null;
+}
+
+function inferMimeType(candidate: {
+  mimeType?: string | null;
+  fileName?: string | null;
+  previewUrl?: string | null;
+  blockType?: string | null;
+}): string {
+  const explicit = firstString(candidate.mimeType);
+  if (explicit) return explicit.toLowerCase();
+
+  const loweredType = firstString(candidate.blockType)?.toLowerCase() ?? "";
+  if (loweredType.includes("image")) return "image/*";
+  if (loweredType.includes("video")) return "video/*";
+  if (loweredType.includes("audio") || loweredType.includes("voice")) return "audio/*";
+
+  const source = firstString(candidate.fileName, candidate.previewUrl)?.toLowerCase() ?? "";
+  if (/\.(png|jpe?g|gif|webp|bmp|svg)(?:[?#].*)?$/.test(source)) return "image/*";
+  if (/\.(mp4|mov|webm|m4v|avi|mkv)(?:[?#].*)?$/.test(source)) return "video/*";
+  if (/\.(mp3|wav|m4a|aac|ogg|opus|flac)(?:[?#].*)?$/.test(source)) return "audio/*";
+  if (/\.pdf(?:[?#].*)?$/.test(source)) return "application/pdf";
+  return "application/octet-stream";
+}
+
+function normalizeMessageAttachment(input: unknown): MessageAttachment | null {
+  if (!input || typeof input !== "object") return null;
+  const record = input as Record<string, unknown>;
+  const previewUrl = firstString(
+    record.previewUrl,
+    record.preview_url,
+    record.url,
+    record.href,
+    record.src,
+    record.path,
+    record.mediaUrl,
+    record.media_url,
+    record.downloadUrl,
+    record.download_url,
+  );
+  if (!previewUrl) return null;
+  const fileName =
+    firstString(
+      record.fileName,
+      record.file_name,
+      record.name,
+      record.title,
+      record.label,
+    ) ?? "attachment";
+  const mimeType = inferMimeType({
+    mimeType: firstString(
+      record.mimeType,
+      record.mime_type,
+      record.contentType,
+      record.content_type,
+      record.mediaType,
+      record.media_type,
+    ),
+    fileName,
+    previewUrl,
+    blockType: firstString(record.type),
+  });
+  return { fileName, mimeType, previewUrl };
+}
+
+export function extractGatewayAttachments(message: GatewayMessage): MessageAttachment[] {
+  const collected: MessageAttachment[] = [];
+  const push = (attachment: MessageAttachment | null) => {
+    if (!attachment) return;
+    const key = `${attachment.previewUrl}::${attachment.mimeType}::${attachment.fileName}`;
+    if (collected.some((item) => `${item.previewUrl}::${item.mimeType}::${item.fileName}` === key)) {
+      return;
+    }
+    collected.push(attachment);
+  };
+
+  const directAttachments = Array.isArray(message?.attachments) ? message.attachments : [];
+  for (const attachment of directAttachments) {
+    push(normalizeMessageAttachment(attachment));
+  }
+
+  if (Array.isArray(message?.content)) {
+    for (const block of message.content) {
+      if (!block || typeof block !== "object") continue;
+      const record = block as Record<string, unknown>;
+      const type = firstString(record.type)?.toLowerCase() ?? "";
+      const hasMediaShape =
+        type.includes("image") ||
+        type.includes("video") ||
+        type.includes("audio") ||
+        type.includes("voice") ||
+        type.includes("file") ||
+        Boolean(
+          firstString(
+            record.previewUrl,
+            record.preview_url,
+            record.url,
+            record.href,
+            record.src,
+            record.path,
+            record.mediaUrl,
+            record.media_url,
+          ),
+        );
+      if (!hasMediaShape) continue;
+      push(normalizeMessageAttachment(record));
+    }
+  }
+
+  return collected;
+}
+
 export type CalendarEvent = {
   id?: string;
   summary?: string;
@@ -772,29 +891,42 @@ export function normalizeGatewayMessage(message: GatewayMessage, id: string): Me
   if (providerTag === "openclaw" || modelTag === "gateway-injected") {
     return null;
   }
+  const attachments = extractGatewayAttachments(message);
   const { text, hasText, hasNonText } = extractMessageText(message);
   const messageTimestamp = extractMessageTimestamp(message);
   if (roleRaw === "user") {
-    if (!hasText) return null;
+    if (!hasText && attachments.length === 0) return null;
     const normalized = normalizeUserContent(text, messageTimestamp);
-    if (!normalized.content) return null;
-    return { id, role: "user", content: normalized.content, sentAt: normalized.sentAt };
+    if (!normalized.content && attachments.length === 0) return null;
+    return {
+      id,
+      role: "user",
+      content: normalized.content,
+      sentAt: normalized.sentAt,
+      attachments: attachments.length > 0 ? attachments : undefined,
+    };
   }
   if (roleRaw === "assistant") {
     const assistantError = extractAssistantErrorFromGatewayMessage(message);
-    if (!hasText && !hasNonText && !assistantError) return null;
+    if (!hasText && !hasNonText && !assistantError && attachments.length === 0) return null;
     if (!hasText) {
-      if (!assistantError) return null;
+      if (!assistantError && attachments.length === 0) return null;
       return {
         id,
         role: "assistant",
-        content: assistantError,
+        content: assistantError || "",
         sentAt: messageTimestamp ?? Date.now(),
+        attachments: attachments.length > 0 ? attachments : undefined,
       };
     }
     const prepared = buildAssistantPayload(text);
     const resolvedContent = prepared.content || assistantError || "";
-    if (!resolvedContent && prepared.assistantPayload.events.length === 0 && prepared.assistantPayload.errors.length === 0) {
+    if (
+      !resolvedContent &&
+      prepared.assistantPayload.events.length === 0 &&
+      prepared.assistantPayload.errors.length === 0 &&
+      attachments.length === 0
+    ) {
       return null;
     }
     return {
@@ -803,6 +935,7 @@ export function normalizeGatewayMessage(message: GatewayMessage, id: string): Me
       content: resolvedContent,
       assistantPayload: prepared.assistantPayload,
       sentAt: messageTimestamp,
+      attachments: attachments.length > 0 ? attachments : undefined,
     };
   }
   if (roleRaw === "toolresult" || roleRaw === "tool_result" || roleRaw === "tool") {

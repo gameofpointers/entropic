@@ -14,9 +14,13 @@ import {
 } from "../lib/profile";
 import { useAuth } from "../contexts/AuthContext";
 import {
+  LOCAL_AUDIO_UNDERSTANDING_MODELS,
   LOCAL_IMAGE_GENERATION_MODELS,
+  LOCAL_TEXT_TO_SPEECH_MODELS,
   ModelSelector,
+  PROXY_AUDIO_UNDERSTANDING_MODELS,
   PROXY_IMAGE_GENERATION_MODELS,
+  PROXY_TEXT_TO_SPEECH_MODELS,
 } from "../components/ModelSelector";
 import { WALLPAPERS, DEFAULT_WALLPAPER_ID, getWallpaperById } from "../lib/wallpapers";
 import { getProxyUrl, signOut as authSignOut } from "../lib/auth";
@@ -57,8 +61,12 @@ type Props = {
   codeModel: string;
   imageModel: string;
   imageGenerationModel: string;
+  textToSpeechModel: string;
+  audioUnderstandingModel: string;
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
+  onTextToSpeechModelChange: (model: string) => void;
+  onAudioUnderstandingModelChange: (model: string) => void;
   onImageModelChange: (model: string) => void;
 };
 
@@ -262,8 +270,12 @@ export function Settings({
   codeModel,
   imageModel,
   imageGenerationModel,
+  textToSpeechModel,
+  audioUnderstandingModel,
   onCodeModelChange,
   onImageGenerationModelChange,
+  onTextToSpeechModelChange,
+  onAudioUnderstandingModelChange,
   onImageModelChange,
 }: Props) {
   const cachedWarmState = getCachedSettingsWarmState();
@@ -1381,6 +1393,32 @@ export function Settings({
                   />
                 </div>
               </SettingsRow>
+              <SettingsRow
+                label="Text to Speech Model"
+                icon={Sparkles}
+                description="Used to turn chat draft text into generated audio."
+              >
+                <div className="w-80">
+                  <ModelSelector
+                    selectedModel={textToSpeechModel}
+                    onModelChange={onTextToSpeechModelChange}
+                    models={PROXY_TEXT_TO_SPEECH_MODELS}
+                  />
+                </div>
+              </SettingsRow>
+              <SettingsRow
+                label="Audio Understanding Model"
+                icon={Sparkles}
+                description="Used to transcribe and understand uploaded audio in chat."
+              >
+                <div className="w-80">
+                  <ModelSelector
+                    selectedModel={audioUnderstandingModel}
+                    onModelChange={onAudioUnderstandingModelChange}
+                    models={PROXY_AUDIO_UNDERSTANDING_MODELS}
+                  />
+                </div>
+              </SettingsRow>
             </>
           )}
           {useLocalKeys && !authMetaLoading && localImageGenerationProviders.length > 0 && (
@@ -1391,6 +1429,34 @@ export function Settings({
                     selectedModel={imageGenerationModel}
                     onModelChange={onImageGenerationModelChange}
                     models={LOCAL_IMAGE_GENERATION_MODELS}
+                    connectedProviders={localImageGenerationProviders}
+                  />
+                </div>
+              </SettingsRow>
+              <SettingsRow
+                label="Text to Speech Model"
+                icon={Sparkles}
+                description="Used to turn chat draft text into generated audio."
+              >
+                <div className="w-80">
+                  <ModelSelector
+                    selectedModel={textToSpeechModel}
+                    onModelChange={onTextToSpeechModelChange}
+                    models={LOCAL_TEXT_TO_SPEECH_MODELS}
+                    connectedProviders={localImageGenerationProviders}
+                  />
+                </div>
+              </SettingsRow>
+              <SettingsRow
+                label="Audio Understanding Model"
+                icon={Sparkles}
+                description="Used to transcribe and understand uploaded audio in chat."
+              >
+                <div className="w-80">
+                  <ModelSelector
+                    selectedModel={audioUnderstandingModel}
+                    onModelChange={onAudioUnderstandingModelChange}
+                    models={LOCAL_AUDIO_UNDERSTANDING_MODELS}
                     connectedProviders={localImageGenerationProviders}
                   />
                 </div>

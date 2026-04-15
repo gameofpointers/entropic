@@ -102,8 +102,12 @@ type Props = {
   codeModel: string;
   imageModel: string;
   imageGenerationModel: string;
+  textToSpeechModel: string;
+  audioUnderstandingModel: string;
   onCodeModelChange: (model: string) => void;
   onImageGenerationModelChange: (model: string) => void;
+  onTextToSpeechModelChange: (model: string) => void;
+  onAudioUnderstandingModelChange: (model: string) => void;
   onImageModelChange: (model: string) => void;
 };
 type ViewMode = "grid" | "list";
@@ -1136,8 +1140,12 @@ export function Files({
   codeModel,
   imageModel,
   imageGenerationModel,
+  textToSpeechModel,
+  audioUnderstandingModel,
   onCodeModelChange,
   onImageGenerationModelChange,
+  onTextToSpeechModelChange,
+  onAudioUnderstandingModelChange,
   onImageModelChange,
 }: Props) {
   const initialDesktopWarmCache = useMemo(() => readDesktopWarmCache(), []);
@@ -4841,6 +4849,8 @@ export function Files({
                       onModelChange={onModelChange}
                       imageModel={imageModel}
                       imageGenerationModel={imageGenerationModel}
+                      textToSpeechModel={textToSpeechModel}
+                      audioUnderstandingModel={audioUnderstandingModel}
                       integrationsSyncing={integrationsSyncing}
                       integrationsMissing={integrationsMissing}
                       onNavigate={handleDesktopChatNavigate}
@@ -5465,8 +5475,12 @@ export function Files({
                   codeModel={codeModel}
                   imageModel={imageModel}
                   imageGenerationModel={imageGenerationModel}
+                  textToSpeechModel={textToSpeechModel}
+                  audioUnderstandingModel={audioUnderstandingModel}
                   onCodeModelChange={onCodeModelChange}
                   onImageGenerationModelChange={onImageGenerationModelChange}
+                  onTextToSpeechModelChange={onTextToSpeechModelChange}
+                  onAudioUnderstandingModelChange={onAudioUnderstandingModelChange}
                   onImageModelChange={onImageModelChange}
                 />
               </Suspense>

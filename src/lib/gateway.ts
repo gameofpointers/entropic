@@ -377,18 +377,47 @@ export class GatewayClient {
         // Respond with connect RPC
         this.log("Received challenge, authenticating...");
         const role = "operator";
+        const clientId = "openclaw-control-ui";
+        const clientMode = "ui";
+        const scopes = [
+          "operator.admin",
+          "operator.read",
+          "operator.write",
+          "operator.approvals",
+          "operator.pairing",
+        ];
         let deviceIdentity: GatewayDeviceIdentity | null = null;
         let canFallbackToShared = false;
+        let authToken = this.token?.trim() || undefined;
+        let device:
+          | {
+              id: string;
+              publicKey: string;
+              signature: string;
+              signedAt: number;
+              nonce: string;
+            }
+          | undefined;
+        const sendConnectRequest = () =>
+          this.rpc("connect", {
+            minProtocol: 3,
+            maxProtocol: 3,
+            client: {
+              id: clientId,
+              displayName: "Entropic Desktop",
+              version: "0.1.0",
+              platform: "desktop",
+              mode: clientMode,
+            },
+            role,
+            scopes,
+            auth: authToken ? { token: authToken } : undefined,
+            device,
+            caps: [],
+            userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "Entropic Desktop",
+            locale: typeof navigator !== "undefined" ? navigator.language : "en-US",
+          });
         try {
-          const clientId = "openclaw-control-ui";
-          const clientMode = "ui";
-          const scopes = [
-            "operator.admin",
-            "operator.read",
-            "operator.write",
-            "operator.approvals",
-            "operator.pairing",
-          ];
           const nonce =
             frame.payload && typeof frame.payload === "object" && "nonce" in frame.payload
               ? String((frame.payload as { nonce?: unknown }).nonce ?? "")
@@ -399,23 +428,15 @@ export class GatewayClient {
           // WebCrypto availability.
           const canUseTauriDeviceIdentity =
             typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-          let device: {
-            id: string;
-            publicKey: string;
-            signature: string;
-            signedAt: number;
-            nonce: string;
-          } | undefined;
           const explicitGatewayToken = this.token?.trim() || undefined;
-          let authToken = explicitGatewayToken;
 
           if (canUseTauriDeviceIdentity) {
             deviceIdentity = await loadGatewayDeviceIdentity();
             const storedToken =
               loadDeviceAuthToken({
-              deviceId: deviceIdentity.device_id,
-              role,
-            })?.token?.trim() || undefined;
+                deviceId: deviceIdentity.device_id,
+                role,
+              })?.token?.trim() || undefined;
             // Match current OpenClaw control-ui behavior: prefer the shared gateway
             // token when available, and only fall back to a stored device token when
             // no shared token exists.
@@ -443,24 +464,7 @@ export class GatewayClient {
             };
           }
 
-          await this.rpc("connect", {
-            minProtocol: 3,
-            maxProtocol: 3,
-            client: {
-              id: clientId,
-              displayName: "Entropic Desktop",
-              version: "0.1.0",
-              platform: "desktop",
-              mode: clientMode,
-            },
-            role,
-            scopes,
-            auth: authToken ? { token: authToken } : undefined,
-            device,
-            caps: [],
-            userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "Entropic Desktop",
-            locale: typeof navigator !== "undefined" ? navigator.language : "en-US",
-          });
+          await sendConnectRequest();
           this.log("Connected successfully");
           this.authenticated = true;
           this.startKeepalive();
@@ -480,6 +484,9 @@ export class GatewayClient {
             try {
               await invoke("approve_gateway_device_pairing", { requestId: pairingRequestId });
               this.log("Approved local gateway pairing request", pairingRequestId);
+              this.log("Restarting websocket after pairing approval");
+              this.ws?.close(1000, "pairing-approved");
+              return;
             } catch (approveError) {
               this.logError("Failed to auto-approve gateway pairing:", approveError);
             }
