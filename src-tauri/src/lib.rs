@@ -169,6 +169,7 @@ pub fn run() {
             commands::start_gateway_with_proxy,
             commands::stop_gateway,
             commands::restart_gateway,
+            commands::sync_hosted_integration_tools,
             commands::apply_gateway_mutation,
             commands::update_gateway_model,
             commands::get_app_bootstrap_state,

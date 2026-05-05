@@ -500,20 +500,69 @@ export async function hasPendingIntegrationImports(): Promise<boolean> {
   return Object.keys(pending).length > 0;
 }
 
+// Providers the Rust-side sync understands (hosted Composio-backed with
+// agent tools currently wired up). Other hosted providers exist in
+// HOSTED_OAUTH_INTEGRATION_PROVIDERS but have no agent tools yet, so
+// sending them would be a no-op.
+const SYNCABLE_HOSTED_TOOL_PROVIDERS = new Set<IntegrationProvider>([
+  "asana",
+  "onedrive",
+  "microsoft_teams",
+  "outlook",
+  "google_email",
+  "google_calendar",
+]);
+
+export type SyncHostedIntegrationToolsResult = {
+  providers: string[];
+  gatewayRestarted: boolean;
+};
+
+/**
+ * Push the current set of connected hosted integrations down to the Rust
+ * side so OpenClaw's tool allowlist is rewritten and the gateway is
+ * restarted. Returns whether the gateway was actually restarted (false if
+ * the gateway wasn't running, in which case the new allowlist applies on
+ * the next start).
+ */
+export async function syncHostedIntegrationTools(
+  integrations: Integration[]
+): Promise<SyncHostedIntegrationToolsResult> {
+  const providers = integrations
+    .filter((integration) => integration.connected && !integration.stale)
+    .map((integration) => integration.provider)
+    .filter((provider) => SYNCABLE_HOSTED_TOOL_PROVIDERS.has(provider));
+  return invoke<SyncHostedIntegrationToolsResult>(
+    "sync_hosted_integration_tools",
+    { providers }
+  );
+}
+
 export async function syncAllIntegrationsToGateway(): Promise<string[]> {
+  const synced = new Set<string>();
+
+  try {
+    const integrations = await getIntegrations({ force: true });
+    const hosted = await syncHostedIntegrationTools(integrations);
+    for (const provider of hosted.providers) {
+      synced.add(provider);
+    }
+  } catch (err) {
+    console.warn("Failed to sync hosted integrations to OpenClaw:", err);
+  }
+
   const records = await listIntegrationSecrets<StoredIntegration>();
-  const synced: string[] = [];
   for (const record of records) {
     if (!record?.access_token) continue;
     if (!OPENCLAW_SYNC_PROVIDERS.has(record.provider)) continue;
     try {
       await syncIntegrationToGateway(record.provider);
-      synced.push(record.provider);
+      synced.add(record.provider);
     } catch (err) {
       console.warn(`Failed to sync ${record.provider} to OpenClaw:`, err);
     }
   }
-  return synced;
+  return Array.from(synced);
 }
 
 export async function getCachedIntegrationProviders(): Promise<string[]> {

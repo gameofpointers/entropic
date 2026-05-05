@@ -7058,18 +7058,74 @@ fn container_path_exists(path: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn container_plugin_exists(plugin_id: &str) -> bool {
-    if container_path_exists(&format!("/app/extensions/{}", plugin_id)) {
-        return true;
-    }
+fn container_openclaw_package_dir(plugin_id: &str) -> Option<String> {
+    let mut candidates = Vec::new();
+    candidates.push(format!("/app/extensions/{}", plugin_id));
+    candidates.push(format!("/data/.openclaw/extensions/{}", plugin_id));
     if let Some(skills_root) = read_container_env("ENTROPIC_SKILLS_PATH") {
         let base = format!("{}/{}", skills_root.trim_end_matches('/'), plugin_id);
-        let current = format!("{}/current", base);
-        if container_path_exists(&current) || container_path_exists(&base) {
-            return true;
+        candidates.push(format!("{}/current", base));
+        candidates.push(base);
+    }
+
+    for candidate in candidates {
+        if !container_path_exists(&candidate) {
+            continue;
+        }
+        let package_path = format!("{}/package.json", candidate.trim_end_matches('/'));
+        let Some(raw) = read_container_file(&package_path) else {
+            continue;
+        };
+        let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let has_extensions = pkg
+            .get("openclaw")
+            .and_then(|value| value.get("extensions"))
+            .and_then(|value| value.as_array())
+            .is_some_and(|entries| !entries.is_empty());
+        if has_extensions {
+            return Some(candidate);
         }
     }
-    false
+
+    None
+}
+
+fn container_plugin_exists(plugin_id: &str) -> bool {
+    container_openclaw_package_dir(plugin_id).is_some()
+}
+
+fn sync_config_plugin_override(plugin_id: &str) -> Result<Option<String>, String> {
+    let Some(source_dir) = container_openclaw_package_dir(plugin_id) else {
+        return Ok(None);
+    };
+
+    // When a plugin also exists in the bundled runtime, copy the managed source
+    // tree into the writable config extensions root and point plugins.load.paths
+    // there so OpenClaw prefers it over the stale bundled copy.
+    if !bundled_plugin_entry_exists(plugin_id) {
+        return Ok(std::path::Path::new(&source_dir)
+            .parent()
+            .map(|parent| parent.to_string_lossy().to_string()));
+    }
+
+    let config_root = "/data/.openclaw/extensions";
+    let target_dir = format!("{}/{}", config_root, plugin_id);
+    docker_exec_output(&[
+        "exec",
+        OPENCLAW_CONTAINER,
+        "sh",
+        "-lc",
+        &format!(
+            "mkdir -p -- {root} && rm -rf -- {target} && mkdir -p -- {target} && cp -a -- {source}/. {target}",
+            root = sh_single_quote(config_root),
+            target = sh_single_quote(&target_dir),
+            source = sh_single_quote(source_dir.trim_end_matches('/')),
+        ),
+    ])
+    .map_err(|e| format!("Failed to sync config plugin override for {}: {}", plugin_id, e))?;
+    Ok(Some(config_root.to_string()))
 }
 
 fn resolve_managed_plugin_id(primary: &'static str, legacy: &'static str) -> Option<&'static str> {
@@ -7118,6 +7174,105 @@ fn capability_enabled(capabilities: &[CapabilityState], id: &str, default: bool)
         .find(|cap| cap.id == id)
         .map(|cap| cap.enabled)
         .unwrap_or(default)
+}
+
+fn hosted_integration_tools_by_provider() -> &'static [(&'static str, &'static [&'static str])] {
+    &[
+        (
+            "asana",
+            &[
+                "asana_workspaces_list",
+                "asana_teams_list",
+                "asana_projects_list",
+                "asana_project_get",
+                "asana_project_create",
+                "asana_project_update",
+                "asana_sections_list",
+                "asana_section_create",
+                "asana_tasks_list",
+                "asana_tasks_search",
+                "asana_task_get",
+                "asana_task_create",
+                "asana_task_update",
+                "asana_task_move",
+                "asana_task_comment",
+            ],
+        ),
+        (
+            "outlook",
+            &[
+                "outlook_mail_folders_list",
+                "outlook_messages_list",
+                "outlook_message_get",
+                "outlook_message_send",
+                "outlook_calendars_list",
+                "outlook_events_list",
+                "outlook_event_create",
+            ],
+        ),
+        (
+            "onedrive",
+            &[
+                "onedrive_items_list",
+                "onedrive_items_search",
+                "onedrive_item_get",
+                "onedrive_item_resolve_path",
+                "onedrive_item_content_get",
+                "onedrive_item_download",
+                "onedrive_item_share",
+                "onedrive_folder_create",
+                "onedrive_text_file_upload",
+                "onedrive_base64_file_upload",
+                "onedrive_docx_create",
+                "onedrive_item_move",
+            ],
+        ),
+        (
+            "microsoft_teams",
+            &[
+                "microsoft_teams_list",
+                "microsoft_teams_channels_list",
+                "microsoft_teams_channel_get",
+                "microsoft_teams_channel_messages_list",
+                "microsoft_teams_channel_message_send",
+            ],
+        ),
+        (
+            "google_email",
+            &["gmail_search", "gmail_get", "gmail_send", "gmail_draft"],
+        ),
+        (
+            "google_calendar",
+            &["calendar_list", "calendar_create"],
+        ),
+    ]
+}
+
+fn hosted_integration_tools_match_config(connected_providers: &[String]) -> bool {
+    let cfg = read_openclaw_config();
+    let allow = cfg
+        .pointer("/tools/alsoAllow")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let allow_set: std::collections::HashSet<String> = allow
+        .iter()
+        .filter_map(|value| value.as_str().map(ToString::to_string))
+        .collect();
+
+    let connected: std::collections::HashSet<&str> =
+        connected_providers.iter().map(|provider| provider.as_str()).collect();
+
+    for (provider, tools) in hosted_integration_tools_by_provider() {
+        let should_exist = connected.contains(provider);
+        for tool in *tools {
+            if allow_set.contains(*tool) != should_exist {
+                return false;
+            }
+        }
+    }
+
+    true
 }
 
 fn write_openclaw_config_if_changed(value: &serde_json::Value) -> Result<bool, String> {
@@ -7369,8 +7524,9 @@ fn gateway_post_start_reconcile_reasons(
 
     let current_telegram_enabled = cfg
         .pointer("/channels/telegram/enabled")
-        .and_then(|value| value.as_bool());
-    if current_telegram_enabled != Some(settings.telegram_enabled) {
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if current_telegram_enabled != settings.telegram_enabled {
         reasons.push("telegram enabled mismatch".to_string());
     }
 
@@ -9078,14 +9234,12 @@ Use it for durable decisions, preferences, and facts that should persist across 
         );
     }
 
-    // Ensure optional plugin tools are allowed without restricting core tools.
-    const ENTROPIC_INTEGRATION_TOOLS: [&str; 5] = [
-        "calendar_list",
-        "calendar_create",
-        "gmail_search",
-        "gmail_get",
-        "gmail_send",
-    ];
+    // Hosted integration tools are registered in the openclaw plugin as
+    // `optional: true`, so they are invisible to the agent until their
+    // name appears in `tools.alsoAllow`. We maintain a provider→tool-names
+    // map here so we can flip only the tools for currently-connected
+    // providers on, keeping the agent's tool list focused on integrations
+    // the user can actually use.
     const ENTROPIC_X_TOOLS: [&str; 4] = ["x_search", "x_profile", "x_thread", "x_user_tweets"];
     const ENTROPIC_CORE_TOOLS: [&str; 1] = ["image"];
 
@@ -9126,25 +9280,8 @@ Use it for durable decisions, preferences, and facts that should persist across 
         }
     }
 
-    let resolve_managed_plugin_path = |plugin_id: &str| -> Option<String> {
-        if let Some(skills_root) = read_container_env("ENTROPIC_SKILLS_PATH") {
-            let base = format!("{}/{}", skills_root.trim_end_matches('/'), plugin_id);
-            let current = format!("{}/current", base);
-            let candidate = if container_path_exists(&current) {
-                current
-            } else {
-                base
-            };
-            if container_path_exists(&candidate) {
-                return Some(candidate);
-            }
-        }
-        let bundled_path = format!("/app/extensions/{}", plugin_id);
-        if container_path_exists(&bundled_path) {
-            return Some(bundled_path);
-        }
-        None
-    };
+    let resolve_managed_plugin_load_root =
+        |plugin_id: &str| sync_config_plugin_override(plugin_id).ok().flatten();
     let ensure_plugin_load_path = |cfg: &mut serde_json::Value, path: String| {
         let load_paths = cfg
             .pointer_mut("/plugins/load/paths")
@@ -9163,7 +9300,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
         }
     };
     if container_plugin_exists("lossless-claw") && !bundled_plugin_entry_exists("lossless-claw") {
-        if let Some(path) = resolve_managed_plugin_path("lossless-claw") {
+        if let Some(path) = resolve_managed_plugin_load_root("lossless-claw") {
             ensure_plugin_load_path(&mut cfg, path);
         }
     }
@@ -9172,6 +9309,12 @@ Use it for durable decisions, preferences, and facts that should persist across 
     // otherwise OpenClaw warns that the config plugin overrides the bundled one.
     if container_plugin_exists("lossless-claw") && bundled_plugin_entry_exists("lossless-claw") {
         remove_bundled_plugin_load_paths(&mut cfg, "lossless-claw");
+    }
+
+    if let Some(plugin_id) = integrations_plugin_id {
+        if let Some(path) = resolve_managed_plugin_load_root(plugin_id) {
+            ensure_plugin_load_path(&mut cfg, path);
+        }
     }
 
     // Enable x plugin if it exists (entropic-x or legacy nova-x).
@@ -9189,7 +9332,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
         if bundled_plugin_entry_exists(plugin_id) {
             remove_bundled_plugin_load_paths(&mut cfg, plugin_id);
         }
-        if let Some(path) = resolve_managed_plugin_path(plugin_id) {
+        if let Some(path) = resolve_managed_plugin_load_root(plugin_id) {
             ensure_plugin_load_path(&mut cfg, path);
         }
     }
@@ -9205,7 +9348,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
         if bundled_plugin_entry_exists("entropic-quai-builder") {
             remove_bundled_plugin_load_paths(&mut cfg, "entropic-quai-builder");
         }
-        if let Some(path) = resolve_managed_plugin_path("entropic-quai-builder") {
+        if let Some(path) = resolve_managed_plugin_load_root("entropic-quai-builder") {
             ensure_plugin_load_path(&mut cfg, path);
         }
     }
@@ -9237,7 +9380,7 @@ Use it for durable decisions, preferences, and facts that should persist across 
         if browser_enabled {
             if bundled_plugin_entry_exists("browser") {
                 remove_bundled_plugin_load_paths(&mut cfg, "browser");
-            } else if let Some(path) = resolve_managed_plugin_path("browser") {
+            } else if let Some(path) = resolve_managed_plugin_load_root("browser") {
                 ensure_plugin_load_path(&mut cfg, path);
             }
         }
@@ -9249,20 +9392,36 @@ Use it for durable decisions, preferences, and facts that should persist across 
             *allow_entry = serde_json::json!([]);
         }
         if let Some(list) = allow_entry.as_array_mut() {
+            // Collect every tool name we might ever manage so we can
+            // deterministically strip them before re-adding the current set.
+            let mut managed_tool_names: std::collections::HashSet<&str> =
+                std::collections::HashSet::new();
+            for (_, tools) in hosted_integration_tools_by_provider() {
+                for tool in *tools {
+                    managed_tool_names.insert(*tool);
+                }
+            }
             list.retain(|v| {
                 v.as_str()
                     .map(|s| {
-                        s != "browser" && s != "entropic-integrations" && s != "nova-integrations"
+                        s != "browser"
+                            && s != "entropic-integrations"
+                            && s != "nova-integrations"
+                            && !ENTROPIC_X_TOOLS.contains(&s)
+                            && !managed_tool_names.contains(s)
                     })
                     .unwrap_or(true)
             });
             if browser_enabled {
                 list.push(serde_json::json!("browser"));
             }
-            for tool in ENTROPIC_INTEGRATION_TOOLS {
-                let exists = list.iter().any(|v| v.as_str() == Some(tool));
-                if !exists {
-                    list.push(serde_json::json!(tool));
+            let connected_providers = load_connected_hosted_integrations(app);
+            for (provider, tools) in hosted_integration_tools_by_provider() {
+                if !connected_providers.iter().any(|p| p == *provider) {
+                    continue;
+                }
+                for tool in *tools {
+                    list.push(serde_json::json!(*tool));
                 }
             }
             if has_x_plugin {
@@ -9390,10 +9549,18 @@ Use it for durable decisions, preferences, and facts that should persist across 
             serde_json::json!(settings.telegram_enabled),
         );
         if telegram_configured {
-            if let Some(path) = resolve_managed_plugin_path("telegram") {
+            if let Some(path) = resolve_managed_plugin_load_root("telegram") {
                 ensure_plugin_load_path(&mut cfg, path);
             }
         }
+    }
+
+    if let Some(list) = cfg
+        .pointer_mut("/plugins/load/paths")
+        .and_then(|value| value.as_array_mut())
+    {
+        list.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+        list.dedup_by(|a, b| a == b);
     }
 
     // Set thinking level from ENTROPIC_THINKING_LEVEL env var (set by start_gateway from model suffix)
@@ -10532,6 +10699,9 @@ async fn ensure_proxy_backend_reachable(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<(), String> {
+    let proxy_base = read_container_env("ENTROPIC_PROXY_BASE_URL")
+        .ok_or_else(|| "Proxy sandbox is missing ENTROPIC_PROXY_BASE_URL".to_string())?;
+    let host_proxy_base = resolve_host_proxy_base(&proxy_base)?;
     let initial_error = match probe_proxy_backend_from_gateway_container() {
         Ok(()) => return Ok(()),
         Err(err) => err,
@@ -10539,8 +10709,8 @@ async fn ensure_proxy_backend_reachable(
 
     if let Err(host_error) = probe_proxy_backend_from_host() {
         return Err(append_colima_runtime_hint(format!(
-            "{} host proxy backend is not reachable. {}. The sandbox probe also failed: {}. Ensure the managed dev server is still running on localhost:5174 (for example via `pnpm dev:runtime:up:managed`).",
-            label, host_error, initial_error
+            "{} host proxy backend is not reachable at {}. {}. The sandbox probe also failed: {}.",
+            label, host_proxy_base, host_error, initial_error
         )));
     }
 
@@ -10572,8 +10742,8 @@ async fn ensure_proxy_backend_reachable(
         Err(final_error) => {
             if let Err(host_error) = probe_proxy_backend_from_host() {
                 return Err(append_colima_runtime_hint(format!(
-                    "{} host proxy backend became unreachable after automatic network repair. {}. Initial sandbox probe failure: {}. Final sandbox probe failure: {}. Ensure the managed dev server is still running on localhost:5174 (for example via `pnpm dev:runtime:up:managed`).",
-                    label, host_error, initial_error, final_error
+                    "{} host proxy backend became unreachable after automatic network repair at {}. {}. Initial sandbox probe failure: {}. Final sandbox probe failure: {}.",
+                    label, host_proxy_base, host_error, initial_error, final_error
                 )));
             }
 
@@ -10764,6 +10934,39 @@ fn desktop_settings_path(app: &AppHandle) -> Result<PathBuf, String> {
         .app_data_dir()
         .map(|dir| dir.join("entropic-settings.json"))
         .map_err(|_| "Failed to resolve app data dir".to_string())
+}
+
+fn connected_hosted_integrations_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|dir| dir.join("entropic-connected-integrations.json"))
+}
+
+fn load_connected_hosted_integrations(app: &AppHandle) -> Vec<String> {
+    let Some(path) = connected_hosted_integrations_path(app) else {
+        return Vec::new();
+    };
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default()
+}
+
+fn save_connected_hosted_integrations(
+    app: &AppHandle,
+    providers: &[String],
+) -> Result<(), String> {
+    let path = connected_hosted_integrations_path(app)
+        .ok_or_else(|| "Failed to resolve app data dir".to_string())?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create config dir: {e}"))?;
+    }
+    let payload = serde_json::to_string_pretty(providers)
+        .map_err(|e| format!("Failed to serialize providers: {e}"))?;
+    fs::write(&path, payload)
+        .map_err(|e| format!("Failed to write connected integrations: {e}"))
 }
 
 fn load_desktop_settings_snapshot(app: &AppHandle) -> DesktopSettingsSnapshot {
@@ -12262,6 +12465,75 @@ pub async fn restart_gateway(
     model: Option<String>,
 ) -> Result<(), String> {
     restart_gateway_inner(&app, &state, model).await.map(|_| ())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncHostedIntegrationToolsResult {
+    pub providers: Vec<String>,
+    pub gateway_restarted: bool,
+}
+
+/// Persist the set of hosted integration providers the user is connected to,
+/// rewrite the OpenClaw tool allowlist to match, and restart the gateway so
+/// the agent sees the new tool set on its next turn. Intended to be called
+/// by the frontend after a successful connect or disconnect.
+#[tauri::command]
+pub async fn sync_hosted_integration_tools(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    providers: Vec<String>,
+) -> Result<SyncHostedIntegrationToolsResult, String> {
+    // Normalize: trim, dedupe, drop empties. Keep order stable for readability.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut normalized: Vec<String> = Vec::new();
+    for raw in providers {
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if seen.insert(trimmed.clone()) {
+            normalized.push(trimmed);
+        }
+    }
+
+    // Compare against the stored list so we can avoid a disruptive gateway
+    // restart when nothing has actually changed (e.g. on app startup when
+    // we re-push the current provider list to keep state consistent).
+    let previous: std::collections::BTreeSet<String> =
+        load_connected_hosted_integrations(&app).into_iter().collect();
+    let next: std::collections::BTreeSet<String> = normalized.iter().cloned().collect();
+    let changed = previous != next;
+
+    save_connected_hosted_integrations(&app, &normalized)?;
+    let config_matches = hosted_integration_tools_match_config(&normalized);
+    if !changed && config_matches {
+        return Ok(SyncHostedIntegrationToolsResult {
+            providers: normalized,
+            gateway_restarted: false,
+        });
+    }
+
+    // The `apply_agent_settings` fingerprint cache doesn't know about the
+    // connected-integrations file, so clear it to guarantee the next call
+    // actually rewrites openclaw.json with the updated tool allowlist.
+    clear_applied_agent_settings_fingerprint()?;
+    apply_agent_settings(&app, &state)?;
+
+    // Only restart the gateway if (a) the allowed provider set changed and
+    // (b) a gateway is actually running. Otherwise the updated config
+    // takes effect on the next gateway start.
+    let should_restart = changed
+        && gateway_container_exists(true)
+        && current_gateway_launch_mode() != "stopped";
+    if should_restart {
+        restart_gateway_inner(&app, &state, None).await?;
+    }
+
+    Ok(SyncHostedIntegrationToolsResult {
+        providers: normalized,
+        gateway_restarted: should_restart,
+    })
 }
 
 #[tauri::command]

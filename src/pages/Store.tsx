@@ -41,6 +41,7 @@ import {
   disconnectIntegration,
   syncIntegrationToGateway,
   removeIntegrationFromGateway,
+  syncHostedIntegrationTools,
   usesBrowserOAuthLaunch,
   Integration,
   IntegrationProvider,
@@ -610,7 +611,9 @@ export function Store({
   const [integrationsLoaded, setIntegrationsLoaded] = useState(false);
   const [connecting, setConnecting] = useState<string | null>(null);
   const [setupProvider, setSetupProvider] = useState<IntegrationProvider | null>(null);
-  const [setupStage, setSetupStage] = useState<"authorizing" | "syncing">("authorizing");
+  const [setupStage, setSetupStage] = useState<
+    "authorizing" | "syncing" | "restarting"
+  >("authorizing");
   const [setupTimedOut, setSetupTimedOut] = useState(false);
   const [setupLaunchUrl, setSetupLaunchUrl] = useState<string | null>(null);
   const [setupError, setSetupError] = useState<string | null>(null);
@@ -646,6 +649,7 @@ export function Store({
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const syncedIntegrationsRef = useRef<Set<string>>(new Set());
+  const hostedToolSyncRef = useRef<Set<string>>(new Set());
   const [justInstalledSlugs, setJustInstalledSlugs] = useState<Set<string>>(new Set(cachedJustInstalledSlugs));
   const clawhubRequestSeqRef = useRef(0);
 
@@ -867,8 +871,23 @@ export function Store({
           syncedIntegrationsRef.current.delete(id);
         }
       }
+      for (const id of Array.from(hostedToolSyncRef.current)) {
+        if (!connectedIds.has(id as IntegrationProvider)) {
+          hostedToolSyncRef.current.delete(id);
+        }
+      }
       syncConnectedIntegrations(list).catch((err) => {
         console.warn("Failed to sync integrations:", err);
+      });
+      // Push the current connected hosted providers down to the Rust side
+      // so OpenClaw's tool allowlist stays in sync across app restarts. The
+      // Rust side is a no-op (no gateway restart) when the list is
+      // unchanged from what's persisted.
+      syncHostedIntegrationTools(list).catch((err) => {
+        console.warn(
+          "[Store] Failed to push hosted integration tools on load:",
+          err
+        );
       });
     } catch (err) {
       console.error("Failed to load integrations:", err);
@@ -951,6 +970,34 @@ export function Store({
     }
     if (SYNC_REQUIRED.has(setupProvider) && !syncedIntegrationsRef.current.has(setupProvider)) {
       setSetupStage("syncing");
+      return;
+    }
+    // A hosted-OAuth provider just flipped to connected. Push the updated
+    // set of connected providers to the Rust side so the agent's allowlist
+    // is refreshed and the gateway restarts — but only once per setup
+    // session to avoid double-restarts.
+    if (
+      usesBrowserOAuthLaunch(setupProvider) &&
+      !hostedToolSyncRef.current.has(setupProvider)
+    ) {
+      hostedToolSyncRef.current.add(setupProvider);
+      setSetupStage("restarting");
+      void (async () => {
+        try {
+          await syncHostedIntegrationTools(integrations);
+        } catch (err) {
+          console.warn(
+            "[Store] Failed to sync hosted integration tools on connect:",
+            err
+          );
+        } finally {
+          setSetupProvider(null);
+          setSetupTimedOut(false);
+          setSetupLaunchUrl(null);
+          setSetupError(null);
+          setSetupVerifying(false);
+        }
+      })();
       return;
     }
     setSetupProvider(null);
@@ -1105,6 +1152,15 @@ export function Store({
       const connected = Boolean(entry && entry.connected && !entry.stale);
 
       if (connected) {
+        try {
+          setSetupStage("restarting");
+          await syncHostedIntegrationTools(latest);
+        } catch (syncErr) {
+          console.warn(
+            "[Store] Failed to sync hosted integration tools after connect:",
+            syncErr
+          );
+        }
         setSetupProvider(null);
         setSetupTimedOut(false);
         setSetupLaunchUrl(null);
@@ -1145,6 +1201,15 @@ export function Store({
       console.error("Failed to disconnect:", err);
     } finally {
       await refreshIntegrations({ force: true });
+      try {
+        const latest = await getIntegrations({ force: true });
+        await syncHostedIntegrationTools(latest);
+      } catch (syncErr) {
+        console.warn(
+          `[Store] Failed to sync hosted integration tools after disconnect:`,
+          syncErr
+        );
+      }
       setConnecting(null);
     }
   }
@@ -1652,6 +1717,8 @@ export function Store({
                 <p className="text-sm text-[var(--text-secondary)] font-medium leading-relaxed mb-3">
                   {setupStage === "authorizing"
                     ? "Finish authorization in your browser. We'll update Entropic as soon as it's complete."
+                    : setupStage === "restarting"
+                    ? `Restarting your assistant so it can use ${INTEGRATION_NAMES[setupProvider]} tools. This takes a few seconds...`
                     : "Syncing your credentials with Entropic..."}
                 </p>
                 {setupTimedOut && !setupError && (
@@ -2150,6 +2217,8 @@ export function Store({
               <p className="text-sm text-[var(--text-secondary)] font-medium leading-relaxed mb-3">
                 {setupStage === "authorizing"
                   ? "Finish authorization in your browser. We'll update Entropic as soon as it's complete."
+                  : setupStage === "restarting"
+                  ? `Restarting your assistant so it can use ${INTEGRATION_NAMES[setupProvider]} tools. This takes a few seconds...`
                   : "Syncing your credentials with Entropic..."}
               </p>
               {setupTimedOut && !setupError && (

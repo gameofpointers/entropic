@@ -773,6 +773,16 @@ export function Dashboard({ status: _status, onRefresh: _onRefresh }: Props) {
         setImageGenerationModel(nextImageGenerationModel);
         dispatchBootstrap({ type: "bootstrap_loaded", payload: bootstrap });
 
+        if (bootstrap.gatewayContainerRunning) {
+          const gatewayRunning = await getGatewayStatusCached({ force: true });
+          if (!cancelled) {
+            dispatchBootstrap({
+              type: "gateway_snapshot",
+              gatewayRunning,
+            });
+          }
+        }
+
         const normalizedPatch: Partial<DesktopSettingsSnapshot> = {};
         if (storedUseLocal !== isLocal) {
           normalizedPatch.useLocalKeys = isLocal;

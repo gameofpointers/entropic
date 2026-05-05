@@ -778,7 +778,17 @@ export function getProxyUrl(): string {
       return API_ORIGIN.replace(/\/$/, "") + API_URL;
     }
     if (API_PROXY_TARGET) {
-      return API_PROXY_TARGET.replace(/\/$/, "") + API_URL;
+      let target = API_PROXY_TARGET.replace(/\/$/, "");
+      try {
+        const targetUrl = new URL(target);
+        if (targetUrl.hostname === "localhost" || targetUrl.hostname === "127.0.0.1") {
+          targetUrl.hostname = "host.docker.internal";
+          target = targetUrl.toString().replace(/\/$/, "");
+        }
+      } catch {
+        // not a valid URL, use as-is
+      }
+      return target + API_URL;
     }
     if (hostedFeaturesEnabled) {
       return `https://entropic.qu.ai${API_URL}`;
