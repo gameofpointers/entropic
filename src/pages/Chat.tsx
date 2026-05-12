@@ -470,6 +470,12 @@ type ChatToolActivity = {
   label: string;
   status: ChatToolActivityStatus;
   detail?: string;
+  input?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  resultSummary?: string;
+  query?: string;
+  url?: string;
+  links?: Array<{ title?: string; url: string; domain?: string }>;
   seq: number;
   ts: number;
 };
@@ -579,6 +585,16 @@ const THINKING_WORDS = [
   "Evolving",
   "Finalizing",
 ] as const;
+
+function randomThinkingWordIndex(exclude?: number): number {
+  const count = THINKING_WORDS.length;
+  if (count <= 1) return 0;
+  let next = Math.floor(Math.random() * count);
+  if (exclude !== undefined && next === exclude) {
+    next = (next + 1 + Math.floor(Math.random() * (count - 1))) % count;
+  }
+  return next;
+}
 
 function normalizeSessionsList(list: ChatSession[]): ChatSession[] {
   const byKey = new Map<string, ChatSession>();
@@ -700,6 +716,51 @@ function compactToolText(value: unknown): string | undefined {
   return text.length > 120 ? `${text.slice(0, 117).trimEnd()}...` : text;
 }
 
+function compactFirstToolText(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    const text = compactToolText(value);
+    if (text) return text;
+  }
+  return undefined;
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(kb < 10 ? 1 : 0)} KB`;
+  const mb = kb / 1024;
+  return `${mb.toFixed(mb < 10 ? 1 : 0)} MB`;
+}
+
+function toolRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function parseToolRecord(value: unknown): Record<string, unknown> | null {
+  const direct = toolRecord(value);
+  if (direct) return direct;
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (!text || (!text.startsWith("{") && !text.startsWith("["))) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return toolRecord(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function firstToolRecord(...values: unknown[]): Record<string, unknown> | undefined {
+  for (const value of values) {
+    const record = parseToolRecord(value);
+    if (record) return record;
+  }
+  return undefined;
+}
+
 function humanizeToolName(name: string): string {
   const cleaned = name.trim().replace(/^functions\./, "");
   if (!cleaned) return "Tool";
@@ -708,6 +769,164 @@ function humanizeToolName(name: string): string {
     .replace(/\s+/g, " ")
     .trim()
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function normalizeToolNameKey(name: string | undefined): string {
+  return (name || "").trim().toLowerCase().replace(/^functions\./, "").replace(/[\s.-]+/g, "_");
+}
+
+function isGenericToolName(name: string | undefined): boolean {
+  const normalized = normalizeToolNameKey(name);
+  return !normalized || normalized === "tool" || normalized === "function" || normalized === "unknown";
+}
+
+function isWebSearchToolName(name: string | undefined): boolean {
+  const normalized = normalizeToolNameKey(name);
+  return (
+    normalized === "web_search" ||
+    normalized === "search_query" ||
+    normalized === "web_run" ||
+    (normalized.includes("web") && normalized.includes("search"))
+  );
+}
+
+function isWebFetchToolName(name: string | undefined): boolean {
+  const normalized = normalizeToolNameKey(name);
+  return (
+    normalized === "web_fetch" ||
+    normalized === "open_url" ||
+    (normalized.includes("web") && (normalized.includes("fetch") || normalized.includes("open")))
+  );
+}
+
+function isHttpUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value.trim());
+}
+
+function domainFromUrl(raw: string | undefined): string | undefined {
+  if (!raw || !isHttpUrl(raw)) return undefined;
+  try {
+    return new URL(raw).hostname.replace(/^www\./, "");
+  } catch {
+    return undefined;
+  }
+}
+
+function toolInputFromAgentData(data: Record<string, unknown>): Record<string, unknown> | undefined {
+  return firstToolRecord(data.arguments, data.args, data.input, data.params);
+}
+
+function toolResultFromAgentData(data: Record<string, unknown>): Record<string, unknown> | undefined {
+  return firstToolRecord(data.result, data.output, data.response, data.partialResult);
+}
+
+function extractToolQuery(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string") {
+      const text = compactToolText(value);
+      if (text && !isHttpUrl(text)) return text;
+      continue;
+    }
+    const record = parseToolRecord(value);
+    if (!record) continue;
+    const direct =
+      compactToolText(record.query) ??
+      compactToolText(record.q) ??
+      compactToolText(record.search) ??
+      compactToolText(record.prompt);
+    if (direct) return direct;
+    const searchQuery = record.search_query;
+    if (Array.isArray(searchQuery)) {
+      for (const item of searchQuery) {
+        const itemRecord = parseToolRecord(item);
+        const q = itemRecord
+          ? compactToolText(itemRecord.q) ?? compactToolText(itemRecord.query)
+          : compactToolText(item);
+        if (q) return q;
+      }
+    } else {
+      const q = compactToolText(searchQuery);
+      if (q) return q;
+    }
+    const nested = firstToolRecord(record.arguments, record.args, record.input, record.params);
+    const nestedQuery = nested ? extractToolQuery(nested) : undefined;
+    if (nestedQuery) return nestedQuery;
+  }
+  return undefined;
+}
+
+function extractToolUrl(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && isHttpUrl(value)) return value.trim();
+    const record = parseToolRecord(value);
+    if (!record) continue;
+    for (const key of ["url", "finalUrl", "href", "link"] as const) {
+      const text = compactToolText(record[key]);
+      if (text && isHttpUrl(text)) return text;
+    }
+    const nested = firstToolRecord(record.arguments, record.args, record.input, record.params);
+    const nestedUrl = nested ? extractToolUrl(nested) : undefined;
+    if (nestedUrl) return nestedUrl;
+  }
+  return undefined;
+}
+
+function collectToolLinks(value: unknown, limit = 4): Array<{ title?: string; url: string; domain?: string }> {
+  const links: Array<{ title?: string; url: string; domain?: string }> = [];
+  const seen = new Set<string>();
+
+  function add(url: string, title?: unknown, domain?: unknown) {
+    const normalized = url.trim();
+    if (!isHttpUrl(normalized) || seen.has(normalized) || links.length >= limit) return;
+    seen.add(normalized);
+    links.push({
+      url: normalized,
+      title: compactToolText(title),
+      domain: compactToolText(domain) ?? domainFromUrl(normalized),
+    });
+  }
+
+  function visit(item: unknown, depth: number) {
+    if (links.length >= limit || depth > 3 || item == null) return;
+    if (typeof item === "string") {
+      const matches = item.match(/https?:\/\/[^\s)"'<>]+/gi) ?? [];
+      for (const match of matches) add(match);
+      return;
+    }
+    if (Array.isArray(item)) {
+      for (const child of item) visit(child, depth + 1);
+      return;
+    }
+    const record = parseToolRecord(item);
+    if (!record) return;
+    const url = extractToolUrl(record);
+    if (url) {
+      add(url, record.title ?? record.name, record.domain ?? record.site);
+    }
+    for (const key of ["results", "citations", "links", "items", "documents", "sources", "data"] as const) {
+      if (record[key] !== undefined) visit(record[key], depth + 1);
+    }
+  }
+
+  visit(value, 0);
+  return links;
+}
+
+function summarizeToolResult(value: unknown): string | undefined {
+  const record = parseToolRecord(value);
+  if (!record) return compactToolText(value);
+  for (const key of ["results", "citations", "links", "items", "documents", "sources"] as const) {
+    const child = record[key];
+    if (Array.isArray(child)) return `${child.length} result${child.length === 1 ? "" : "s"}`;
+  }
+  return (
+    compactToolText(record.summary) ??
+    compactToolText(record.result) ??
+    compactToolText(record.output) ??
+    compactToolText(record.message) ??
+    compactToolText(record.title) ??
+    compactToolText(record.status)
+  );
 }
 
 function toolStatusFromAgentData(data: Record<string, unknown>): ChatToolActivityStatus {
@@ -720,6 +939,20 @@ function toolStatusFromAgentData(data: Record<string, unknown>): ChatToolActivit
 }
 
 function toolDetailFromAgentData(data: Record<string, unknown>): string | undefined {
+  const args =
+    toolRecord(data.arguments) ??
+    toolRecord(data.args) ??
+    toolRecord(data.input) ??
+    toolRecord(data.params) ??
+    toolRecord(data.details);
+  const tookMs = typeof data.tookMs === "number" && Number.isFinite(data.tookMs)
+    ? data.tookMs
+    : typeof args?.tookMs === "number" && Number.isFinite(args.tookMs)
+      ? args.tookMs
+      : null;
+  const duration = tookMs !== null
+    ? `Finished in ${(tookMs / 1000).toFixed(tookMs < 10_000 ? 1 : 0)}s`
+    : undefined;
   return (
     compactToolText(data.title) ??
     compactToolText(data.message) ??
@@ -727,8 +960,37 @@ function toolDetailFromAgentData(data: Record<string, unknown>): string | undefi
     compactToolText(data.path) ??
     compactToolText(data.url) ??
     compactToolText(data.command) ??
-    compactToolText(data.error)
+    compactToolText(args?.query) ??
+    compactToolText(args?.path) ??
+    compactToolText(args?.url) ??
+    compactToolText(args?.command) ??
+    compactToolText(data.error) ??
+    duration
   );
+}
+
+function gatewayToolResultPayload(message: GatewayMessage): Record<string, unknown> | undefined {
+  const details = toolRecord(message.details) ?? {};
+  const direct = firstToolRecord(
+    details.result,
+    details.output,
+    details.response,
+    message.result,
+    message.output,
+    typeof message.content === "string" ? message.content : undefined,
+  );
+  if (direct) return direct;
+  if (!Array.isArray(message.content)) return undefined;
+  for (const block of message.content) {
+    const record = parseToolRecord(block);
+    if (!record) continue;
+    const nested = firstToolRecord(record.result, record.output, record.response, record.content, record.text);
+    if (nested) return nested;
+    if (Object.keys(record).some((key) => ["results", "citations", "url", "finalUrl", "summary"].includes(key))) {
+      return record;
+    }
+  }
+  return undefined;
 }
 
 function toolActivityFromAgentEvent(event: AgentEvent): ChatToolActivity | null {
@@ -745,15 +1007,179 @@ function toolActivityFromAgentEvent(event: AgentEvent): ChatToolActivity | null 
     compactToolText(data.callId) ??
     compactToolText(data.toolCallId) ??
     rawName;
+  const input = toolInputFromAgentData(data);
+  const result = toolResultFromAgentData(data);
+  const status = toolStatusFromAgentData(data);
+  const links = collectToolLinks(result ?? data);
   return {
     id,
     name: rawName,
     label: humanizeToolName(rawName),
-    status: toolStatusFromAgentData(data),
+    status,
     detail: toolDetailFromAgentData(data),
+    input,
+    result,
+    resultSummary: summarizeToolResult(result ?? data),
+    query: extractToolQuery(input, data),
+    url: extractToolUrl(input, result, data),
+    links: links.length > 0 ? links : undefined,
     seq: event.seq,
     ts: event.ts || Date.now(),
   };
+}
+
+function toolActivitiesFromGatewayMessage(
+  message: GatewayMessage | null | undefined,
+  event: Pick<ChatEvent, "seq">,
+): ChatToolActivity[] {
+  if (!message) return [];
+  const roleRaw = typeof message.role === "string" ? message.role.toLowerCase() : "assistant";
+  const ts = extractMessageTimestamp(message) ?? Date.now();
+  const seqBase = Number.isFinite(event.seq) ? event.seq * 100 : Date.now();
+
+  if (roleRaw === "assistant" && Array.isArray(message.content)) {
+    return message.content.reduce<ChatToolActivity[]>((activities, block, idx) => {
+      const record = toolRecord(block);
+      if (!record) return activities;
+      const type = compactToolText(record.type)?.toLowerCase().replace(/[_-]+/g, "") ?? "";
+      if (!["toolcall", "tooluse", "functioncall"].includes(type)) return activities;
+      const rawName =
+        compactFirstToolText(record.name, record.toolName, record.tool, record.functionName) ??
+        "tool";
+      const id =
+        compactFirstToolText(record.id, record.callId, record.toolCallId, record.functionCallId) ??
+        rawName;
+      const input = firstToolRecord(record.arguments, record.args, record.input, record.params);
+      activities.push({
+        id,
+        name: rawName,
+        label: humanizeToolName(rawName),
+        status: "running",
+        detail: toolDetailFromAgentData(record),
+        input,
+        query: extractToolQuery(input, record),
+        url: extractToolUrl(input, record),
+        links: collectToolLinks(input ?? record),
+        seq: seqBase + idx,
+        ts,
+      });
+      return activities;
+    }, []);
+  }
+
+  if (roleRaw === "toolresult" || roleRaw === "tool_result" || roleRaw === "tool") {
+    const details = toolRecord(message.details) ?? {};
+    const rawName =
+      compactFirstToolText(message.toolName, details.toolName, details.name, details.tool) ??
+      "tool";
+    const id = compactFirstToolText(message.toolCallId, details.toolCallId, details.callId) ?? rawName;
+    const isError = message.isError === true || details.isError === true;
+    const result = gatewayToolResultPayload(message);
+    const input = firstToolRecord(details.arguments, details.args, details.input, details.params);
+    const links = collectToolLinks(result ?? details ?? message);
+    return [{
+      id,
+      name: rawName,
+      label: humanizeToolName(rawName),
+      status: isError ? "error" : "complete",
+      detail: toolDetailFromAgentData({ ...details, ...message }),
+      input,
+      result,
+      resultSummary: summarizeToolResult(result ?? details ?? message),
+      query: extractToolQuery(input, result, details, message),
+      url: extractToolUrl(input, result, details, message),
+      links: links.length > 0 ? links : undefined,
+      seq: seqBase,
+      ts,
+    }];
+  }
+
+  return [];
+}
+
+function isGatewayToolOnlyMessage(
+  message: GatewayMessage | null | undefined,
+  activities: ChatToolActivity[],
+): boolean {
+  if (!message || activities.length === 0) return false;
+  const roleRaw = typeof message.role === "string" ? message.role.toLowerCase() : "assistant";
+  if (roleRaw === "toolresult" || roleRaw === "tool_result" || roleRaw === "tool") {
+    return true;
+  }
+  if (roleRaw === "assistant") {
+    return !extractMessageText(message).hasText;
+  }
+  return false;
+}
+
+function mergeToolActivities(
+  existing: ChatToolActivity[],
+  incoming: ChatToolActivity[],
+): ChatToolActivity[] {
+  let next = existing;
+  for (const activity of incoming) {
+    let existingIdx = next.findIndex((item) => item.id === activity.id);
+    if (existingIdx < 0 && activity.status !== "running") {
+      const incomingName = normalizeToolNameKey(activity.name);
+      for (let idx = next.length - 1; idx >= 0; idx -= 1) {
+        const item = next[idx];
+        if (item.status !== "running") continue;
+        const itemName = normalizeToolNameKey(item.name);
+        if (incomingName && itemName && incomingName === itemName) {
+          existingIdx = idx;
+          break;
+        }
+      }
+      if (existingIdx < 0 && isGenericToolName(activity.name)) {
+        for (let idx = next.length - 1; idx >= 0; idx -= 1) {
+          if (next[idx].status === "running") {
+            existingIdx = idx;
+            break;
+          }
+        }
+      }
+    }
+    next =
+      existingIdx >= 0
+        ? next.map((item, idx) =>
+            idx === existingIdx
+              ? (() => {
+                  const status =
+                    (item.status === "complete" || item.status === "error") && activity.status === "running"
+                      ? item.status
+                      : activity.status;
+                  const mergedName = isGenericToolName(activity.name) ? item.name : activity.name;
+                  return {
+                    ...item,
+                    ...activity,
+                    id: item.id,
+                    name: mergedName,
+                    label: isGenericToolName(activity.name) ? item.label : activity.label,
+                    status,
+                    detail: activity.detail ?? activity.resultSummary ?? item.detail,
+                    input: activity.input ?? item.input,
+                    result: activity.result ?? item.result,
+                    resultSummary: activity.resultSummary ?? item.resultSummary,
+                    query: activity.query ?? item.query,
+                    url: activity.url ?? item.url,
+                    links: activity.links?.length ? activity.links : item.links,
+                    seq: Math.max(item.seq, activity.seq),
+                    ts: item.ts || activity.ts,
+                  };
+                })()
+              : item,
+          )
+        : [...next, activity];
+  }
+  return next.sort((a, b) => a.seq - b.seq).slice(-8);
+}
+
+function toolLoadingStatus(activity: ChatToolActivity): string {
+  if (activity.status === "error") return `${activity.label} failed`;
+  if (activity.status === "complete") return `${activity.label} finished`;
+  if (isWebSearchToolName(activity.name)) return activity.query ? `Searching for ${activity.query}` : "Searching the web";
+  if (isWebFetchToolName(activity.name)) return activity.url ? `Reading ${domainFromUrl(activity.url) ?? activity.url}` : "Reading web page";
+  return `Using ${activity.label}`;
 }
 
 async function persistChatData(data: PersistedChatData): Promise<void> {
@@ -793,7 +1219,16 @@ async function persistChatData(data: PersistedChatData): Promise<void> {
         // Strip large previewUrl data from attachments to avoid bloating the store
         trimmed.messages[s.key] = msgs.slice(-MAX_PERSISTED_MESSAGES).map((m) =>
           m.attachments
-            ? { ...m, attachments: m.attachments.map(({ fileName, mimeType }) => ({ fileName, mimeType, previewUrl: "" })) }
+            ? {
+                ...m,
+                attachments: m.attachments.map(({ fileName, mimeType, omitted, byteLength }) => ({
+                  fileName,
+                  mimeType,
+                  previewUrl: "",
+                  omitted,
+                  byteLength,
+                })),
+              }
             : m,
         );
       }
@@ -1420,7 +1855,7 @@ export function Chat({
   const [savedWorkspaceImagePaths, setSavedWorkspaceImagePaths] = useState<Record<string, string>>({});
   const [toolActivityByRunId, setToolActivityByRunId] = useState<Record<string, ChatToolActivity[]>>({});
   const [activeToolRunId, setActiveToolRunId] = useState<string | null>(null);
-  const [loadingWordIndex, setLoadingWordIndex] = useState(0);
+  const [loadingWordIndex, setLoadingWordIndex] = useState(() => randomThinkingWordIndex());
   const [loadingWordChanging, setLoadingWordChanging] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [onboardingData, setOnboardingData] = useState<OnboardingData | null>(null);
@@ -3192,6 +3627,7 @@ export function Chat({
       }
       setIsLoading(false);
       setError("Response timed out waiting for stream activity. Please retry.");
+      finalizeRunningToolActivities(runId, "error");
       addDiag(`run timeout after ${Math.round(ACTIVE_RUN_IDLE_TIMEOUT_MS / 1000)}s idle runId=${runId}`);
       clearActiveRunTracking();
     }, ACTIVE_RUN_IDLE_TIMEOUT_MS);
@@ -3248,10 +3684,11 @@ export function Chat({
 
   useEffect(() => {
     if (!isLoading) {
-      setLoadingWordIndex(0);
+      setLoadingWordIndex((current) => randomThinkingWordIndex(current));
       setLoadingWordChanging(false);
       return;
     }
+    setLoadingWordIndex((current) => randomThinkingWordIndex(current));
     let settleTimer: number | null = null;
     const intervalId = window.setInterval(() => {
       setLoadingWordChanging(true);
@@ -3259,7 +3696,7 @@ export function Chat({
         window.clearTimeout(settleTimer);
       }
       settleTimer = window.setTimeout(() => {
-        setLoadingWordIndex((current) => (current + 1) % THINKING_WORDS.length);
+        setLoadingWordIndex((current) => randomThinkingWordIndex(current));
         setLoadingWordChanging(false);
         settleTimer = null;
       }, 180);
@@ -3640,6 +4077,7 @@ export function Chat({
           } else {
             setIsLoading(false);
             setError("Connection lost while waiting for response. Please retry.");
+            finalizeRunningToolActivities(activeRunIdRef.current, "error");
             addDiag(`active run interrupted by disconnect runId=${activeRunIdRef.current}`);
             clearActiveRunTracking();
           }
@@ -3711,6 +4149,7 @@ export function Chat({
             recoverInterruptedActiveRun("active run interrupted by gateway error");
           } else {
             setIsLoading(false);
+            finalizeRunningToolActivities(activeRunIdRef.current, "error");
             addDiag(`active run interrupted by gateway error runId=${activeRunIdRef.current}`);
             clearActiveRunTracking();
           }
@@ -3774,6 +4213,35 @@ export function Chat({
     handlersRef.current = {};
   }
 
+  function recordToolActivities(runId: string, activities: ChatToolActivity[]) {
+    if (!runId || activities.length === 0) return;
+    setToolActivityByRunId((prev) => ({
+      ...prev,
+      [runId]: mergeToolActivities(prev[runId] ?? [], activities),
+    }));
+  }
+
+  function finalizeRunningToolActivities(runId: string, status: Exclude<ChatToolActivityStatus, "running"> = "complete") {
+    if (!runId) return;
+    setToolActivityByRunId((prev) => {
+      const activities = prev[runId];
+      if (!activities?.some((activity) => activity.status === "running")) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [runId]: activities.map((activity) =>
+          activity.status === "running"
+            ? {
+                ...activity,
+                status,
+              }
+            : activity,
+        ),
+      };
+    });
+  }
+
   function describeAgentActivity(evt: AgentEvent): string | null {
     const { stream, data } = evt;
     if (stream === "tool") {
@@ -3817,31 +4285,7 @@ export function Chat({
     refreshActiveRunTimeout(event.runId);
     const toolActivity = toolActivityFromAgentEvent(event);
     if (toolActivity) {
-      setToolActivityByRunId((prev) => {
-        const existing = prev[event.runId] ?? [];
-        const existingIdx = existing.findIndex((item) => item.id === toolActivity.id);
-        const next =
-          existingIdx >= 0
-            ? existing.map((item, idx) =>
-                idx === existingIdx
-                  ? {
-                      ...item,
-                      ...toolActivity,
-                      status:
-                        item.status === "complete" && toolActivity.status === "running"
-                          ? item.status
-                          : toolActivity.status,
-                    }
-                  : item,
-              )
-            : [...existing, toolActivity];
-        return {
-          ...prev,
-          [event.runId]: next
-            .sort((a, b) => a.seq - b.seq)
-            .slice(-8),
-        };
-      });
+      recordToolActivities(event.runId, [toolActivity]);
     }
     const status = describeAgentActivity(event);
     if (status) {
@@ -3975,6 +4419,7 @@ export function Chat({
               },
             ];
           });
+          finalizeRunningToolActivities(runId, "complete");
           setThinkingStatus(null);
           setError(null);
           setIsLoading(false);
@@ -4049,12 +4494,35 @@ export function Chat({
     ) {
       migrateSessionKey(activeRunSessionRef.current, knownSessionKey);
     }
+    const gatewayToolActivities = event.message
+      ? toolActivitiesFromGatewayMessage(event.message as GatewayMessage, event as ChatEvent)
+      : [];
+    const isGatewayToolOnlyEvent = isGatewayToolOnlyMessage(
+      event.message as GatewayMessage | undefined,
+      gatewayToolActivities,
+    );
+    if (eventRunId && gatewayToolActivities.length > 0) {
+      recordToolActivities(eventRunId, gatewayToolActivities);
+      const timings = runTimingsRef.current[eventRunId];
+      if (timings && !timings.toolSeenAt) {
+        timings.toolSeenAt = Date.now();
+        addDiag(`timing tool_activity runId=${eventRunId} t=${timings.toolSeenAt - timings.startedAt}ms`);
+      }
+      if (isActiveRun) {
+        setThinkingStatus(toolLoadingStatus(gatewayToolActivities[gatewayToolActivities.length - 1]));
+      }
+    }
     const isActiveRunTerminalEvent = Boolean(
       eventRunId &&
       activeRunIdRef.current === eventRunId &&
-      (event.state === "final" || event.state === "error" || event.state === "aborted")
+      (event.state === "final" || event.state === "error" || event.state === "aborted") &&
+      !isGatewayToolOnlyEvent
     );
     if (isActiveRunTerminalEvent) {
+      finalizeRunningToolActivities(
+        eventRunId,
+        event.state === "final" ? "complete" : "error",
+      );
       setIsLoading(false);
       setThinkingStatus(null);
       if (
@@ -4161,17 +4629,20 @@ export function Chat({
             source: event.state === "final" ? "final_event" : "delta",
           });
         }
-      } else if (event.state === "final" && eventRunId && knownSessionKey) {
+      } else if (event.state === "final" && eventRunId && knownSessionKey && !isGatewayToolOnlyEvent) {
         addDiag(`final event missing payload runId=${eventRunId}; attempting history recovery`);
         void recoverFinalRunFromHistory(eventRunId, knownSessionKey);
       }
-      if (event.state === "final") {
+      if (event.state === "final" && !isGatewayToolOnlyEvent) {
+        if (eventRunId) {
+          finalizeRunningToolActivities(eventRunId, "complete");
+        }
         setIsLoading(false);
         if (eventRunId && activeRunIdRef.current === eventRunId) {
           clearActiveRunTracking();
         }
       }
-      if (event.state === "final" && eventRunId) {
+      if (event.state === "final" && eventRunId && !isGatewayToolOnlyEvent) {
         const timings = runTimingsRef.current[eventRunId];
         if (timings && !timings.finalAt) {
           timings.finalAt = Date.now();
@@ -4256,6 +4727,9 @@ export function Chat({
         setShowOutOfCreditsModal(true);
       }
       setIsLoading(false);
+      if (eventRunId) {
+        finalizeRunningToolActivities(eventRunId, "error");
+      }
       if (eventRunId && activeRunIdRef.current === eventRunId) {
         clearActiveRunTracking();
       }
@@ -4287,6 +4761,9 @@ export function Chat({
       }
     } else if (event.state === "aborted") {
       setIsLoading(false);
+      if (eventRunId) {
+        finalizeRunningToolActivities(eventRunId, "error");
+      }
       if (eventRunId && activeRunIdRef.current === eventRunId) {
         clearActiveRunTracking();
       }
@@ -6327,56 +6804,96 @@ export function Chat({
 
   function renderToolActivityList(activities: ChatToolActivity[]) {
     if (activities.length === 0) return null;
+    const ordered = [...activities].sort((a, b) => b.seq - a.seq);
+    const hasRunning = ordered.some((activity) => activity.status === "running");
+    const completeCount = ordered.filter((activity) => activity.status === "complete").length;
+    const failedCount = ordered.filter((activity) => activity.status === "error").length;
+    const runningCount = ordered.filter((activity) => activity.status === "running").length;
+
+    const statusText = (activity: ChatToolActivity) => {
+      if (activity.status === "error") return "Failed";
+      if (activity.status === "complete") return "Success";
+      if (isWebSearchToolName(activity.name)) return "Searching";
+      if (isWebFetchToolName(activity.name)) return "Reading";
+      return "Running";
+    };
+    const displayLabel = (activity: ChatToolActivity) => {
+      if (isWebSearchToolName(activity.name)) return "Web search";
+      if (isWebFetchToolName(activity.name)) return "Web page";
+      return activity.label;
+    };
+    const summaryText = (activity: ChatToolActivity) => {
+      if (isWebSearchToolName(activity.name)) {
+        return activity.query ? activity.query : activity.resultSummary ?? activity.detail ?? "Searching the web";
+      }
+      if (isWebFetchToolName(activity.name)) {
+        return activity.url ? domainFromUrl(activity.url) ?? activity.url : activity.detail ?? "Reading web page";
+      }
+      return activity.resultSummary ?? activity.detail ?? "";
+    };
+    const renderStatusIcon = (activity: ChatToolActivity) => {
+      if (activity.status === "error") return <X className="h-3.5 w-3.5" />;
+      if (activity.status === "complete") return <Check className="h-3.5 w-3.5" />;
+      return <Loader2 className="h-3.5 w-3.5 animate-spin" />;
+    };
+    const headerMeta =
+      failedCount > 0
+        ? `${failedCount} failed`
+        : hasRunning
+          ? `${runningCount} running`
+          : `${completeCount} succeeded`;
+    const headerIcon =
+      failedCount > 0
+        ? <X className="h-3.5 w-3.5 text-red-500" />
+        : hasRunning
+          ? <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--text-tertiary)]" />
+          : <Check className="h-3.5 w-3.5 text-emerald-500" />;
+
     return (
-      <div className="space-y-1.5">
-        {activities.map((activity) => {
-          const statusClass =
-            activity.status === "error"
-              ? "border-red-500/20 bg-red-500/10 text-red-400"
-              : activity.status === "complete"
-                ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
-                : "border-[var(--border-subtle)] bg-[var(--bg-tertiary)]/60 text-[var(--text-secondary)]";
-          const icon =
-            activity.status === "error" ? (
-              <X className="h-3.5 w-3.5" />
-            ) : activity.status === "complete" ? (
-              <Check className="h-3.5 w-3.5" />
-            ) : (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      <details className="group text-xs text-[var(--text-secondary)]" open={hasRunning}>
+        <summary className="flex cursor-pointer list-none items-center gap-2 py-1 [&::-webkit-details-marker]:hidden">
+          <span className="shrink-0">{headerIcon}</span>
+          <span className="shrink-0 font-medium text-[var(--text-primary)]">Tool calls</span>
+          <span className="shrink-0 text-[var(--text-tertiary)]">{headerMeta}</span>
+          <ChevronDown className="ml-auto h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-180" />
+        </summary>
+        <div className="mt-1 space-y-1 pl-5">
+          {ordered.map((activity) => {
+            const summary = summaryText(activity);
+            const firstLink = activity.links?.[0] ?? (activity.url ? { url: activity.url } : undefined);
+            const linkLabel = firstLink?.domain ?? domainFromUrl(firstLink?.url) ?? firstLink?.url;
+            return (
+              <div key={activity.id} className="flex min-w-0 items-center gap-2">
+                <span className="shrink-0">{renderStatusIcon(activity)}</span>
+                <span className="shrink-0 text-[var(--text-primary)]">{displayLabel(activity)}</span>
+                <span className="shrink-0 text-[var(--text-tertiary)]">{statusText(activity)}</span>
+                {summary ? (
+                  <span className="min-w-0 truncate text-[var(--text-tertiary)]">{summary}</span>
+                ) : null}
+                {firstLink?.url && linkLabel ? (
+                  <a
+                    href={firstLink.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="ml-auto inline-flex min-w-0 shrink items-center gap-1 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
+                    title={firstLink.url}
+                  >
+                    <Globe className="h-3 w-3 shrink-0" />
+                    <span className="truncate">{linkLabel}</span>
+                  </a>
+                ) : null}
+              </div>
             );
-          return (
-            <div
-              key={activity.id}
-              className={clsx(
-                "flex min-w-0 items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs",
-                statusClass,
-              )}
-            >
-              <span className="shrink-0">{icon}</span>
-              <span className="min-w-0 truncate font-medium text-[var(--text-primary)]">
-                {activity.label}
-              </span>
-              <span className="shrink-0 text-[10px] uppercase tracking-[0.18em] opacity-70">
-                {activity.status === "complete"
-                  ? "done"
-                  : activity.status === "error"
-                    ? "error"
-                    : "running"}
-              </span>
-              {activity.detail ? (
-                <span className="min-w-0 truncate text-[var(--text-tertiary)]">
-                  {activity.detail}
-                </span>
-              ) : null}
-            </div>
-          );
-        })}
-      </div>
+          })}
+        </div>
+      </details>
     );
   }
 
   function renderMessageAttachments(message: Message) {
-    const attachments = (message.attachments || []).filter((attachment) => attachment.previewUrl);
+    const attachments = (message.attachments || []).filter(
+      (attachment) => attachment.previewUrl || attachment.omitted,
+    );
     if (attachments.length === 0) {
       return null;
     }
@@ -6401,9 +6918,16 @@ export function Chat({
                   className="block h-auto max-h-[360px] w-full object-contain"
                 />
               ) : isAudio ? (
-                <div className="px-3 pt-3">
-                  <audio src={attachment.previewUrl} controls className="w-full" />
-                </div>
+                attachment.previewUrl ? (
+                  <div className="px-3 pt-3">
+                    <audio src={attachment.previewUrl} controls className="w-full" />
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 px-3 pt-3 text-sm text-[var(--text-secondary)]">
+                    <Music2 className="h-4 w-4" />
+                    <span>Audio available only in the live reply</span>
+                  </div>
+                )
               ) : (
                 <div className="flex items-center gap-2 px-3 pt-3 text-sm text-[var(--text-secondary)]">
                   <FileText className="h-4 w-4" />
@@ -6411,7 +6935,10 @@ export function Chat({
                 </div>
               )}
               <div className="flex items-center justify-between gap-3 px-3 py-2 text-xs text-[var(--text-secondary)]">
-                <span className="min-w-0 truncate">{attachment.fileName}</span>
+                <span className="min-w-0 truncate">
+                  {attachment.fileName}
+                  {attachment.byteLength ? ` · ${formatBytes(attachment.byteLength)}` : ""}
+                </span>
                 {message.role === "assistant" && attachment.mimeType.startsWith("image/") ? (
                   <button
                     type="button"
@@ -7145,6 +7672,7 @@ export function Chat({
       return null;
     }
     const loadingWord = THINKING_WORDS[loadingWordIndex % THINKING_WORDS.length] ?? "Thinking";
+    const activeToolActivities = activeToolRunId ? toolActivityByRunId[activeToolRunId] ?? [] : [];
     return (
       <div className="flex w-full min-w-0 justify-start py-2">
         <div className="flex w-full min-w-0 items-start gap-3.5">
@@ -7179,11 +7707,16 @@ export function Chat({
             >
               {loadingWord}
             </span>
+            {activeToolActivities.length > 0 ? (
+              <div className="mt-3 max-w-xl">
+                {renderToolActivityList(activeToolActivities)}
+              </div>
+            ) : null}
           </div>
         </div>
       </div>
     );
-  }, [activeToolRunId, chatAgentAvatarUrl, chatAgentName, isLoading, loadingWordChanging, loadingWordIndex, messages, openAgentProfileSettings]);
+  }, [activeToolRunId, chatAgentAvatarUrl, chatAgentName, isLoading, loadingWordChanging, loadingWordIndex, messages, openAgentProfileSettings, toolActivityByRunId]);
 
   const activeDraft = currentSession
     ? activeComposerMode === "shell"

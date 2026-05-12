@@ -11,6 +11,8 @@ export type MessageAttachment = {
   fileName: string;
   mimeType: string;
   previewUrl: string;
+  omitted?: boolean;
+  byteLength?: number;
 };
 
 export type CalendarEvent = {
@@ -78,6 +80,12 @@ export const INTERNAL_USER_PROMPT_PREFIX = "[[ENTROPIC_INTERNAL_PROMPT]]";
 
 export const BILLING_RECOVERY_MESSAGE =
   "You're out of credits. Add credits to continue using Entropic in proxy mode.";
+
+const CHAT_HISTORY_OMITTED_PLACEHOLDER = "[chat.history omitted: message too large]";
+
+function isChatHistoryOmittedPlaceholder(raw?: string | null): boolean {
+  return (raw || "").trim() === CHAT_HISTORY_OMITTED_PLACEHOLDER;
+}
 
 // ── Slash-command parsing ──────────────────────────────────────
 
@@ -488,7 +496,9 @@ export function stripOpenClawStatusLines(raw: string): string {
 
 export function sanitizeAssistantDisplayContent(raw: string): string {
   if (!raw) return "";
+  if (isChatHistoryOmittedPlaceholder(raw)) return "";
   let text = stripConversationMetadata(raw);
+  if (isChatHistoryOmittedPlaceholder(text)) return "";
   text = stripExternalUntrustedSections(text);
   text = stripOpenClawStatusLines(text);
 
@@ -807,6 +817,65 @@ function normalizeGatewayMarker(value: unknown): string {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
+function gatewayMediaAttachmentFromBlock(block: unknown, index: number): MessageAttachment | null {
+  if (!block || typeof block !== "object" || Array.isArray(block)) {
+    return null;
+  }
+  const entry = block as Record<string, unknown>;
+  const type = normalizeGatewayMarker(entry.type);
+  if (type !== "audio" && type !== "input_audio") {
+    return null;
+  }
+  const source = entry.source && typeof entry.source === "object" && !Array.isArray(entry.source)
+    ? (entry.source as Record<string, unknown>)
+    : entry;
+  const mimeType =
+    typeof source.media_type === "string"
+      ? source.media_type
+      : typeof source.mimeType === "string"
+        ? source.mimeType
+        : typeof entry.mimeType === "string"
+          ? entry.mimeType
+          : "audio/wav";
+  const rawData = typeof source.data === "string" ? source.data : "";
+  const extension = mimeType.includes("mpeg")
+    ? "mp3"
+    : mimeType.includes("ogg")
+      ? "ogg"
+      : mimeType.includes("webm")
+        ? "webm"
+        : "wav";
+  const fileName =
+    typeof entry.fileName === "string"
+      ? entry.fileName
+      : typeof entry.name === "string"
+        ? entry.name
+        : `audio-${index + 1}.${extension}`;
+  const omitted = source.omitted === true || entry.omitted === true || !rawData;
+  const bytes =
+    typeof source.bytes === "number" && Number.isFinite(source.bytes)
+      ? source.bytes
+      : typeof entry.bytes === "number" && Number.isFinite(entry.bytes)
+        ? entry.bytes
+        : undefined;
+  return {
+    fileName,
+    mimeType,
+    previewUrl: rawData ? `data:${mimeType};base64,${rawData}` : "",
+    omitted,
+    byteLength: bytes,
+  };
+}
+
+function extractGatewayMediaAttachments(message: GatewayMessage): MessageAttachment[] {
+  if (!Array.isArray(message.content)) {
+    return [];
+  }
+  return message.content
+    .map((block, index) => gatewayMediaAttachmentFromBlock(block, index))
+    .filter((attachment): attachment is MessageAttachment => Boolean(attachment));
+}
+
 export function normalizeGatewayMessage(message: GatewayMessage, id: string): Message | null {
   if (isChannelOriginGatewayMessage(message)) {
     return null;
@@ -819,21 +888,32 @@ export function normalizeGatewayMessage(message: GatewayMessage, id: string): Me
   }
   const { text, hasText, hasNonText } = extractMessageText(message);
   const messageTimestamp = extractMessageTimestamp(message);
+  const mediaAttachments = extractGatewayMediaAttachments(message);
+  if (hasText && isChatHistoryOmittedPlaceholder(text)) {
+    return null;
+  }
   if (roleRaw === "user") {
-    if (!hasText) return null;
+    if (!hasText && mediaAttachments.length === 0) return null;
     const normalized = normalizeUserContent(text, messageTimestamp);
-    if (!normalized.content) return null;
-    return { id, role: "user", content: normalized.content, sentAt: normalized.sentAt };
+    if (!normalized.content && mediaAttachments.length === 0) return null;
+    return {
+      id,
+      role: "user",
+      content: normalized.content,
+      sentAt: normalized.sentAt,
+      attachments: mediaAttachments.length > 0 ? mediaAttachments : undefined,
+    };
   }
   if (roleRaw === "assistant") {
     const assistantError = extractAssistantErrorFromGatewayMessage(message);
-    if (!hasText && !hasNonText && !assistantError) return null;
+    if (!hasText && !hasNonText && !assistantError && mediaAttachments.length === 0) return null;
     if (!hasText) {
-      if (!assistantError) return null;
+      if (!assistantError && mediaAttachments.length === 0) return null;
       return {
         id,
         role: "assistant",
-        content: assistantError,
+        content: assistantError || "",
+        attachments: mediaAttachments.length > 0 ? mediaAttachments : undefined,
         sentAt: messageTimestamp ?? Date.now(),
       };
     }
@@ -847,6 +927,7 @@ export function normalizeGatewayMessage(message: GatewayMessage, id: string): Me
       role: "assistant",
       content: resolvedContent,
       assistantPayload: prepared.assistantPayload,
+      attachments: mediaAttachments.length > 0 ? mediaAttachments : undefined,
       sentAt: messageTimestamp,
     };
   }

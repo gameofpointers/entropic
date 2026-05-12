@@ -51,6 +51,7 @@ const MODEL_PRICING: Record<string, ModelPricing> = {
   "venice/openai-gpt-55": { input: 750, output: 4500 },
   "venice/deepseek-v3.2": { input: 40, output: 58 },
   "venice/zai-org-glm-4.7-flash": { input: 16, output: 60 },
+  "venice/olafangensan-glm-4.7-flash-heretic": { input: 17, output: 96 },
   "venice/venice-uncensored-1-2": { input: 24, output: 108 },
   "venice/openai-gpt-oss-120b": { input: 9, output: 36 },
 };

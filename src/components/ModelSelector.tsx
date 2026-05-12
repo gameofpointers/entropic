@@ -11,6 +11,7 @@ export const PROXY_MODELS: Model[] = [
   { id: "venice/openai-gpt-55", name: "GPT-5.5 (Deanonymized)", provider: "Venice", tier: "premium" },
   { id: "venice/deepseek-v3.2", name: "DeepSeek V3.2 (Private)", provider: "Venice", tier: "reasoning" },
   { id: "venice/zai-org-glm-4.7-flash", name: "GLM 4.7 Flash (Private)", provider: "Venice", tier: "fast" },
+  { id: "venice/olafangensan-glm-4.7-flash-heretic", name: "GLM 4.7 Flash Heretic (Private)", provider: "Venice", tier: "fast" },
   { id: "venice/venice-uncensored-1-2", name: "Venice Uncensored 1.2 (Private)", provider: "Venice", tier: "fast" },
   { id: "venice/openai-gpt-oss-120b", name: "GPT OSS 120B (Private)", provider: "Venice", tier: "fast" },
   { id: "openrouter/free", name: "OpenRouter Free (Router)", provider: "OpenRouter", tier: "fast", group: "OpenRouter" },
